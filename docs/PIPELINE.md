@@ -68,7 +68,7 @@ langfuse  → REQUIRES_CAPABILITY → database
 awx       → REQUIRES_CAPABILITY → database
 ```
 
-The resolver finds all providers for a required capability and presents valid alternatives. No hardcoded taxonomy — capabilities are derived from token normalization across chart names, CRD kinds, env var prefixes, and URL schemes.
+The resolver finds all providers for a required capability and presents valid alternatives. No hardcoded taxonomy — capabilities and cross-app dependencies are derived from known working configurations in Docker Compose stacks. When thousands of community compose files show that langfuse always pairs with postgres, and awx always pairs with postgres, that's observed evidence — not a manual declaration. The compose files ARE the training data for which apps connect to which, and what alternatives exist.
 
 ## The Three-Way Join
 
