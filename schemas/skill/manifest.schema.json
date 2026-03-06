@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill-manifest-2.0",
+  "title": "Skill Manifest",
+  "description": "Resource-level manifest describing a service resource, its operations, fields, and field references to canonical fact URIs.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "service",
+    "resource",
+    "description",
+    "operations",
+    "fields",
+    "field_refs"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.0",
+      "description": "Schema version identifier. Must be 2.0."
+    },
+    "service": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "description": "Service identifier (e.g., 'authentik', 'traefik', 'cert-manager')."
+    },
+    "resource": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "description": "Resource identifier within the service (e.g., 'oauth2', 'flows-instances')."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable description of the resource."
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "create",
+          "list",
+          "retrieve",
+          "update",
+          "partial_update",
+          "replace",
+          "delete"
+        ]
+      },
+      "description": "List of operations available for this resource."
+    },
+    "fields": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_]*$"
+      },
+      "description": "List of field names for this resource. Each must have a corresponding fields/<name>.json file."
+    },
+    "field_refs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^facts://[a-z0-9_-]+/[a-z0-9_-]+#[a-z0-9_]+$"
+      },
+      "description": "Map of field name to canonical fact URI. Keys must be field names from the fields array. Values are facts://service/resource#field URIs."
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{12}$",
+      "description": "SHA256 content hash (12-char truncated hex) for incremental ingest detection. Computed from canonical JSON of all other fields."
+    }
+  }
+}

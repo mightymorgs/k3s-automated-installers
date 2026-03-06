@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill-operation",
+  "title": "Skill Operation",
+  "description": "Schema for a single API operation (create, list, update, delete, etc.).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "path",
+    "method",
+    "endpoint",
+    "action",
+    "description",
+    "idempotent",
+    "required_fields",
+    "optional_fields",
+    "requires",
+    "outputs",
+    "depends_on"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.0"
+    },
+    "path": {
+      "type": "string",
+      "description": "Three-segment operation path: service/resource/operation (no .md extension).",
+      "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+/[a-z0-9_-]+$"
+    },
+    "method": {
+      "type": "string",
+      "description": "HTTP method for this operation.",
+      "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "API endpoint path, must start with /.",
+      "pattern": "^/"
+    },
+    "action": {
+      "type": "string",
+      "description": "OpenAPI operationId or equivalent action identifier."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this operation does."
+    },
+    "idempotent": {
+      "type": "boolean",
+      "description": "Whether repeating this operation produces the same result."
+    },
+    "required_fields": {
+      "type": "array",
+      "description": "Field names that must be provided for this operation.",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "optional_fields": {
+      "type": "array",
+      "description": "Field names that may optionally be provided.",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "response_key_fields": {
+      "type": "array",
+      "description": "Key fields returned in the response (optional, for create/mutate ops).",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "requires": {
+      "type": "array",
+      "description": "Fact URIs that must be available before this operation can run.",
+      "items": { "$ref": "#/$defs/fact_uri" }
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Map of fact URI -> response field name for facts produced by this operation.",
+      "propertyNames": { "$ref": "#/$defs/fact_uri" },
+      "additionalProperties": { "type": "string" }
+    },
+    "depends_on": {
+      "type": "array",
+      "description": "Operations that must run before this one to satisfy field dependencies.",
+      "items": { "$ref": "#/$defs/dependency" }
+    },
+    "producer_type": {
+      "type": "string",
+      "description": "Classification of how this operation produces facts: 'creatable' for create/update ops, 'observable' for read/list ops that expose facts, 'none' for delete/options/head.",
+      "enum": ["creatable", "observable", "none"]
+    },
+    "check_with": {
+      "type": "object",
+      "description": "Idempotency check: which list operation + match field to use for pre-flight dedup.",
+      "required": ["operation", "match_field"],
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "type": "string",
+          "description": "Operation name to use for checking (e.g. 'list')."
+        },
+        "match_field": {
+          "type": "string",
+          "description": "Field name to match on for dedup."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fact_uri": {
+      "type": "string",
+      "description": "Canonical fact URI: facts://service/resource#field",
+      "pattern": "^facts://[a-z0-9_-]+/[a-z0-9_-]+#[a-z0-9_]+$"
+    },
+    "operation_path": {
+      "type": "string",
+      "description": "Three-segment operation path: service/resource/operation",
+      "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+/[a-z0-9_-]+$"
+    },
+    "dependency": {
+      "type": "object",
+      "description": "A dependency on another operation via a field reference.",
+      "required": ["path", "field", "source", "fact_ref"],
+      "properties": {
+        "path": { "$ref": "#/$defs/operation_path" },
+        "field": {
+          "type": "string",
+          "description": "Field name in this operation that references the dependency."
+        },
+        "source": {
+          "type": "string",
+          "description": "How this dependency was determined. Format: adapter_name or adapter_name:detail.",
+          "pattern": "^[a-z_]+[a-z0-9_]*(:[a-z0-9_]+)?$"
+        },
+        "fact_ref": { "$ref": "#/$defs/fact_uri" },
+        "lineage_type": {
+          "type": "string",
+          "description": "How the field value relates to the target fact.",
+          "enum": ["copy", "derive", "reference"]
+        },
+        "discriminator_value": {
+          "type": ["string", "null"],
+          "description": "For polymorphic fields, the discriminator value that selects this target."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

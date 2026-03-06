@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "crd-kind-v1.0",
+  "title": "CRD Kind Skill",
+  "description": "Per-Kind CRD skill artifact with input refs, output declarations, and execution semantics.",
+  "type": "object",
+  "required": [
+    "schema_version", "kind", "group", "version", "plural",
+    "scope", "service", "description",
+    "input_refs", "output_declarations", "config_fields",
+    "status_conditions", "execution"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "kind": { "type": "string", "minLength": 1 },
+    "group": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^v[0-9]" },
+    "plural": { "type": "string", "pattern": "^[a-z]" },
+    "scope": { "type": "string", "enum": ["namespaced", "cluster"] },
+    "service": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+    "description": { "type": "string", "minLength": 1 },
+    "input_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/input_ref" }
+    },
+    "output_declarations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/output_declaration" }
+    },
+    "config_fields": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/config_field" }
+    },
+    "status_conditions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "execution": { "$ref": "#/$defs/execution" }
+  },
+  "$defs": {
+    "crdfact_uri": {
+      "type": "string",
+      "pattern": "^crdfacts://[a-z0-9._-]+/[A-Z][a-zA-Z]+#[a-zA-Z0-9_]+$"
+    },
+    "input_ref": {
+      "type": "object",
+      "required": ["field", "target_kind", "target_group", "role", "required", "cross_namespace", "fact_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string" },
+        "target_kind": { "type": "string" },
+        "target_group": { "type": "string" },
+        "role": { "type": "string", "const": "input_ref" },
+        "required": { "type": "boolean" },
+        "cross_namespace": { "type": "boolean" },
+        "fact_ref": { "$ref": "#/$defs/crdfact_uri" }
+      }
+    },
+    "output_declaration": {
+      "type": "object",
+      "required": ["field", "produces_kind", "produces_group", "role", "fact_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string" },
+        "produces_kind": { "type": "string" },
+        "produces_group": { "type": "string" },
+        "role": { "type": "string", "const": "output_declaration" },
+        "fact_ref": { "$ref": "#/$defs/crdfact_uri" }
+      }
+    },
+    "config_field": {
+      "type": "object",
+      "required": ["field", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string" },
+        "type": { "type": "string" },
+        "description": { "type": "string" },
+        "default": {}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["method"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "enum": ["kubectl_apply"] },
+        "wait_condition": { "type": "string" }
+      }
+    }
+  }
+}

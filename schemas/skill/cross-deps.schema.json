@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cross-App Dependency Sidecar",
+  "description": "Per-service cross-app dependency edges. scoped_to is null in catalog (unscoped), array in catalog/skills/api/ (scoped).",
+  "type": "object",
+  "required": ["service", "scoped_to", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "service": { "type": "string" },
+    "scoped_to": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "extraction_method": { "type": "string", "enum": ["haiku", "manual", "structural", "ollama"] },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_op", "target_op", "fields", "evidence", "confidence"],
+        "additionalProperties": false,
+        "properties": {
+          "source_op": { "type": "string", "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+/[a-z_]+$" },
+          "target_op": { "type": "string", "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+/[a-z_]+$" },
+          "fields": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "source_fact": { "type": "string", "pattern": "^facts://[a-z0-9_-]+/[a-z0-9_-]+#[a-zA-Z0-9_]+$" },
+          "target_fact": { "type": "string", "pattern": "^facts://[a-z0-9_-]+/[a-z0-9_-]+#[a-zA-Z0-9_]+$" },
+          "evidence": { "type": "string" },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "helm-chart-v1.0",
+  "title": "Helm Chart Spec",
+  "description": "Helm chart install configuration with conversion pipeline metadata.",
+  "type": "object",
+  "required": [
+    "schema_version", "chart", "service", "description",
+    "install_config", "namespace", "execution", "produces_kinds"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "chart": { "type": "string", "minLength": 1 },
+    "repository": { "type": "string", "format": "uri" },
+    "version": { "type": "string" },
+    "service": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+    "description": { "type": "string", "minLength": 1 },
+    "install_config": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "type"],
+        "properties": {
+          "field": { "type": "string" },
+          "type": { "type": "string" },
+          "default": {},
+          "description": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "feature_gates": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
+    "namespace": { "type": "string" },
+    "execution": {
+      "type": "object",
+      "required": ["method"],
+      "properties": {
+        "method": { "type": "string", "enum": ["helm_install"] },
+        "convert_to": { "type": "object" },
+        "wait": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "produces_kinds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "CRD Kinds this chart installs, format: group/Kind"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill Field",
+  "description": "Per-field detail with type, constraints, and canonical fact ref",
+  "type": "object",
+  "required": ["name", "type", "description", "optional", "cardinality"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "fact_ref": {
+      "type": "string",
+      "pattern": "^facts://[a-z0-9_-]+/[a-z0-9_-]+#[a-z0-9_-]+$"
+    },
+    "optional": {
+      "type": "boolean",
+      "description": "Resource-level default optionality (from OpenAPI). Per-operation truth is in operation.required_fields/optional_fields and the corresponding Neo4j edge type."
+    },
+    "cardinality": {
+      "type": "string",
+      "enum": ["one", "many"]
+    },
+    "values": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "default": {
+      "description": "Default value for optional fields (scalars only). Uses anyOf instead of oneOf to avoid integer/number ambiguity.",
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    },
+    "skip_hint": {
+      "type": "string"
+    }
+  }
+}

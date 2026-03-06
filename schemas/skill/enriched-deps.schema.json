@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Enriched Dependencies Sidecar",
+  "description": "Per-service intra-service dependency edges discovered by algorithmic candidate generation + LLM confirmation.",
+  "type": "object",
+  "required": ["service", "generated_at", "extraction_method", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "service": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "extraction_method": { "type": "string", "enum": ["ollama", "manual"] },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_op", "target_op", "field", "fact_ref", "source", "lineage_type", "evidence", "confidence"],
+        "additionalProperties": false,
+        "properties": {
+          "source_op": {
+            "type": "string",
+            "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+/[a-z0-9_-]+$",
+            "description": "Source operation path (svc/resource/op)"
+          },
+          "target_op": {
+            "type": "string",
+            "pattern": "^[a-z0-9_-]+/[a-z0-9_-]+/[a-z0-9_-]+$",
+            "description": "Target operation path (svc/resource/op)"
+          },
+          "field": {
+            "type": "string",
+            "description": "Field name on the source operation"
+          },
+          "fact_ref": {
+            "type": "string",
+            "pattern": "^facts://[a-z0-9_-]+/[a-z0-9_-]+#[a-zA-Z0-9_]+$",
+            "description": "Canonical fact URI for the target output field"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["context7", "manual"],
+            "description": "How this edge was discovered"
+          },
+          "lineage_type": {
+            "type": "string",
+            "enum": ["copy", "derive", "reference"],
+            "description": "How the field value relates to the target"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "LLM-generated reasoning for this edge"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "Final confidence after validation repairs"
+          },
+          "repairs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of validation repairs applied (empty/absent = validated clean)"
+          },
+          "model_confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "Original confidence from LLM before validation adjustments"
+          },
+          "model_fact_ref": {
+            "type": "string",
+            "description": "Original fact_ref from LLM if it was repaired"
+          }
+        }
+      }
+    }
+  }
+}
