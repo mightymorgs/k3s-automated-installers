@@ -68,7 +68,9 @@ langfuse  → REQUIRES_CAPABILITY → database
 awx       → REQUIRES_CAPABILITY → database
 ```
 
-The resolver finds all providers for a required capability and presents valid alternatives. No hardcoded taxonomy — capabilities and cross-app dependencies are derived from known working configurations in Docker Compose stacks. When thousands of community compose files show that langfuse always pairs with postgres, and awx always pairs with postgres, that's observed evidence — not a manual declaration. The compose files ARE the training data for which apps connect to which, and what alternatives exist.
+The resolver finds all providers for a required capability and presents valid alternatives. No hardcoded taxonomy — cross-app dependencies are derived statistically from large Docker Compose databases (awesome-compose, LinuxServer, Bitnami, DockSTARTer, and others). When hundreds of compose stacks show that langfuse pairs with postgres in 95% of cases, and awx pairs with postgres in 90%, those are statistical confidence scores derived from real-world evidence.
+
+The more compose stacks you compile, the higher the confidence. A dependency that appears in 3 out of 5 stacks scores differently than one appearing in 300 out of 500. These compose-derived edges are then **confirmed by other sources** — Helm values that expose the same connection knob, CRD schemas with matching input_ref fields, OpenAPI specs with the right POST endpoint. Each confirming source raises the confidence score. The compose stacks provide the initial topology; Helm, CRDs, and REST APIs validate and enrich it.
 
 ## The Three-Way Join
 
