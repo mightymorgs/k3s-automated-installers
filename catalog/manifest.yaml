@@ -1,0 +1,531 @@
+schema_version: '1.0'
+services:
+  # ── REST / OpenAPI services ──────────────────────────────────────────
+  authentik:
+    schema: specs/authentik-openapi.json
+    output: catalog/skills/openapi/authentik/
+    url: https://raw.githubusercontent.com/goauthentik/authentik/version/2025.12.2/schema.yml
+    source_type: download
+    description: Identity provider (SSO, OAuth2, SAML, LDAP)
+    style: rest
+  vault:
+    schema: specs/vault-openapi.json
+    output: catalog/skills/openapi/vault/
+    url: https://raw.githubusercontent.com/hashicorp/vault-client-go/main/openapi.json
+    source_type: download
+    description: HashiCorp Vault secrets management (v1.15.0 client spec)
+    style: rest
+  cloudflare:
+    schema: specs/cloudflare-openapi.yaml
+    output: catalog/skills/openapi/cloudflare/
+    url: https://raw.githubusercontent.com/cloudflare/api-schemas/main/openapi.yaml
+    source_type: download
+    description: Cloudflare DNS, tunnels, workers, WAF
+    style: rest
+  tailscale:
+    schema: specs/tailscale-openapi.yaml
+    output: catalog/skills/openapi/tailscale/
+    url: https://api.tailscale.com/api/v2?outputOpenapiSchema=true
+    source_type: download
+    description: Tailscale VPN and mesh networking
+    style: rest
+  elastic:
+    schema: specs/elastic-openapi.json
+    output: catalog/skills/openapi/elastic/
+    url: https://raw.githubusercontent.com/elastic/elasticsearch-specification/main/output/openapi/elasticsearch-openapi.json
+    source_type: download
+    description: Elasticsearch search and analytics
+    style: rest
+  kibana:
+    schema: specs/kibana-openapi.json
+    output: catalog/skills/openapi/kibana/
+    url: https://raw.githubusercontent.com/elastic/kibana/main/oas_docs/output/kibana.yaml
+    source_type: download
+    description: Kibana visualization and dashboards
+    style: rest
+  grafana:
+    schema: specs/grafana-openapi.json
+    output: catalog/skills/openapi/grafana/
+    url: https://raw.githubusercontent.com/grafana/grafana/main/public/openapi3.json
+    source_type: download
+    description: Grafana dashboards and observability
+    style: rest
+  loki-api:
+    schema: specs/loki-openapi.json
+    output: catalog/skills/openapi/loki/
+    source_type: bundled
+    notes: Hand-crafted from runtime endpoint probing. No official OpenAPI spec exists.
+    description: Grafana Loki log aggregation HTTP API
+    style: rest
+  prometheus-alertmanager:
+    schema: specs/alertmanager-openapi.json
+    output: catalog/skills/openapi/alertmanager/
+    url: https://raw.githubusercontent.com/prometheus/alertmanager/main/api/v2/openapi.yaml
+    source_type: download
+    description: Prometheus Alertmanager
+    style: rest
+  argocd:
+    schema: specs/argocd-openapi.json
+    output: catalog/skills/openapi/argocd/
+    url: https://raw.githubusercontent.com/argoproj/argo-cd/master/assets/swagger.json
+    source_type: download
+    description: ArgoCD GitOps continuous delivery
+    style: rest
+  awx:
+    schema: specs/awx-openapi.json
+    output: catalog/skills/openapi/awx/
+    url: https://s3.amazonaws.com/awx-public-ci-files/awx/devel/schema.json
+    source_type: download
+    description: AWX/Ansible Tower automation
+    style: rest
+  github:
+    schema: specs/github-openapi.json
+    output: catalog/skills/openapi/github/
+    url: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
+    source_type: download
+    description: GitHub API for repos, issues, PRs, actions
+    style: rest
+  tf-cloud:
+    schema: specs/tf-cloud-openapi.json
+    output: catalog/skills/openapi/tf-cloud/
+    url: https://raw.githubusercontent.com/glennsarti/openapi-terraform-cloud/main/specifications/openapi-terraform-cloud.json
+    source_type: download
+    notes: 'Community spec (~20% API coverage). Core: orgs, workspaces, runs, plans.'
+    description: Terraform Cloud workspaces and runs
+    style: rest
+  bws:
+    schema: specs/bws-openapi.json
+    output: catalog/skills/openapi/bws/
+    url: https://raw.githubusercontent.com/bitwarden/docs/master/api/specs/public/swagger.json
+    source_type: download
+    description: Bitwarden Secrets Manager
+    style: rest
+  sonarr:
+    schema: specs/sonarr-openapi.json
+    output: catalog/skills/openapi/sonarr/
+    url: https://raw.githubusercontent.com/Sonarr/Sonarr/develop/src/Sonarr.Api.V3/openapi.json
+    source_type: download
+    description: Sonarr TV series management
+    style: rest
+  radarr:
+    schema: specs/radarr-openapi.json
+    output: catalog/skills/openapi/radarr/
+    url: https://raw.githubusercontent.com/Radarr/Radarr/develop/src/Radarr.Api.V3/openapi.json
+    source_type: download
+    description: Radarr movie management
+    style: rest
+  prowlarr:
+    schema: specs/prowlarr-openapi.json
+    output: catalog/skills/openapi/prowlarr/
+    url: https://raw.githubusercontent.com/Prowlarr/Prowlarr/develop/src/Prowlarr.Api.V1/openapi.json
+    source_type: download
+    description: Prowlarr indexer management
+    style: rest
+  langfuse:
+    schema: specs/langfuse-openapi.json
+    output: catalog/skills/openapi/langfuse/
+    url: https://raw.githubusercontent.com/langfuse/langfuse/main/web/public/generated/api/openapi.yml
+    source_type: download
+    description: Langfuse LLM observability, traces, scores, evaluations
+    style: rest
+  netbox:
+    schema: specs/netbox-openapi.yaml
+    output: catalog/skills/openapi/netbox/
+    url: https://raw.githubusercontent.com/netbox-community/go-netbox/master/api/openapi.yaml
+    source_type: download
+    description: NetBox network/datacenter management (sites, racks, devices, IPs)
+    style: rest
+  neo4j:
+    schema: specs/neo4j-openapi.json
+    output: catalog/skills/openapi/neo4j/
+    source_type: manual
+    notes: No public OpenAPI spec. REST API documented at https://neo4j.com/docs/http-api/current/
+    description: Neo4j graph database HTTP API
+    style: rest
+
+  # ── Kubernetes / CRD services ────────────────────────────────────────
+  traefik:
+    schema: specs/traefik-openapi.json
+    output: catalog/skills/crd/traefik/
+    source_type: crd
+    description: Traefik reverse proxy and ingress controller (traefik.io CRDs)
+    style: kubernetes
+    crd_kinds:
+    - group: traefik.io
+      version: v1alpha1
+      kinds:
+      - stem: ingressroute_v1alpha1
+        kind: IngressRoute
+        plural: ingressroutes
+        namespaced: true
+      - stem: ingressroutetcp_v1alpha1
+        kind: IngressRouteTCP
+        plural: ingressroutetcps
+        namespaced: true
+      - stem: ingressrouteudp_v1alpha1
+        kind: IngressRouteUDP
+        plural: ingressrouteudps
+        namespaced: true
+      - stem: middleware_v1alpha1
+        kind: Middleware
+        plural: middlewares
+        namespaced: true
+      - stem: middlewaretcp_v1alpha1
+        kind: MiddlewareTCP
+        plural: middlewaretcps
+        namespaced: true
+      - stem: serverstransport_v1alpha1
+        kind: ServersTransport
+        plural: serverstransports
+        namespaced: true
+      - stem: serverstransporttcp_v1alpha1
+        kind: ServersTransportTCP
+        plural: serverstransporttcps
+        namespaced: true
+      - stem: tlsoption_v1alpha1
+        kind: TLSOption
+        plural: tlsoptions
+        namespaced: true
+      - stem: tlsstore_v1alpha1
+        kind: TLSStore
+        plural: tlsstores
+        namespaced: true
+      - stem: traefikservice_v1alpha1
+        kind: TraefikService
+        plural: traefikservices
+        namespaced: true
+  traefik-hub:
+    schema: specs/traefik-hub-openapi.json
+    output: catalog/skills/crd/traefik-hub/
+    source_type: instance
+    notes: Extracted from cluster /openapi/v2 (hub.traefik.io CRDs)
+    description: Traefik Hub CRDs (API, APIAccess, APIPortal, etc.)
+    style: kubernetes
+  cert-manager:
+    schema: specs/cert-manager-openapi.json
+    output: catalog/skills/crd/cert-manager/
+    source_type: crd
+    description: Kubernetes certificate management (Let's Encrypt, self-signed, Cloudflare
+      Origin CA, etc.)
+    style: kubernetes
+    crd_kinds:
+    - group: cert-manager.io
+      version: v1
+      kinds:
+      - stem: certificate_v1
+        kind: Certificate
+        plural: certificates
+        namespaced: true
+      - stem: certificaterequest_v1
+        kind: CertificateRequest
+        plural: certificaterequests
+        namespaced: true
+      - stem: issuer_v1
+        kind: Issuer
+        plural: issuers
+        namespaced: true
+      - stem: clusterissuer_v1
+        kind: ClusterIssuer
+        plural: clusterissuers
+        namespaced: false
+    - group: acme.cert-manager.io
+      version: v1
+      kinds:
+      - stem: order_v1
+        kind: Order
+        plural: orders
+        namespaced: true
+      - stem: challenge_v1
+        kind: Challenge
+        plural: challenges
+        namespaced: true
+  argocd-crd:
+    schema: specs/argocd-crd-openapi.json
+    output: catalog/skills/crd/argocd-crd/
+    source_type: instance
+    notes: Extracted from cluster /openapi/v2 (io.argoproj CRDs)
+    description: ArgoCD CRDs (Application, AppProject, ApplicationSet)
+    style: kubernetes
+  awx-crd:
+    schema: specs/awx-crd-openapi.json
+    output: catalog/skills/crd/awx-crd/
+    source_type: instance
+    notes: Extracted from cluster /openapi/v2 (com.ansible CRDs)
+    description: AWX Operator CRDs (AWX, AWXBackup, AWXRestore)
+    style: kubernetes
+  k8s:
+    schema: specs/k8s-openapi.json
+    output: catalog/skills/crd/k8s/
+    url: https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json
+    source_type: download
+    description: Kubernetes API (pods, deployments, services, etc.)
+    style: kubernetes
+    enabled: true
+  kube-prometheus-stack:
+    schema: specs/kube-prometheus-stack-openapi.json
+    output: catalog/skills/crd/kube-prometheus-stack/
+    source_type: artifacthub
+    description: Prometheus Operator CRDs (Prometheus, Alertmanager, ServiceMonitor,
+      PodMonitor)
+    style: kubernetes
+    crd_kinds:
+    - group: monitoring.coreos.com
+      version: v1
+      kinds:
+      - stem: prometheus_v1
+        kind: Prometheus
+        plural: prometheuses
+        namespaced: true
+      - stem: alertmanager_v1
+        kind: Alertmanager
+        plural: alertmanagers
+        namespaced: true
+      - stem: servicemonitor_v1
+        kind: ServiceMonitor
+        plural: servicemonitors
+        namespaced: true
+      - stem: podmonitor_v1
+        kind: PodMonitor
+        plural: podmonitors
+        namespaced: true
+      - stem: prometheusrule_v1
+        kind: PrometheusRule
+        plural: prometheusrules
+        namespaced: true
+      - stem: thanosruler_v1
+        kind: ThanosRuler
+        plural: thanosrulers
+        namespaced: true
+      - stem: probe_v1
+        kind: Probe
+        plural: probes
+        namespaced: true
+      - stem: alertmanagerconfig_v1alpha1
+        kind: AlertmanagerConfig
+        plural: alertmanagerconfigs
+        namespaced: true
+      - stem: scrapeconfig_v1alpha1
+        kind: ScrapeConfig
+        plural: scrapeconfigs
+        namespaced: true
+  external-secrets:
+    schema: specs/external-secrets-openapi.json
+    output: catalog/skills/crd/external-secrets/
+    source_type: crd
+    description: External Secrets Operator CRDs (ExternalSecret, SecretStore, ClusterSecretStore)
+    style: kubernetes
+    crd_kinds:
+    - group: external-secrets.io
+      version: v1beta1
+      kinds:
+      - stem: externalsecret_v1beta1
+        kind: ExternalSecret
+        plural: externalsecrets
+        namespaced: true
+      - stem: secretstore_v1beta1
+        kind: SecretStore
+        plural: secretstores
+        namespaced: true
+      - stem: clustersecretstore_v1beta1
+        kind: ClusterSecretStore
+        plural: clustersecretstores
+        namespaced: false
+      - stem: clusterexternalsecret_v1beta1
+        kind: ClusterExternalSecret
+        plural: clusterexternalsecrets
+        namespaced: false
+      - stem: pushsecret_v1alpha1
+        kind: PushSecret
+        plural: pushsecrets
+        namespaced: true
+  longhorn:
+    schema: specs/longhorn-openapi.json
+    output: catalog/skills/crd/longhorn/
+    source_type: crd
+    description: Longhorn distributed block storage CRDs (Volume, Backup, Replica,
+      Engine)
+    style: kubernetes
+    crd_kinds:
+    - group: longhorn.io
+      version: v1beta2
+      kinds:
+      - stem: volume_v1beta2
+        kind: Volume
+        plural: volumes
+        namespaced: true
+      - stem: engine_v1beta2
+        kind: Engine
+        plural: engines
+        namespaced: true
+      - stem: replica_v1beta2
+        kind: Replica
+        plural: replicas
+        namespaced: true
+      - stem: setting_v1beta2
+        kind: Setting
+        plural: settings
+        namespaced: true
+      - stem: backingimage_v1beta2
+        kind: BackingImage
+        plural: backingimages
+        namespaced: true
+      - stem: backingimagedatasource_v1beta2
+        kind: BackingImageDataSource
+        plural: backingimagedatasources
+        namespaced: true
+      - stem: backingimagemanager_v1beta2
+        kind: BackingImageManager
+        plural: backingimagemanagers
+        namespaced: true
+      - stem: backuptarget_v1beta2
+        kind: BackupTarget
+        plural: backuptargets
+        namespaced: true
+      - stem: backupvolume_v1beta2
+        kind: BackupVolume
+        plural: backupvolumes
+        namespaced: true
+      - stem: backupbackingimage_v1beta2
+        kind: BackupBackingImage
+        plural: backupbackingimages
+        namespaced: true
+      - stem: engineimage_v1beta2
+        kind: EngineImage
+        plural: engineimages
+        namespaced: true
+      - stem: instancemanager_v1beta2
+        kind: InstanceManager
+        plural: instancemanagers
+        namespaced: true
+      - stem: node_v1beta2
+        kind: Node
+        plural: nodes
+        namespaced: true
+      - stem: orphan_v1beta2
+        kind: Orphan
+        plural: orphans
+        namespaced: true
+      - stem: recurringjob_v1beta2
+        kind: RecurringJob
+        plural: recurringjobs
+        namespaced: true
+      - stem: sharemanager_v1beta2
+        kind: ShareManager
+        plural: sharemanagers
+        namespaced: true
+      - stem: snapshot_v1beta2
+        kind: Snapshot
+        plural: snapshots
+        namespaced: true
+      - stem: supportbundle_v1beta2
+        kind: SupportBundle
+        plural: supportbundles
+        namespaced: true
+      - stem: systembackup_v1beta2
+        kind: SystemBackup
+        plural: systembackups
+        namespaced: true
+      - stem: systemrestore_v1beta2
+        kind: SystemRestore
+        plural: systemrestores
+        namespaced: true
+      - stem: volumeattachment_v1beta2
+        kind: VolumeAttachment
+        plural: volumeattachments
+        namespaced: true
+  teleport:
+    schema: specs/teleport-openapi.json
+    output: catalog/skills/crd/teleport/
+    source_type: crd
+    description: Teleport access platform CRDs (roles, users, apps, databases, connectors)
+    style: kubernetes
+    crd_kinds:
+    - group: resources.teleport.dev
+      version: v1
+      kinds:
+      - stem: teleportrolev7_v1
+        kind: TeleportRoleV7
+        plural: teleportrolesv7
+        namespaced: true
+      - stem: teleportuser_v2
+        kind: TeleportUser
+        plural: teleportusers
+        namespaced: true
+      - stem: teleportappv3_v1
+        kind: TeleportAppV3
+        plural: teleportappsv3
+        namespaced: true
+      - stem: teleportdatabasev3_v1
+        kind: TeleportDatabaseV3
+        plural: teleportdatabasesv3
+        namespaced: true
+      - stem: teleportgithubconnector_v3
+        kind: TeleportGithubConnector
+        plural: teleportgithubconnectors
+        namespaced: true
+      - stem: teleportoidcconnector_v3
+        kind: TeleportOIDCConnector
+        plural: teleportoidcconnectors
+        namespaced: true
+      - stem: teleportsamlconnector_v2
+        kind: TeleportSAMLConnector
+        plural: teleportsamlconnectors
+        namespaced: true
+      - stem: teleportloginrule_v1
+        kind: TeleportLoginRule
+        plural: teleportloginrules
+        namespaced: true
+      - stem: teleportprovisiontoken_v2
+        kind: TeleportProvisionToken
+        plural: teleportprovisiontokens
+        namespaced: true
+      - stem: teleportbotv1_v1
+        kind: TeleportBotV1
+        plural: teleportbotsv1
+        namespaced: true
+      - stem: teleportaccesslist_v1
+        kind: TeleportAccessList
+        plural: teleportaccesslists
+        namespaced: true
+
+  # ── Apps without public API specs ────────────────────────────────────
+  claudebox:
+    source_type: no_spec
+    description: Claude AI sandbox container for development
+    notes: Custom internal service, no public API spec
+  cloudflare-tunnel:
+    source_type: no_spec
+    description: Cloudflare Tunnel (cloudflared) for secure ingress
+    notes: Managed via cloudflare API and CLI, no separate OpenAPI spec
+  jellyfin:
+    source_type: no_spec
+    description: Jellyfin media server
+    notes: REST API available but no public OpenAPI spec bundled upstream
+  mcp-servers:
+    source_type: no_spec
+    description: Model Context Protocol servers for AI tool integration
+    notes: Custom internal service, protocol-based (not REST)
+  media-shared:
+    source_type: no_spec
+    description: Shared storage and configuration for media stack services
+    notes: Infrastructure component, no API
+  media-stack:
+    source_type: no_spec
+    description: Umbrella deployment for media automation services
+    notes: Orchestration layer, no standalone API
+  metallb:
+    source_type: no_spec
+    description: MetalLB bare-metal load balancer for Kubernetes
+    notes: Configured via CRDs (IPAddressPool, L2Advertisement); no REST API
+  plex:
+    source_type: no_spec
+    description: Plex media server
+    notes: REST API only, no public OpenAPI spec
+  qbittorrent:
+    source_type: no_spec
+    description: qBittorrent download client
+    notes: REST API only, no public OpenAPI spec
+  sabnzbd:
+    source_type: no_spec
+    description: SABnzbd Usenet download client
+    notes: REST API only, no public OpenAPI spec
