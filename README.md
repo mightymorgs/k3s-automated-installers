@@ -5,11 +5,11 @@ Automated app lifecycle generator for k3s portfolios. Converts Helm charts, CRD 
 ## What It Does
 
 ```
-catalog/ (4 input sources)          vm-builder-templates/apps/{app}/
-  compose/   ─┐                       install/   ← Phase 3: kustomize + golden-master playbooks
-  openapi/   ─┤─→ generate ─→         config/    ← Phase 4: cross-app wiring playbooks
-  crd/       ─┤   + molecule test      ingress/   ← Phase 5: IngressRoute + SSO playbooks
-  helm/      ─┘
+catalog/specs/ (raw inputs)     catalog/skills/ (atomic skills)     vm-builder-templates/apps/{app}/
+  compose/   ─┐                   compose/   ─┐                       install/  ← Phase 3
+  openapi/   ─┤─→ generate ─→    openapi/   ─┤─→ compile ─→         config/   ← Phase 4
+  crd/       ─┤   skills          crd/       ─┤   playbooks          ingress/  ← Phase 5
+  helm/      ─┘                   helm/      ─┘
 ```
 
 **Phase 3 (Install):** Helm chart → `helm template` → classify manifests → convert to J2 templates → kustomize base → golden-master install playbooks
@@ -24,10 +24,17 @@ All generated playbooks are molecule-tested (Tier 1: syntax, Tier 2: --syntax-ch
 
 ```
 catalog/
-  compose/    # Docker Compose files (community wiring blueprints)
-  openapi/    # OpenAPI specs (REST API definitions)
-  crd/        # CRD skill artifacts (from operator schemas)
-  helm/       # Helm values specs (from chart values.yaml)
+  manifest.yaml          # All apps, spec sources, metadata
+  specs/                  # Raw downloaded inputs
+    compose/              # Docker Compose files
+    openapi/              # OpenAPI specs (.json/.yaml)
+    crd/                  # CRD schemas (from ArtifactHub)
+    helm/                 # Helm values.yaml
+  skills/                 # Generated atomic skill artifacts
+    compose/              # Skills from compose analysis
+    openapi/              # Skills from OpenAPI (facts:// URIs)
+    crd/                  # Skills from CRD schemas (crdfacts:// URIs)
+    helm/                 # Skills from Helm values
 ```
 
 ## Output Target
@@ -45,4 +52,4 @@ vm-builder-templates/apps/{app}/
 
 ## Related
 
-- [attention-driven-architecture](https://github.com/mightymorgs/attention-driven-architecture) — IDI monorepo (upstream patterns, not modified)
+- [attention-driven-architecture](https://github.com/mightymorgs/attention-driven-architecture) — IDI monorepo (upstream patterns, ported here)
