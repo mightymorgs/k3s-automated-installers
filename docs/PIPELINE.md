@@ -190,6 +190,17 @@ Playbooks don't run against a fixed app list. The Phase 4 workflow discovers wha
 
 This means the same generated playbooks work on any VM with any subset of apps installed. A VM with sonarr + radarr + sabnzbd gets the media wiring. A VM with grafana + prometheus + loki gets the monitoring wiring. No workflow changes needed — BWS inventory drives everything dynamically.
 
+### Live Configuration Updates
+
+When a user changes any value in BWS `_config` (via the GUI or API), only the delta is applied:
+
+1. **User edits a var** — e.g., changes `grafana.admin_password` in BWS `_config`
+2. **Workflow detects deviation** from defaults — only changed vars are passed as extra-vars
+3. **`kubectl apply` updates only those changes** — the playbook applies the diff, not a full redeploy
+4. **Wiring playbooks re-run with new values** — if the changed var affects cross-app wiring (e.g., a new API key), the relevant wiring playbooks pick up the new value automatically
+
+This is true live configuration. Edit a port, change a password, toggle a feature flag — the system converges to the new state without reinstalling anything. The playbooks are idempotent by design, so re-running with updated vars only touches what changed.
+
 ## What Makes This Different
 
 This is not an LLM generating infrastructure code. This is a **compiler**:
