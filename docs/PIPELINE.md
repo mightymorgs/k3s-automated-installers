@@ -168,13 +168,16 @@ All three are lifecycle events in the graph. The resolver chains them: IngressRo
 Bitwarden Secrets Manager is the state database for everything:
 
 ```
+Scaffold seeds BWS _config with all Helm chart vars + defaults
 Phase 3 installs apps → extracts API keys/URLs → writes to BWS _state
-Phase 4 reads BWS _state → configures cross-app wiring → writes results back
-Phase 5 reads BWS _state → configures ingress/SSO → writes results back
+Phase 4 reads BWS _state + _config → configures cross-app wiring → writes results back
+Phase 5 reads BWS _state + _config → configures ingress/SSO → writes results back
 GUI reads BWS → shows live state → user edits _config → triggers re-execution
 ```
 
-Every playbook variable comes from BWS via extra-vars. No hardcoded values. The generated playbooks reference BWS vars using the pattern `{{ app_field }}` which maps to `_state.apps.{app}.{field}`.
+Every Helm chart variable is written to BWS `_config` with its default value from `values.yaml`. This means every configurable knob for every app is available in BWS before the first deploy — the GUI can show them, the user can override them, and the playbooks consume them.
+
+Every playbook variable comes from BWS via extra-vars. No hardcoded values. `_config` holds the template variable values (how it was built), `_state` holds runtime state (what's running now). The generated playbooks reference BWS vars using the pattern `{{ app_field }}` which maps to `_state.apps.{app}.{field}` or `_config.{app}.{field}`.
 
 ## What Makes This Different
 
