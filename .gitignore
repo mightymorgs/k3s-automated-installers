@@ -10,3 +10,14 @@ node_modules/
 .DS_Store
 secrets/
 .venv/
+
+# Generated catalog artifacts (specs downloaded, skills generated)
+catalog/specs/*.json
+catalog/specs/*.yaml
+catalog/specs/openapi/*.json
+catalog/specs/openapi/*.yaml
+catalog/specs/crd/
+catalog/specs/helm/
+catalog/skills/openapi/
+catalog/skills/crd/
+catalog/skills/helm/
