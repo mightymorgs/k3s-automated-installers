@@ -179,6 +179,17 @@ Every Helm chart variable is written to BWS `_config` with its default value fro
 
 Every playbook variable comes from BWS via extra-vars. No hardcoded values. `_config` holds the template variable values (how it was built), `_state` holds runtime state (what's running now). The generated playbooks reference BWS vars using the pattern `{{ app_field }}` which maps to `_state.apps.{app}.{field}` or `_config.{app}.{field}`.
 
+### Dynamic Wiring at Runtime
+
+Playbooks don't run against a fixed app list. The Phase 4 workflow discovers what's installed at runtime:
+
+1. **Read BWS inventory** — query `_state.apps` for all entries with `status: installed`
+2. **Filter by `requires_apps`** — each wiring playbook declares which apps it needs (e.g., `05-wire-sabnzbd.yml` requires both `sonarr` and `sabnzbd`). A playbook only runs when ALL its required apps are present.
+3. **Parallel execution** — all eligible wiring playbooks run as parallel background subshells on the self-hosted runner
+4. **Per-app failure isolation** — one app's wiring failure doesn't block others
+
+This means the same generated playbooks work on any VM with any subset of apps installed. A VM with sonarr + radarr + sabnzbd gets the media wiring. A VM with grafana + prometheus + loki gets the monitoring wiring. No workflow changes needed — BWS inventory drives everything dynamically.
+
 ## What Makes This Different
 
 This is not an LLM generating infrastructure code. This is a **compiler**:
