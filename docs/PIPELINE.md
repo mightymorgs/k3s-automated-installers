@@ -213,4 +213,12 @@ This is not an LLM generating infrastructure code. This is a **compiler**:
 6. **Incremental** — add a new app to the manifest, run the pipeline, get working playbooks
 7. **Universal** — works for ANY app with a Helm chart, OpenAPI spec, or Docker Compose file — not limited to a fixed app list
 
-The end state: `pip install`, point at a Helm chart, get a fully wired app with install + config + ingress playbooks, molecule-tested, ready to deploy on any k3s cluster. The 32-app portfolio is the test suite, not the boundary.
+The end state is a **package manager for k3s apps**. A catalogue of version-pinned applications, each containing pre-generated atomic skills, install playbooks, wiring playbooks, and ingress configuration. Adding an app to your cluster is:
+
+1. Select apps from the catalogue (GUI or CLI)
+2. Skills unpack into the skills directory, tree-sitter ingests them into the graph
+3. The graph resolves dependencies and cross-app wiring automatically
+4. Playbooks execute — install, configure, wire, expose — all dynamically based on which apps are selected
+5. BWS tracks state, any var change applies as a live delta
+
+No manual YAML. No reading docs to figure out which port sonarr needs to talk to prowlarr. The catalogue already knows, because it was compiled from Helm charts, CRD schemas, OpenAPI specs, and thousands of community Docker Compose stacks. The 32-app portfolio is the initial catalogue — it grows as new apps are added.
