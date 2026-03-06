@@ -99,15 +99,17 @@ CRDs define the WHAT (fields, types). Compose defines the WHO (which apps connec
 **Input:** Helm chart for an app
 **Output:** Golden-master-compliant install playbook + kustomize base + J2 templates
 
+We don't deploy with Helm. Helm is used as a **source** — `helm template` renders the chart to raw K8s manifests, then the scaffold pipeline converts those into kustomize + StatefulSets. This is deliberate: kustomize + StatefulSets enable non-destructive live updates to the cluster via `kubectl apply`. Helm's upgrade/rollback model would require tearing down and recreating resources. With kustomize, changing a var in BWS triggers a `kubectl apply` that patches only what changed — pods stay running, no downtime.
+
 The scaffold pipeline:
 
 ```
-Helm chart
+Helm chart (source only — not used for deployment)
   → helm template (render to raw K8s manifests)
   → classify manifests (Secrets/PVCs = protected, Deployments/Services = workload)
-  → convert Deployments → StatefulSets (persistence)
+  → convert Deployments → StatefulSets (persistent, rolling-update capable)
   → convert manifests → J2 templates (parameterize with BWS vars)
-  → generate kustomize base
+  → generate kustomize base (the actual deployment mechanism)
   → generate golden-master install playbook:
       - numeric-prefix ordering (<40 = always apply, ≥40 = kubectl_action)
       - split-apply (Secrets always kubectl apply, workloads use kubectl_action)
