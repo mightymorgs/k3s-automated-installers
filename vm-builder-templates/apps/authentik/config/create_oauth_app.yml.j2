@@ -1,0 +1,199 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# This is an included task file, called by 01-create-oauth-apps. #}
+{# Variables are inherited from the parent playbook context.       #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   authentik_api_version  - API version path segment             #}
+{#                            (default: v3)                        #}
+{#   client_secret_length   - Length of generated client secret    #}
+{#                            (default: 64)                        #}
+{# ============================================================== #}
+---
+- name: Set app variables
+  ansible.builtin.set_fact:
+    app_id: "{{ '{{ ' }} app_item.key {{ ' }}' }}"
+    app_config: "{{ '{{ ' }} app_item.value {{ ' }}' }}"
+    app_sso: "{{ '{{ ' }} app_item.value.sso {{ ' }}' }}"
+  no_log: false
+
+- name: Generate client_id from template
+  ansible.builtin.set_fact:
+    client_id: "{{ '{{ ' }} app_sso.oauth.client_id_format | replace('{client}', client_name) {{ ' }}' }}"
+  no_log: false
+
+- name: Generate client_secret ({{ client_secret_length | default(64) }} random chars)
+  ansible.builtin.set_fact:
+    client_secret: "{{ '{{ ' }} lookup('password', '/dev/null length={{ client_secret_length | default(64) }} chars=ascii_letters,digits') {{ ' }}' }}"
+  no_log: true
+
+- name: Construct redirect_uri based on ingress mode
+  ansible.builtin.set_fact:
+    redirect_uri: >-
+      {{ '{{ ' }}
+        (ingress_mode == 'cloudflare')
+        | ternary(
+            app_sso.oauth.redirect_uri_template.cloudflare
+            | replace('{subdomain}', app_sso.ingress.subdomain | default(app_id))
+            | replace('{domain}', ingress_domain),
+            app_sso.oauth.redirect_uri_template.tailscale
+            | replace('{subdomain}', app_sso.ingress.subdomain | default(app_id))
+            | replace('{vm_hostname}', vm_hostname)
+            | replace('{tailnet}', tailnet_name)
+          )
+      {{ ' }}' }}
+  when: app_sso.oauth.redirect_uri_template is defined
+  no_log: false
+
+- name: Display OAuth configuration for app
+  ansible.builtin.debug:
+    msg:
+      app: "{{ '{{ ' }} app_id {{ ' }}' }}"
+      client_id: "{{ '{{ ' }} client_id {{ ' }}' }}"
+      redirect_uri: "{{ '{{ ' }} redirect_uri | default('N/A') {{ ' }}' }}"
+      scopes: "{{ '{{ ' }} app_sso.oauth.scopes {{ ' }}' }}"
+
+# ===== Check if provider already exists =====
+- name: Check if OAuth provider already exists
+  ansible.builtin.uri:
+    url: "{{ '{{ ' }} authentik_api_base {{ ' }}' }}/providers/oauth2/"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ '{{ ' }} authentik_admin_token {{ ' }}' }}"
+    body_format: json
+    status_code: [200]
+  register: existing_providers
+  no_log: false
+
+- name: Filter for existing provider
+  ansible.builtin.set_fact:
+    existing_provider: >-
+      {{ '{{ ' }}
+        existing_providers.json.results
+        | selectattr('name', 'equalto',
+                     app_config.display_name ~ ' OAuth Provider')
+        | list
+        | first
+        | default(none)
+      {{ ' }}' }}
+  no_log: false
+
+# ===== Create OAuth Provider (if not exists) =====
+- name: Create OAuth provider in Authentik
+  ansible.builtin.uri:
+    url: "{{ '{{ ' }} authentik_api_base {{ ' }}' }}/providers/oauth2/"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ '{{ ' }} authentik_admin_token {{ ' }}' }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ '{{ ' }} app_config.display_name {{ ' }}' }} OAuth Provider"
+      authorization_flow: "{{ '{{ ' }} authorization_flow_uuid {{ ' }}' }}"
+      client_type: "confidential"
+      client_id: "{{ '{{ ' }} client_id {{ ' }}' }}"
+      client_secret: "{{ '{{ ' }} client_secret {{ ' }}' }}"
+      redirect_uris: "{{ '{{ ' }} redirect_uri {{ ' }}' }}"
+      property_mappings: []
+      signing_key: null
+    status_code: [200, 201, 400]
+  register: provider_result
+  no_log: true
+  when: existing_provider is none
+
+- name: Set provider_id (new or existing)
+  ansible.builtin.set_fact:
+    provider_id: >-
+      {{ '{{ ' }}
+        (existing_provider is not none)
+        | ternary(existing_provider.pk, provider_result.json.pk)
+      {{ ' }}' }}
+  no_log: false
+  when: existing_provider is not none or provider_result.status in [200, 201]
+
+# ===== Check if application already exists =====
+- name: Check if Authentik application already exists
+  ansible.builtin.uri:
+    url: "{{ '{{ ' }} authentik_api_base {{ ' }}' }}/core/applications/"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ '{{ ' }} authentik_admin_token {{ ' }}' }}"
+    body_format: json
+    status_code: [200]
+  register: existing_apps
+  no_log: false
+
+- name: Filter for existing application
+  ansible.builtin.set_fact:
+    existing_app: >-
+      {{ '{{ ' }}
+        existing_apps.json.results
+        | selectattr('slug', 'equalto', app_id)
+        | list
+        | first
+        | default(none)
+      {{ ' }}' }}
+  no_log: false
+
+# ===== Create Application (if not exists) =====
+- name: Create Authentik application
+  ansible.builtin.uri:
+    url: "{{ '{{ ' }} authentik_api_base {{ ' }}' }}/core/applications/"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ '{{ ' }} authentik_admin_token {{ ' }}' }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ '{{ ' }} app_config.display_name {{ ' }}' }}"
+      slug: "{{ '{{ ' }} app_id {{ ' }}' }}"
+      provider: "{{ '{{ ' }} provider_id {{ ' }}' }}"
+      meta_launch_url: >-
+        {{ '{{ ' }}
+          redirect_uri
+          | regex_replace('/login.*$', '')
+          | regex_replace('/oauth.*$', '')
+          | regex_replace('/api.*$', '')
+        {{ ' }}' }}
+      meta_icon: "https://via.placeholder.com/150?text={{ '{{ ' }} app_id[0] | upper {{ ' }}' }}"
+      meta_description: "{{ '{{ ' }} app_config.description {{ ' }}' }}"
+      policy_engine_mode: "any"
+      group: null
+    status_code: [200, 201, 400]
+  register: app_result
+  no_log: true
+  when: existing_app is none and provider_id is defined
+
+- name: Set application_id (new or existing)
+  ansible.builtin.set_fact:
+    application_id: >-
+      {{ '{{ ' }}
+        (existing_app is not none)
+        | ternary(existing_app.pk, app_result.json.pk)
+      {{ ' }}' }}
+  no_log: false
+  when: (existing_app is not none or app_result.status in [200, 201]) and provider_id is defined
+
+# ===== Store OAuth credentials for BWS writeback =====
+- name: Add OAuth credentials to writeback list
+  ansible.builtin.set_fact:
+    oauth_credentials: >-
+      {{ '{{ ' }}
+        oauth_credentials | default({}) | combine({
+          app_id: {
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'provider_id': provider_id | int,
+            'application_id': application_id | int,
+            'redirect_uris': [redirect_uri]
+          }
+        })
+      {{ ' }}' }}
+  no_log: true
+  when: provider_id is defined and application_id is defined
+
+- name: Log OAuth app creation success
+  ansible.builtin.debug:
+    msg: "Created OAuth app for {{ '{{ ' }} app_id {{ ' }}' }}: provider_id={{ '{{ ' }} provider_id {{ ' }}' }}, application_id={{ '{{ ' }} application_id {{ ' }}' }}"
+  when: provider_id is defined and application_id is defined

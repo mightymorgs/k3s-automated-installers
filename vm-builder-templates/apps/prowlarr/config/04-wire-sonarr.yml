@@ -1,0 +1,138 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prowlarr/04-wire-sonarr"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prowlarr/config/04-wire-sonarr.yml"
+#     category: "apps"
+#     subsystem: "prowlarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["prowlarr_deployed", "sonarr_deployed"]
+#   provides: ["prowlarr_sonarr_wired"]
+#   tags: ["prowlarr", "sonarr", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Register Sonarr as an application in Prowlarr for indexer sync
+#   requires_apps: ["prowlarr", "sonarr"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.prowlarr.api_key"
+#       - path: "_state.apps.sonarr.api_key"
+
+- name: Wire Sonarr into Prowlarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    prowlarr_namespace: "media-stack"
+    app_namespace: "{{ prowlarr_namespace }}"
+    # prowlarr_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF SONARR NOT INSTALLED ==========
+    - name: Skip if sonarr is not installed on this VM
+      when: sonarr_api_key is not defined
+      block:
+        - name: "sonarr not installed — skipping prowlarr <-> sonarr wiring"
+          ansible.builtin.debug:
+            msg: "sonarr is not installed on this VM (no sonarr_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if prowlarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "prowlarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: prowlarr_api_key is not defined or prowlarr_api_key | length == 0
+
+    - name: Fail if sonarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "sonarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sonarr_api_key is not defined or sonarr_api_key | length == 0
+
+    # ========== VERIFY PROWLARR API ==========
+    - name: Verify Prowlarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Prowlarr API not accessible
+      ansible.builtin.fail:
+        msg: "Prowlarr API not accessible at {{ prowlarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== CHECK EXISTING APPLICATIONS ==========
+    - name: Get existing Prowlarr applications
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        method: GET
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_apps
+      changed_when: false
+
+    - name: Check if Sonarr app already exists
+      ansible.builtin.set_fact:
+        sonarr_app_exists: >-
+          {{ (prowlarr_apps.json | selectattr('name', 'equalto', 'Sonarr') | list | length) > 0 }}
+
+    # ========== ADD SONARR TO PROWLARR ==========
+    - name: Add Sonarr to Prowlarr
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Sonarr"
+          syncLevel: "fullSync"
+          implementation: "Sonarr"
+          configContract: "SonarrSettings"
+          fields:
+            - name: "prowlarrUrl"
+              value: "{{ prowlarr_url }}"
+            - name: "baseUrl"
+              value: "{{ sonarr_url }}"
+            - name: "apiKey"
+              value: "{{ sonarr_api_key }}"
+            - name: "syncCategories"
+              value: [5000, 5030, 5040]
+        status_code: [200, 201]
+      register: add_sonarr
+      changed_when: add_sonarr.status in [200, 201]
+      when: not sonarr_app_exists
+
+    - name: Sonarr already configured in Prowlarr
+      ansible.builtin.debug:
+        msg: "Sonarr app already exists in Prowlarr - skipping"
+      when: sonarr_app_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prowlarr <-> Sonarr Wiring Complete"
+          - "=========================================="
+          - "Sonarr: {{ 'Added to Prowlarr' if not sonarr_app_exists else 'Already configured' }}"
+          - "Sync: fullSync (categories: 5000, 5030, 5040)"
+          - "=========================================="

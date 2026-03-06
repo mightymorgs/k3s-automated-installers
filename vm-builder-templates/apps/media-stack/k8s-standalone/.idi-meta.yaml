@@ -1,0 +1,91 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  base/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  base/namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  base/prowlarr-statefulset.yaml:
+    summary: 'K8s StatefulSet: prowlarr-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  base/qbittorrent-statefulset.yaml:
+    summary: 'K8s StatefulSet: qbittorrent-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  base/radarr-statefulset.yaml:
+    summary: 'K8s StatefulSet: radarr-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  base/sabnzbd-statefulset.yaml:
+    summary: 'K8s StatefulSet: sabnzbd-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  base/services.yaml:
+    summary: 'K8s Service: services.yaml'
+    source: inferred
+    confidence: medium
+  base/sonarr-statefulset.yaml:
+    summary: 'K8s StatefulSet: sonarr-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  external-secrets/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  external-secrets/prowlarr-external-secret.yaml:
+    summary: 'K8s ExternalSecret: prowlarr-external-secret.yaml'
+    source: inferred
+    confidence: medium
+  external-secrets/qbittorrent-external-secret.yaml:
+    summary: 'K8s ExternalSecret: qbittorrent-external-secret.yaml'
+    source: inferred
+    confidence: medium
+  external-secrets/radarr-external-secret.yaml:
+    summary: 'K8s ExternalSecret: radarr-external-secret.yaml'
+    source: inferred
+    confidence: medium
+  external-secrets/sabnzbd-external-secret.yaml:
+    summary: 'K8s ExternalSecret: sabnzbd-external-secret.yaml'
+    source: inferred
+    confidence: medium
+  external-secrets/sonarr-external-secret.yaml:
+    summary: 'K8s ExternalSecret: sonarr-external-secret.yaml'
+    source: inferred
+    confidence: medium
+  ingress/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  ingress/prowlarr-ingressroute.yaml:
+    summary: 'K8s IngressRoute: prowlarr-ingressroute.yaml'
+    source: inferred
+    confidence: medium
+  ingress/qbittorrent-ingressroute.yaml:
+    summary: 'K8s IngressRoute: qbittorrent-ingressroute.yaml'
+    source: inferred
+    confidence: medium
+  ingress/radarr-ingressroute.yaml:
+    summary: 'K8s IngressRoute: radarr-ingressroute.yaml'
+    source: inferred
+    confidence: medium
+  ingress/sabnzbd-ingressroute.yaml:
+    summary: 'K8s IngressRoute: sabnzbd-ingressroute.yaml'
+    source: inferred
+    confidence: medium
+  ingress/sonarr-ingressroute.yaml:
+    summary: 'K8s IngressRoute: sonarr-ingressroute.yaml'
+    source: inferred
+    confidence: medium
+  overlays/gcp/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  overlays/gcp/shared-storage-pvc.yaml:
+    summary: 'K8s PersistentVolumeClaim: shared-storage-pvc.yaml'
+    source: inferred
+    confidence: medium

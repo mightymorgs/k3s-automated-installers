@@ -1,0 +1,28 @@
+---
+- name: Uninstall Media Shared Storage
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: media-shared
+    storage_namespace: media-stack
+    delete_pvc: false
+
+  tasks:
+    - name: Delete PVC media-shared-pvc
+      when: delete_pvc | bool
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: media-shared-pvc
+        namespace: "{{ storage_namespace }}"
+        state: absent
+
+    - name: Delete PV media-shared-smb-pv
+      when: delete_pvc | bool
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: PersistentVolume
+        name: media-shared-smb-pv
+        state: absent

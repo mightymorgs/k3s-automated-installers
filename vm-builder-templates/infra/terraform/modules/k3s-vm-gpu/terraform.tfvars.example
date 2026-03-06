@@ -1,0 +1,113 @@
+# Example terraform.tfvars for k3s-vm-gpu module
+# Copy to terraform.tfvars and customize for your deployment
+
+# ==============================================================================
+# BASIC VM CONFIGURATION
+# ==============================================================================
+
+name             = "k3s-gaming-laptop"
+vcpu             = 12
+memory_mb        = 29696  # 29GB
+disk_size_gb     = 500
+data_disk_size_gb = 1000  # Extra disk for container images/data
+
+# Ubuntu 24.04 cloud image (download from cloud-images.ubuntu.com)
+base_image_path  = "/var/lib/libvirt/images/ubuntu-24.04.qcow2"
+
+# ==============================================================================
+# NETWORK CONFIGURATION
+# ==============================================================================
+
+network_name     = "default"  # or "bridge0" for bridged networking
+static_ipv4_cidr = "192.168.1.102/24"
+gateway_ipv4     = "192.168.1.1"
+dns_servers      = ["1.1.1.1", "8.8.8.8"]
+
+# Optional: Set specific MAC address
+# mac = "52:54:00:ab:cd:ef"
+
+# ==============================================================================
+# GPU PASSTHROUGH (Gaming Laptop: RTX 3080 Mobile)
+# ==============================================================================
+
+enable_gpu_passthrough = true
+
+# Find GPU address with: lspci -nn | grep -i nvidia
+# Example output:
+#   01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA104M [GeForce RTX 3080 Mobile] [10de:249d]
+#   01:00.1 Audio device [0403]: NVIDIA Corporation GA104 High Definition Audio Controller [10de:228b]
+gpu_pci_address = "01:00.0"  # Use first address (function 0)
+
+# ==============================================================================
+# USB 5GbE NIC PASSTHROUGH (Gaming Laptop)
+# ==============================================================================
+
+enable_usb_nic_passthrough = true
+
+# Find USB NIC IDs with: lsusb | grep -i ethernet
+# Example output: Bus 003 Device 004: ID 0b95:1790 ASIX Electronics Corp. AX88179 Gigabit Ethernet
+#                                        ^^^^ ^^^^
+#                                      vendor product
+usb_nic_vendor_id  = "0b95"  # ASIX Electronics
+usb_nic_product_id = "1790"  # AX88179 Gigabit Ethernet
+
+# ==============================================================================
+# SSH AUTHENTICATION
+# ==============================================================================
+
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... primary-key",
+  # "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... console-key",
+]
+
+# Optional: console access key for root user (via virsh console or host access)
+# console_authorized_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... console-key"
+
+# Optional: Additional admin user
+# admin_user     = "morgan"
+# admin_password = "YourSecurePassword123!"
+
+# Optional: Enable console password for ubuntu user (bootstrap only)
+# enable_console_pw = true
+# console_password  = "TemporaryPassword123!"
+
+# ==============================================================================
+# TAILSCALE INTEGRATION (Optional)
+# ==============================================================================
+
+enable_tailscale_setup = true
+tailscale_tag         = "tag:k3s-gpu"
+ansible_user          = "ubuntu"
+
+# ==============================================================================
+# UEFI FIRMWARE (Ubuntu/Debian defaults)
+# ==============================================================================
+
+firmware_path        = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+nvram_template_path  = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+nvram_path           = "/var/lib/libvirt/qemu/nvram"
+
+# Fedora/RHEL paths:
+# firmware_path       = "/usr/share/edk2/ovmf/OVMF_CODE.fd"
+# nvram_template_path = "/usr/share/edk2/ovmf/OVMF_VARS.fd"
+
+# Arch Linux paths:
+# firmware_path       = "/usr/share/ovmf/x64/OVMF_CODE.fd"
+# nvram_template_path = "/usr/share/ovmf/x64/OVMF_VARS.fd"
+
+# ==============================================================================
+# DETECTION COMMANDS (Run on gaming laptop)
+# ==============================================================================
+
+# Find GPU PCI address:
+#   lspci -nn | grep -i nvidia
+#
+# Verify GPU bound to VFIO:
+#   lspci -k -s 01:00.0 | grep driver
+#   # Should show: Kernel driver in use: vfio-pci
+#
+# Find USB NIC IDs:
+#   lsusb | grep -i ethernet
+#
+# Check UEFI firmware installed:
+#   ls /usr/share/OVMF/OVMF_CODE_4M.fd

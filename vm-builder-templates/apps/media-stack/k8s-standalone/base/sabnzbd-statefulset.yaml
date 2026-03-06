@@ -1,0 +1,90 @@
+---
+# SABnzbd StatefulSet
+# Usenet download client
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sabnzbd
+  namespace: media-stack
+  labels:
+    app: sabnzbd
+    app.kubernetes.io/name: sabnzbd
+    app.kubernetes.io/component: download-client
+spec:
+  serviceName: sabnzbd
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sabnzbd
+  template:
+    metadata:
+      labels:
+        app: sabnzbd
+    spec:
+      containers:
+        - name: sabnzbd
+          image: lscr.io/linuxserver/sabnzbd:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Australia/Sydney"
+            - name: SABNZBD__HOST_WHITELIST
+              value: "nzb.example.local,sabnzbd.media-stack.svc.cluster.local,sabnzbd,localhost,127.0.0.1"
+            - name: SABNZBD__INET_EXPOSURE
+              value: "4"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: nfs-media
+              mountPath: /downloads
+              subPath: downloads
+            - name: nfs-media
+              mountPath: /incomplete-downloads
+              subPath: downloads/incomplete
+            - name: nfs-media
+              mountPath: /data
+              subPath: media
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: nfs-media
+          persistentVolumeClaim:
+            claimName: nfs-media-pvc
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+        labels:
+          app: sabnzbd
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 5Gi

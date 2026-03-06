@@ -1,0 +1,330 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/neo4j/operations/database-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "neo4j.databases.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/neo4j/operations/database-create.yml"
+#     category: "platform"
+#     subsystem: "neo4j"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "neo4j"
+#       supported_versions: ["5.x"]
+#       version_range: ">=5.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - neo4j: "5.26.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Neo4j Cypher/HTTP API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_neo4j_operations"
+#   dependencies: ["neo4j_deployed", "neo4j_ready"]
+#   provides: ["neo4j_database_created"]
+#   tags: ["neo4j", "databases", "cypher", "operations", "phase4", "enterprise"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create a new database in Neo4j via the HTTP Transaction API. This operation is
+#     idempotent - uses CREATE DATABASE IF NOT EXISTS. Waits for the database to
+#     become online before completing. Note: Multi-database requires Neo4j Enterprise.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.neo4j.password"
+#         purpose: "Neo4j admin password for API authentication"
+#       - path: "_state.apps.neo4j.url"
+#         purpose: "Neo4j HTTP endpoint URL"
+#
+#     writes:
+#       - path: "_state.apps.neo4j.databases.{database_name}.created"
+#         example: true
+#       - path: "_state.apps.neo4j.databases.{database_name}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+#       - path: "_state.apps.neo4j.databases.{database_name}.status"
+#         example: "online"
+
+- name: Neo4j - Create Database
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    neo4j_base_url: "{{ neo4j_url }}"
+    neo4j_admin_user: "{{ neo4j_admin_user_input | default('neo4j') }}"
+
+    # Database configuration (required)
+    # database_name: Name for the new database (required)
+
+    # Optional configuration
+    wait_for_online: "{{ wait_for_online_input | default(true) }}"
+    wait_timeout_seconds: "{{ wait_timeout_seconds_input | default(120) }}"
+    wait_delay_seconds: "{{ wait_delay_seconds_input | default(5) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - database_name is defined and database_name | length > 0
+        fail_msg: >-
+          Required inputs: database_name (string).
+          Example: -e "database_name=myapp"
+          Note: Database names must be lowercase alphanumeric with optional dots.
+        success_msg: "All required inputs validated: database_name={{ database_name }}"
+
+    - name: Validate database name format
+      ansible.builtin.assert:
+        that:
+          - database_name is regex("^[a-z][a-z0-9.]*$")
+        fail_msg: >-
+          Invalid database name '{{ database_name }}'. Must start with lowercase letter,
+          contain only lowercase letters, numbers, and dots.
+        success_msg: "Database name format is valid"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Neo4j Credentials =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Neo4j credentials
+      ansible.builtin.set_fact:
+        neo4j_admin_password: "{{ inventory._state.apps.neo4j.password }}"
+        neo4j_url: "{{ inventory._state.apps.neo4j.url | default(neo4j_base_url) }}"
+      no_log: true
+
+    - name: Validate Neo4j credentials are available
+      ansible.builtin.assert:
+        that:
+          - neo4j_admin_password | length > 0
+        fail_msg: "Neo4j admin password not found in BWS _state. Deploy Neo4j first."
+        success_msg: "Neo4j credentials retrieved from BWS _state"
+
+    # ===== STEP 4: Check if Database Already Exists =====
+    - name: Check if database already exists
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW DATABASE $name YIELD name, currentStatus RETURN name, currentStatus"
+              parameters:
+                name: "{{ database_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: check_db_result
+      no_log: false
+
+    - name: Determine if database exists
+      ansible.builtin.set_fact:
+        database_exists: "{{ check_db_result.json.results[0].data | length > 0 }}"
+        existing_status: >-
+          {{
+            check_db_result.json.results[0].data[0].row[1]
+            if check_db_result.json.results[0].data | length > 0
+            else 'unknown'
+          }}
+
+    - name: Display database status
+      ansible.builtin.debug:
+        msg: >-
+          Database '{{ database_name }}':
+          {{ 'Already exists (status: ' + existing_status + ')' if database_exists else 'Does not exist (will create)' }}
+
+    # ===== STEP 5: Create Database =====
+    - name: Create database in Neo4j (IF NOT EXISTS for idempotency)
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "CREATE DATABASE $name IF NOT EXISTS"
+              parameters:
+                name: "{{ database_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: create_db_result
+      no_log: false
+
+    - name: Check for Neo4j errors in create response
+      ansible.builtin.assert:
+        that:
+          - create_db_result.json.errors | length == 0
+        fail_msg: "Failed to create database: {{ create_db_result.json.errors | map(attribute='message') | join(', ') }}"
+        success_msg: "Database '{{ database_name }}' create command executed successfully"
+
+    # ===== STEP 6: Wait for Database to be Online =====
+    - name: Wait for database to be online
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW DATABASE $name YIELD name, currentStatus RETURN currentStatus"
+              parameters:
+                name: "{{ database_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: db_status_result
+      until: >-
+        db_status_result.json.results[0].data | length > 0 and
+        db_status_result.json.results[0].data[0].row[0] == 'online'
+      retries: "{{ (wait_timeout_seconds | int / wait_delay_seconds | int) | int }}"
+      delay: "{{ wait_delay_seconds | int }}"
+      when:
+        - wait_for_online | bool
+        - not database_exists
+      no_log: false
+
+    - name: Record final database status
+      ansible.builtin.set_fact:
+        final_status: >-
+          {{
+            db_status_result.json.results[0].data[0].row[0]
+            if db_status_result is not skipped and db_status_result.json.results[0].data | length > 0
+            else (existing_status if database_exists else 'unknown')
+          }}
+
+    # ===== STEP 7: Verify Database is Accessible =====
+    - name: Verify database is accessible with a test query
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/{{ database_name }}/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "RETURN 1 AS healthcheck"
+        status_code: [200]
+        validate_certs: false
+      register: verify_db_result
+      when: not database_exists
+      no_log: false
+
+    - name: Assert database verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_db_result.json.errors | length == 0
+          - verify_db_result.json.results[0].data | length > 0
+        fail_msg: "Failed to verify database '{{ database_name }}' is accessible"
+        success_msg: "Database '{{ database_name }}' is accessible and responding to queries"
+      when: not database_exists
+
+    # ===== STEP 8: Write Database Status to BWS._state =====
+    - name: Update BWS inventory with database status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.neo4j.databases.{database_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ database_name }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          --arg status "{{ final_status }}" \
+          --argjson was_existing {{ database_exists | lower }} \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.neo4j == null then ._state.apps.neo4j = {} else . end |
+          if ._state.apps.neo4j.databases == null then ._state.apps.neo4j.databases = {} else . end |
+          ._state.apps.neo4j.databases[$name] = {
+            "created": $created,
+            "created_timestamp": $timestamp,
+            "status": $status,
+            "was_existing": $was_existing
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 9: Output Result =====
+    - name: Display database creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if database_exists else 'created' }}"
+          database_name: "{{ database_name }}"
+          database_status: "{{ final_status }}"
+          bolt_url: "bolt://neo4j.neo4j.svc:7687/{{ database_name }}"
+          http_url: "{{ neo4j_url }}/db/{{ database_name }}"
+          message: >-
+            Database '{{ database_name }}' {{ 'already existed' if database_exists else 'created successfully' }}.
+            Current status: {{ final_status }}.
+            Status recorded in BWS _state.
+          note: >-
+            Multi-database support requires Neo4j Enterprise Edition.
+            Community Edition only supports the default 'neo4j' and 'system' databases.

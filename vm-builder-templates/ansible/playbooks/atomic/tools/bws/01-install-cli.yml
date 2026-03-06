@@ -1,0 +1,118 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/bws/01-install-cli"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/bws/01-install-cli.yml"
+#     category: "tools"
+#     subsystem: "bws"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "bws"
+#       supported_versions: ["1.0.0+"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - bws: "1.0.0"
+#         os: "ubuntu-24.04"
+#         kernel: "6.14.0-35"
+#         result: "success"
+#         test_date: "2025-11-12"
+#         notes: "Installed on localhost, verified version and secret access, idempotency confirmed"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: []
+#   provides: ["bws_cli_installed"]
+#   tags: ["bws", "bitwarden", "secrets", "tools"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Install Bitwarden Secrets CLI from GitHub releases
+- name: Install Bitwarden Secrets CLI
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: true
+  vars:
+    bws_version: "{{ bws_cli_version | default('1.0.0') }}"
+    bws_arch: >-
+      {{ 'x86_64' if ansible_architecture == 'x86_64'
+         else 'aarch64' if ansible_architecture == 'aarch64'
+         else ansible_architecture }}
+    bws_platform: unknown-linux-gnu
+    bws_binary_name: bws-{{ bws_arch }}-{{ bws_platform }}-{{ bws_version }}
+    bws_download_url: >-
+      https://github.com/bitwarden/sdk-sm/releases/download/bws-v{{
+      bws_version }}/{{ bws_binary_name }}.zip
+    bws_install_path: /usr/local/bin/bws
+  tasks:
+    - name: Check if BWS CLI is already installed
+      ansible.builtin.stat:
+        path: '{{ bws_install_path }}'
+      register: bws_binary
+      changed_when: false
+    - name: Get installed BWS version
+      ansible.builtin.command: '{{ bws_install_path }} --version'
+      register: bws_current_version
+      changed_when: false
+      failed_when: false
+      when: bws_binary.stat.exists
+    - name: Determine if installation needed
+      ansible.builtin.set_fact:
+        bws_needs_install: >-
+          {{ not bws_binary.stat.exists or
+             (bws_binary.stat.exists and bws_version not in (bws_current_version.stdout
+          | default(''))) }}
+    - name: Download BWS CLI
+      ansible.builtin.get_url:
+        url: '{{ bws_download_url }}'
+        dest: /tmp/bws-{{ bws_version }}.zip
+        mode: '0644'
+      when: bws_needs_install
+    - name: Install unzip if needed
+      ansible.builtin.apt:
+        name: unzip
+        state: present
+        update_cache: false
+      when: bws_needs_install
+    - name: Extract BWS CLI
+      ansible.builtin.unarchive:
+        src: /tmp/bws-{{ bws_version }}.zip
+        dest: /tmp
+        remote_src: true
+      when: bws_needs_install
+    - name: Install BWS binary
+      ansible.builtin.copy:
+        src: /tmp/bws
+        dest: '{{ bws_install_path }}'
+        mode: '0755'
+        remote_src: true
+      when: bws_needs_install
+    - name: Clean up download files
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop: ['/tmp/bws-{{ bws_version }}.zip', /tmp/bws]
+      when: bws_needs_install
+    - name: Verify BWS installation
+      ansible.builtin.command: '{{ bws_install_path }} --version'
+      register: bws_verify
+      changed_when: false
+    - name: Display BWS version
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - BWS CLI Installed Successfully
+          - ==========================================
+          - '{{ bws_verify.stdout }}'
+          - ==========================================

@@ -1,0 +1,221 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/loki/05-wire-alertmanager"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/loki/config/05-wire-alertmanager.yml"
+#     category: "apps"
+#     subsystem: "loki"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["loki_deployed", "alertmanager_deployed"]
+#   provides: ["loki_alertmanager_wired"]
+#   tags: ["loki", "alertmanager", "integration", "wiring", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Loki's ruler component to send alerts to Alertmanager.
+#     Patches the loki-config ConfigMap to add the ruler section with
+#     alertmanager_url pointing to the Alertmanager K8s service, then
+#     restarts Loki to pick up the new config. Idempotent: checks if
+#     ruler alertmanager_url is already configured before patching.
+#   requires_apps: ["loki", "alertmanager"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Wire Alertmanager into Loki Ruler
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    loki_namespace: "observability"
+    alertmanager_namespace: "alertmanager"
+    # loki_url: from BWS _state via Phase 4 extra-vars
+    # alertmanager_url: from BWS _state via Phase 4 extra-vars
+    alertmanager_internal_url: "{{ alertmanager_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF LOKI IS DEPLOYED ==========
+
+    # ========== SKIP IF ALERTMANAGER NOT INSTALLED ==========
+    - name: Skip if alertmanager is not installed on this VM
+      when: alertmanager_url is not defined
+      block:
+        - name: "alertmanager not installed — skipping loki <-> alertmanager wiring"
+          ansible.builtin.debug:
+            msg: "alertmanager is not installed on this VM (no alertmanager_url in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Check if Loki pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ loki_namespace }} -l app=loki --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Loki not deployed
+      ansible.builtin.meta: end_play
+      when: loki_pod_check.rc != 0 or loki_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ALERTMANAGER IS DEPLOYED ==========
+    - name: Check if Alertmanager pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ alertmanager_namespace }} -l app.kubernetes.io/name=alertmanager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alertmanager_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Alertmanager not deployed
+      ansible.builtin.meta: end_play
+      when: alertmanager_pod_check.rc != 0 or alertmanager_pod_check.stdout | length == 0
+
+    # ========== GET CURRENT LOKI CONFIG ==========
+    - name: Get current Loki ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap loki-config -n {{ loki_namespace }}
+          -o jsonpath='{.data.loki\.yaml}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_config_raw
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Loki ConfigMap not found
+      ansible.builtin.meta: end_play
+      when: current_config_raw.rc != 0 or current_config_raw.stdout | length == 0
+
+    - name: Store current config
+      ansible.builtin.set_fact:
+        current_config: "{{ current_config_raw.stdout }}"
+
+    # ========== CHECK IF RULER ALERTMANAGER ALREADY CONFIGURED ==========
+    - name: Check if ruler alertmanager_url already in config
+      ansible.builtin.set_fact:
+        ruler_already_configured: "{{ 'alertmanager_url' in current_config and 'alertmanager.alertmanager.svc' in current_config }}"
+
+    - name: Note ruler already configured
+      ansible.builtin.debug:
+        msg: "Ruler alertmanager_url already present in Loki config - skipping patch"
+      when: ruler_already_configured
+
+    # ========== PATCH LOKI CONFIGMAP WITH RULER SECTION ==========
+    # Loki uses a YAML config file (not an API) for the ruler component.
+    # We patch the ConfigMap to add the ruler section pointing to Alertmanager,
+    # then restart the StatefulSet so Loki picks up the new config.
+    - name: Patch Loki ConfigMap with ruler section
+      when: not ruler_already_configured
+      block:
+        - name: Build ruler config block
+          ansible.builtin.set_fact:
+            ruler_block: |
+              ruler:
+                storage:
+                  type: local
+                  local:
+                    directory: /loki/rules
+                rule_path: /tmp/rules
+                alertmanager_url: {{ alertmanager_internal_url }}
+                ring:
+                  kvstore:
+                    store: inmemory
+                enable_api: true
+                enable_alertmanager_v2: true
+
+        - name: Append ruler config to loki.yaml in ConfigMap
+          ansible.builtin.shell: |
+            # Get current loki.yaml from ConfigMap
+            CURRENT=$(kubectl get configmap loki-config -n {{ loki_namespace }} \
+              -o jsonpath='{.data.loki\.yaml}')
+
+            # Check if ruler section already exists
+            if echo "$CURRENT" | grep -q "alertmanager_url:"; then
+              echo "ALREADY_CONFIGURED"
+              exit 0
+            fi
+
+            # Append ruler block to existing config
+            TMPFILE=$(mktemp)
+            cat > "$TMPFILE" <<'YAMLEOF'
+            {{ current_config }}
+
+            {{ ruler_block }}
+            YAMLEOF
+
+            # Replace the ConfigMap data
+            kubectl create configmap loki-config \
+              -n {{ loki_namespace }} \
+              --from-file=loki.yaml="$TMPFILE" \
+              --dry-run=client -o yaml | \
+              kubectl apply -f -
+
+            rm -f "$TMPFILE"
+            echo "PATCHED"
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: config_patch_result
+          changed_when: "'PATCHED' in config_patch_result.stdout"
+
+    # ========== RESTART LOKI TO PICK UP CONFIG ==========
+    # Loki does not support live config reload — a restart is required.
+    - name: Restart Loki StatefulSet to pick up new config
+      ansible.builtin.command:
+        cmd: kubectl rollout restart statefulset/loki -n {{ loki_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: restart_result
+      changed_when: "'restarted' in restart_result.stdout"
+      when: not ruler_already_configured
+
+    - name: Wait for Loki rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/loki -n {{ loki_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not ruler_already_configured
+
+    # ========== VERIFY LOKI IS HEALTHY ==========
+    - name: Verify Loki ready endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/ready"
+        method: GET
+        return_content: false
+      register: loki_health
+      retries: 10
+      delay: 6
+      until: loki_health.status is defined and loki_health.status == 200
+      failed_when: false
+      when: not ruler_already_configured
+
+    - name: Fail if Loki not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Loki not accessible after rollout (last status: {{ loki_health.status | default('unknown') }})"
+      when: >-
+        not ruler_already_configured and
+        (loki_health.status is not defined or loki_health.status != 200)
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Loki <-> Alertmanager Wiring Complete"
+          - "=========================================="
+          - "Ruler Alertmanager URL: {{ alertmanager_internal_url }}"
+          - "Config Method: ConfigMap patch + StatefulSet restart"
+          - "Status: {{ 'Already configured' if ruler_already_configured else 'Patched and restarted' }}"
+          - "Ruler API: enabled"
+          - "Alertmanager V2: enabled"
+          - "=========================================="

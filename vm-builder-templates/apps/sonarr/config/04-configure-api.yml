@@ -1,0 +1,213 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sonarr/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sonarr/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "sonarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260204_api_config_fix"
+#   dependencies: ["sonarr_deployed"]
+#   provides: ["sonarr_api_configured"]
+#   tags: ["sonarr", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure Sonarr via API (root folders, naming)
+#   requires_apps: ["sonarr"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.sonarr.api_key"
+#     writes:
+#       - path: "_state.apps.sonarr.configured"
+#         example: true
+
+- name: Configure Sonarr via API
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    sonarr_namespace: "media-stack"
+    app_name: "sonarr"
+    app_namespace: "{{ sonarr_namespace }}"
+    # sonarr_pod: resolved dynamically via kubectl label selector
+    # sonarr_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== CHECK IF SONARR IS DEPLOYED ==========
+    - name: Check if Sonarr pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=sonarr --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: sonarr_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Sonarr not deployed
+      ansible.builtin.debug:
+        msg: "Sonarr not deployed - skipping API configuration"
+      when: sonarr_pod_check.rc != 0 or sonarr_pod_check.stdout | length == 0
+
+    - name: End play if Sonarr not available
+      ansible.builtin.meta: end_play
+      when: sonarr_pod_check.rc != 0 or sonarr_pod_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Sonarr pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ app_namespace }} \
+          -l app.kubernetes.io/name=sonarr \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ app_namespace }} \
+          -l app=sonarr \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ========== GET API KEY FROM BWS (via Phase 4 extra-vars) ==========
+    - name: Fail if API key not available from BWS
+      ansible.builtin.fail:
+        msg: >-
+          {{ app_name }}_api_key not provided by Phase 4 extra-vars.
+          Phase 3 extract-api-keys job may have failed.
+          Check _state.apps.{{ app_name }}.api_key in BWS inventory.
+      when: (app_name + '_api_key') is not defined or
+            lookup('vars', app_name + '_api_key', default='') | length == 0
+
+    - name: Set API key from BWS extra-var
+      ansible.builtin.set_fact:
+        api_key: "{{ lookup('vars', app_name + '_api_key') }}"
+      no_log: true
+
+    # ========== VERIFY API CONNECTIVITY ==========
+    - name: Verify Sonarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Sonarr API not accessible
+      ansible.builtin.fail:
+        msg: "Sonarr API not accessible after retries (last status: {{ api_status.status | default('unknown') }})"
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== CONFIGURE ROOT FOLDER ==========
+    - name: Ensure /media/tv directory exists in pod
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- mkdir -p /media/tv
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    - name: Get existing root folders
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/rootfolder"
+        method: GET
+        headers:
+          X-Api-Key: "{{ api_key }}"
+        status_code: [200]
+      register: existing_root_folders
+
+    - name: Check if TV root folder exists
+      ansible.builtin.set_fact:
+        tv_folder_exists: "{{ (existing_root_folders.json | selectattr('path', 'equalto', '/media/tv') | list | length) > 0 }}"
+
+    - name: Add TV root folder
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/rootfolder"
+        method: POST
+        headers:
+          X-Api-Key: "{{ api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          path: "/media/tv"
+        status_code: [200, 201]
+      when: not tv_folder_exists
+
+    # ========== DISABLE BUILT-IN AUTH FOR LOCAL ADDRESSES ==========
+    - name: Get current host config
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/config/host"
+        method: GET
+        headers:
+          X-Api-Key: "{{ api_key }}"
+        status_code: [200]
+      register: current_host_config
+
+    - name: Disable authentication for local addresses (includes CGNAT/Tailscale)
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/config/host"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: >-
+          {{ current_host_config.json | combine({
+            'authenticationRequired': 'DisabledForLocalAddresses',
+            'trustCgnatIpAddresses': true
+          }) }}
+        status_code: [200, 202]
+      when: >-
+        current_host_config.json.authenticationRequired != 'DisabledForLocalAddresses' or
+        not current_host_config.json.trustCgnatIpAddresses | default(false)
+
+    # ========== CONFIGURE NAMING ==========
+    - name: Get current naming config
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/config/naming"
+        method: GET
+        headers:
+          X-Api-Key: "{{ api_key }}"
+        status_code: [200]
+      register: current_naming
+
+    - name: Configure episode naming
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/config/naming"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ current_naming.json | combine(naming_overrides) }}"
+        status_code: [200, 202]
+      vars:
+        naming_overrides:
+          renameEpisodes: true
+          replaceIllegalCharacters: true
+          standardEpisodeFormat: "{Series Title} - S{season:00}E{episode:00} - {Episode Title} [{Quality Title}]"
+          dailyEpisodeFormat: "{Series Title} - {Air-Date} - {Episode Title} [{Quality Title}]"
+          animeEpisodeFormat: "{Series Title} - S{season:00}E{episode:00} - {Episode Title} [{Quality Title}]"
+          seriesFolderFormat: "{Series Title}"
+          seasonFolderFormat: "Season {season:00}"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Sonarr API Configuration Complete"
+          - "=========================================="
+          - "Root Folder: /media/tv ({{ 'added' if not tv_folder_exists else 'exists' }})"
+          - "Auth: DisabledForLocalAddresses"
+          - "Naming: Configured"
+          - "=========================================="

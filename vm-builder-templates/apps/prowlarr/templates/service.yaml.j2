@@ -1,0 +1,24 @@
+---
+# Prowlarr Service (J2 template)
+# Defaults match k8s-standalone/base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('prowlarr') }}
+  namespace: {{ app_namespace | default('media-stack') }}
+  labels:
+    app: {{ app_name | default('prowlarr') }}
+    app.kubernetes.io/name: {{ app_name | default('prowlarr') }}
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('prowlarr') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(9696) }}
+      targetPort: {{ container_port | default(9696) }}
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30696) }}
+{% endif %}
+      protocol: TCP

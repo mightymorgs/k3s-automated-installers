@@ -1,0 +1,80 @@
+---
+- name: Uninstall External Secrets Operator
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: external-secrets
+    app_namespace: "external-secrets"
+    delete_pvc: false
+
+  tasks:
+    - name: Check namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+      register: ns_check
+
+    - name: Skip if namespace does not exist
+      ansible.builtin.meta: end_play
+      when: ns_check.resources | length == 0
+
+    # Clean up ExternalSecret CRDs first to avoid finalizer hangs
+    - name: Find all ExternalSecret resources cluster-wide
+      kubernetes.core.k8s_info:
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+      register: ext_secrets
+      failed_when: false
+
+    - name: Delete all ExternalSecret resources
+      kubernetes.core.k8s:
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ item.metadata.namespace }}"
+        state: absent
+      loop: "{{ ext_secrets.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      failed_when: false
+
+    # Clean up ClusterSecretStore
+    - name: Delete ClusterSecretStore vault-backend
+      kubernetes.core.k8s:
+        api_version: external-secrets.io/v1beta1
+        kind: ClusterSecretStore
+        name: vault-backend
+        state: absent
+      failed_when: false
+
+    - name: Delete Deployment external-secrets
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: external-secrets
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete Service external-secrets-webhook
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Service
+        name: external-secrets-webhook
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Verify removal
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: external-secrets
+        namespace: "{{ app_namespace }}"
+      register: verify
+      failed_when: verify.resources | length > 0

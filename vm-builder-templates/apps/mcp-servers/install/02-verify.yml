@@ -1,0 +1,174 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/mcp-servers/03-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/mcp-servers/install/02-verify.yml"
+#     category: "platform"
+#     subsystem: "mcp-servers"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "mcp-servers"
+#       supported_versions: ["1.0.x"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - mcp_servers: "1.0.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-04"
+#         notes: "Pending functional test on target infrastructure"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["mcp_manifests_applied"]
+#   provides: ["mcp_verified", "mcp_ready"]
+#   tags: ["mcp", "verification", "health-check", "golden-master"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify all MCP Servers are healthy and accessible
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.apps.vault_mcp.url"
+#         purpose: "Vault MCP Server endpoint for health check"
+#       - path: "_state.apps.awx_mcp.url"
+#         purpose: "AWX MCP Server endpoint for health check"
+#       - path: "_state.apps.teleport_mcp.url"
+#         purpose: "Teleport MCP Server endpoint for health check"
+#       - path: "_state.apps.k8s_rag_mcp.url"
+#         purpose: "K8s RAG MCP Server endpoint for health check"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.vault_mcp.health_status"
+#         example: "healthy"
+#       - path: "_state.apps.awx_mcp.health_status"
+#         example: "healthy"
+#       - path: "_state.apps.teleport_mcp.health_status"
+#         example: "healthy"
+#       - path: "_state.apps.k8s_rag_mcp.health_status"
+#         example: "healthy"
+
+- name: Verify MCP Servers Health
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    mcp_namespace: mcp-tools
+    mcp_servers:
+      - name: vault-mcp
+        port: 8080
+        type: deployment
+      - name: awx-mcp
+        port: 8080
+        type: deployment
+      - name: teleport-mcp
+        port: 8080
+        type: deployment
+      - name: k8s-rag-mcp
+        port: 8080
+        type: deployment
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. CHECK INDIVIDUAL MCP SERVER DEPLOYMENTS ==========
+    - name: Check Vault MCP Server ready replicas
+      ansible.builtin.command: >-
+        kubectl get deployment vault-mcp -n {{ mcp_namespace }}
+        -o jsonpath='{.status.readyReplicas}'
+      register: vault_mcp
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: vault_mcp.rc == 0 and vault_mcp.stdout not in ['', '0']
+
+    - name: Check AWX MCP Server ready replicas
+      ansible.builtin.command: >-
+        kubectl get deployment awx-mcp -n {{ mcp_namespace }}
+        -o jsonpath='{.status.readyReplicas}'
+      register: awx_mcp
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: awx_mcp.rc == 0 and awx_mcp.stdout not in ['', '0']
+
+    - name: Check Teleport MCP Server ready replicas
+      ansible.builtin.command: >-
+        kubectl get deployment teleport-mcp -n {{ mcp_namespace }}
+        -o jsonpath='{.status.readyReplicas}'
+      register: teleport_mcp
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: teleport_mcp.rc == 0 and teleport_mcp.stdout not in ['', '0']
+
+    - name: Check K8s RAG MCP Server ready replicas
+      ansible.builtin.command: >-
+        kubectl get deployment k8s-rag-mcp -n {{ mcp_namespace }}
+        -o jsonpath='{.status.readyReplicas}'
+      register: k8s_rag_mcp
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: k8s_rag_mcp.rc == 0 and k8s_rag_mcp.stdout not in ['', '0']
+
+    # ========== 2. VERIFY ALL MCP SERVERS RUNNING ==========
+    - name: Verify all MCP Servers are running
+      ansible.builtin.assert:
+        that:
+          - vault_mcp.rc == 0 and vault_mcp.stdout not in ['', '0']
+          - awx_mcp.rc == 0 and awx_mcp.stdout not in ['', '0']
+          - teleport_mcp.rc == 0 and teleport_mcp.stdout not in ['', '0']
+          - k8s_rag_mcp.rc == 0 and k8s_rag_mcp.stdout not in ['', '0']
+        fail_msg: "One or more MCP Servers are not running"
+        success_msg: "All MCP Servers are running"
+
+    # ========== 3. BUILD STATUS SUMMARY ==========
+    - name: Build MCP status summary
+      ansible.builtin.set_fact:
+        mcp_status:
+          vault_mcp: "{{ vault_mcp.stdout }} replicas ready"
+          awx_mcp: "{{ awx_mcp.stdout }} replicas ready"
+          teleport_mcp: "{{ teleport_mcp.stdout }} replicas ready"
+          k8s_rag_mcp: "{{ k8s_rag_mcp.stdout }} replicas ready"
+
+    # ========== 4. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display MCP verification results
+      ansible.builtin.debug:
+        msg:
+          - "========== MCP Servers Verification =========="
+          - "Status: HEALTHY"
+          - "Namespace: {{ mcp_namespace }}"
+          - ""
+          - "MCP Server Status:"
+          - "  Vault MCP Server: {{ mcp_status.vault_mcp }}"
+          - "  AWX MCP Server: {{ mcp_status.awx_mcp }}"
+          - "  Teleport MCP Server: {{ mcp_status.teleport_mcp }}"
+          - "  K8s RAG MCP Server: {{ mcp_status.k8s_rag_mcp }}"
+          - ""
+          - "MCP Capabilities:"
+          - "  - Vault: Secret management, credential rotation"
+          - "  - AWX: Job template execution, inventory queries"
+          - "  - Teleport: Access management, session recording"
+          - "  - K8s RAG: Semantic search over cluster state"
+          - ""
+          - "AI Agent Integration:"
+          - "  Connect via SSE endpoint on each MCP server"
+          - "  Example: http://vault-mcp-server.mcp-tools.svc:8080/sse"

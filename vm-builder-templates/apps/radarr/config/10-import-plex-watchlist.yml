@@ -1,0 +1,137 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/radarr/10-import-plex-watchlist"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/radarr/config/10-import-plex-watchlist.yml"
+#     category: "apps"
+#     subsystem: "radarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["radarr_deployed", "plex_deployed"]
+#   provides: ["radarr_plex_watchlist_configured"]
+#   tags: ["radarr", "plex", "import-list", "watchlist", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Import Plex Watchlist into Radarr as an automatic import list.
+#     When users add movies to their Plex Watchlist, Radarr will
+#     automatically search for and download them. Uses the PlexImport
+#     implementation with the Plex authentication token.
+#   requires_apps: ["radarr", "plex"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.radarr.api_key"
+#       - path: "_state.apps.plex.api_key"
+
+- name: Import Plex Watchlist into Radarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    radarr_namespace: "media-stack"
+    app_namespace: "{{ radarr_namespace }}"
+    # radarr_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF PLEX NOT INSTALLED ==========
+    - name: Skip if plex is not installed on this VM
+      when: plex_api_key is not defined
+      block:
+        - name: "plex not installed — skipping radarr <-> plex wiring"
+          ansible.builtin.debug:
+            msg: "plex is not installed on this VM (no plex_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if radarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "radarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: radarr_api_key is not defined or radarr_api_key | length == 0
+
+    - name: Fail if plex_api_key not provided
+      ansible.builtin.fail:
+        msg: "plex_api_key must be provided via extra-vars (from BWS inventory)"
+      when: plex_api_key is not defined or plex_api_key | length == 0
+
+    # ========== VERIFY RADARR API ==========
+    - name: Verify Radarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Radarr API not accessible
+      ansible.builtin.fail:
+        msg: "Radarr API not accessible at {{ radarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== CHECK EXISTING IMPORT LISTS ==========
+    - name: Get existing import lists
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/importlist"
+        method: GET
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        status_code: [200]
+      register: existing_importlists
+
+    - name: Check if Plex Watchlist import list already exists
+      ansible.builtin.set_fact:
+        plex_watchlist_exists: "{{ (existing_importlists.json | selectattr('name', 'equalto', 'Plex Watchlist') | list | length) > 0 }}"
+
+    # ========== ADD PLEX WATCHLIST IMPORT LIST ==========
+    - name: Add Plex Watchlist as import list
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/importlist"
+        method: POST
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Plex Watchlist"
+          implementation: "PlexImport"
+          configContract: "PlexListSettings"
+          enableAutomaticAdd: true
+          shouldMonitor: "movieOnly"
+          qualityProfileId: 1
+          rootFolderPath: "/media/movies"
+          fields:
+            - name: "accessToken"
+              value: "{{ plex_api_key }}"
+            - name: "signIn"
+              value: "startOAuth"
+        status_code: [200, 201]
+        return_content: true
+      register: add_watchlist_result
+      when: not plex_watchlist_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display import list result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Radarr <-> Plex Watchlist Import Complete"
+          - "=========================================="
+          - "Import List: Plex Watchlist ({{ 'added' if (not plex_watchlist_exists and add_watchlist_result is defined and add_watchlist_result.status | default(0) in [200, 201]) else ('exists' if plex_watchlist_exists else 'FAILED') }})"
+          - "Auto-Add: enabled"
+          - "Monitor: movie only"
+          - "Root Folder: /media/movies"
+          - "Quality Profile: 1 (default)"
+          - "=========================================="

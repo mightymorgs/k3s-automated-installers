@@ -1,0 +1,51 @@
+---
+- name: Uninstall Kibana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: kibana
+    app_namespace: "kibana"
+    delete_pvc: false
+
+  tasks:
+    - name: Check namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+      register: ns_check
+
+    - name: Skip if namespace does not exist
+      ansible.builtin.meta: end_play
+      when: ns_check.resources | length == 0
+
+    - name: Delete Deployment kibana
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: kibana
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete Service kibana
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Service
+        name: kibana
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Verify removal
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: kibana
+        namespace: "{{ app_namespace }}"
+      register: verify
+      failed_when: verify.resources | length > 0

@@ -1,0 +1,21 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Grafana visualization and dashboards to K3s cluster. Provides
+      unified observability UI for metrics and logs. Accessible via Tailscale on NodePort
+      30300.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - http://localhost:{{ nodeport | default(30030) }}/api/health
+    - http://localhost:{{ nodeport | default(30030) }}/api/auth/keys
+    uses_files:
+    - '{{ templates_dir }}/configmap.yaml.j2'
+    - '{{ templates_dir }}/secrets.yaml.j2'
+    - '{{ templates_dir }}/statefulset.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+  02-verify.yml:
+    summary: Verify Grafana deployment is healthy
+    source: inferred
+    confidence: medium

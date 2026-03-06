@@ -1,0 +1,218 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/config/02-wire-forwardauth"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/config/02-wire-forwardauth.yml"
+#     category: "platform"
+#     subsystem: "authentik"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["authentik_deployed"]
+#   provides: ["forwardauth_middleware_created"]
+#   tags: ["authentik", "forwardauth", "traefik", "middleware", "sso"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create Authentik ForwardAuth Middleware CRD. ForwardAuth middleware references
+#     are baked into IngressRoutes at creation time by 01-create-ingressroutes.yml.
+#     This playbook only creates the Middleware CRD itself and writes state to BWS.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.installed"
+#         purpose: "List of installed apps to check for SSO requirements"
+#       - path: "ingress.sso_overrides"
+#         purpose: "Per-app SSO disable overrides"
+#
+#     writes:
+#       - path: "_state.sso.forwardauth_configured"
+#         example: true
+#       - path: "_state.sso.protected_apps"
+#         example: ["grafana", "awx", "neo4j", "loki", "prometheus"]
+#       - path: "_state.sso.auth_url"
+#         example: "https://demo.com/outpost.goauthentik.io/auth/traefik"
+
+- name: Wire Authentik ForwardAuth Middleware to IngressRoutes
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    registry_path: "{{ playbook_dir }}/../../../registry.json"
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== 1. READ BWS INVENTORY ==========
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    - name: Get BWS secret ID for later write-back
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: bws_secret_id_raw
+      changed_when: false
+
+    - name: Set BWS secret ID
+      ansible.builtin.set_fact:
+        bws_secret_id: "{{ bws_secret_id_raw.stdout | trim }}"
+
+    - name: Extract ingress configuration
+      set_fact:
+        installed_apps: "{{ inventory._state.apps.installed | default([]) }}"
+
+    - name: Extract SSO overrides
+      ansible.builtin.set_fact:
+        sso_overrides: "{{ inventory.ingress.sso_overrides | default({}) }}"
+
+    # ========== 2. READ REGISTRY TO FIND APPS WITH FORWARDAUTH ==========
+    - name: Read app registry
+      set_fact:
+        registry: "{{ lookup('file', registry_path) | from_json }}"
+
+    - name: Extract authentik service details from registry
+      ansible.builtin.set_fact:
+        _ak_namespace: "{{ registry.apps.authentik.ingress.namespace }}"
+        _ak_service: "{{ registry.apps.authentik.ingress.service_name }}"
+        _ak_port: "{{ registry.apps.authentik.ingress.service_port }}"
+
+    - name: Find apps with ForwardAuth enabled
+      set_fact:
+        forwardauth_apps: >-
+          {{
+            registry.apps.values()
+            | selectattr('sso.forwardauth.enabled', 'defined')
+            | selectattr('sso.forwardauth.enabled', 'equalto', true)
+            | list
+          }}
+
+    - name: Filter to only installed apps
+      set_fact:
+        apps_to_protect: >-
+          {{
+            forwardauth_apps
+            | selectattr('id', 'in', installed_apps)
+            | list
+          }}
+
+    - name: Apply sso_overrides (exclude disabled apps)
+      ansible.builtin.set_fact:
+        apps_to_protect: >-
+          {{ apps_to_protect |
+          rejectattr('id', 'in',
+            sso_overrides | dict2items |
+            rejectattr('value', 'equalto', true) |
+            map(attribute='key') | list
+          ) | list }}
+      when: sso_overrides | length > 0
+
+    - name: Display apps to protect with ForwardAuth
+      debug:
+        msg: "Apps requiring ForwardAuth: {{ apps_to_protect | map(attribute='id') | list }}"
+
+    # ========== 3. CONSTRUCT FORWARDAUTH URL ==========
+    # ForwardAuth address is always cluster-internal. Traefik calls authentik
+    # directly inside the cluster — no external round-trip needed. Authentik
+    # reads X-Forwarded-Host to construct the browser redirect URL, so the
+    # external domain (Cloudflare or Tailscale) is not needed here.
+    - name: Construct ForwardAuth URL (cluster-internal)
+      set_fact:
+        auth_url: "http://{{ _ak_service }}.{{ _ak_namespace }}.svc.cluster.local:{{ _ak_port }}/outpost.goauthentik.io/auth/traefik"
+
+    - name: Display ForwardAuth URL
+      debug:
+        msg: "ForwardAuth URL: {{ auth_url }}"
+
+    # ========== 4. CREATE FORWARDAUTH MIDDLEWARE CRD ==========
+    - name: Apply ForwardAuth Middleware
+      ansible.builtin.shell: |
+        cat <<'ENDOFYAML' | sed "s|AUTH_URL_PLACEHOLDER|{{ auth_url }}|g" | kubectl apply -f -
+        apiVersion: traefik.io/v1alpha1
+        kind: Middleware
+        metadata:
+          name: authentik-forwardauth
+          namespace: {{ _ak_namespace }}
+          labels:
+            app.kubernetes.io/name: authentik
+            app.kubernetes.io/component: forwardauth-middleware
+        spec:
+          forwardAuth:
+            address: "AUTH_URL_PLACEHOLDER"
+            trustForwardHeader: true
+            authResponseHeaders:
+              - X-authentik-username
+              - X-authentik-groups
+              - X-authentik-email
+              - X-authentik-name
+              - X-authentik-uid
+              - X-authentik-jwt
+              - X-authentik-meta-jwks
+              - X-authentik-meta-outpost
+              - X-authentik-meta-provider
+              - X-authentik-meta-app
+              - X-authentik-meta-version
+        ENDOFYAML
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: middleware_result
+      changed_when: "'created' in middleware_result.stdout or 'configured' in middleware_result.stdout"
+
+    # ========== 5. WRITE STATUS TO BWS._STATE ==========
+    - name: Write ForwardAuth state to BWS
+      ansible.builtin.shell: |
+        set -eu
+        CURRENT=$(bws secret get "{{ bws_secret_id }}" --output json | jq -r '.value')
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg auth_url "{{ auth_url }}" \
+          --argjson protected '{{ apps_to_protect | map(attribute="id") | list | to_json }}' '
+          ._state.sso.forwardauth_configured = true |
+          ._state.sso.protected_apps = $protected |
+          ._state.sso.auth_url = $auth_url
+        ')
+        bws secret edit "{{ bws_secret_id }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+      changed_when: true
+      no_log: true
+
+    # ========== 6. VERIFICATION ==========
+    - name: Verify ForwardAuth middleware exists
+      ansible.builtin.shell: |
+        kubectl get middleware -n {{ _ak_namespace }} authentik-forwardauth -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: verify_result
+      changed_when: false
+      failed_when: verify_result.rc != 0
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ForwardAuth Middleware Created"
+          - "=========================================="
+          - "Auth URL: {{ auth_url }}"
+          - "Protected apps: {{ apps_to_protect | map(attribute='id') | list }}"
+          - "=========================================="
+          - ""
+          - "NOTE: ForwardAuth middleware references are baked into"
+          - "IngressRoutes at creation time (01-create-ingressroutes.yml)."
+          - "This playbook only creates the Middleware CRD itself."
+          - "=========================================="

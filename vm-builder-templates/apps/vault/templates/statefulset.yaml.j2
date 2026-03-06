@@ -1,0 +1,131 @@
+{#
+  Vault Server StatefulSet
+
+  Variables:
+    - vault_version: Vault container image tag (default: "1.18")
+    - vault_replicas: Number of Vault replicas (default: 1)
+    - vault_storage_size: PVC storage size (default: "10Gi")
+    - vault_storage_class: StorageClass name (default: "longhorn")
+    - namespace: Kubernetes namespace (default: "vault")
+    - vault_memory_requests: Memory request (default: "256Mi")
+    - vault_memory_limits: Memory limit (default: "512Mi")
+    - vault_cpu_requests: CPU request (default: "250m")
+    - vault_cpu_limits: CPU limit (default: "500m")
+    - vault_api_port: Vault API port (default: 8200)
+    - vault_cluster_port: Vault cluster port (default: 8201)
+    - vault_liveness_initial_delay: Liveness probe initial delay (default: 60)
+    - vault_liveness_period: Liveness probe period (default: 10)
+    - vault_readiness_initial_delay: Readiness probe initial delay (default: 30)
+    - vault_readiness_period: Readiness probe period (default: 5)
+    - vault_fs_group: Pod fsGroup (default: 1000)
+    - vault_run_as_user: Pod runAsUser (default: 100)
+
+  Usage:
+    ansible.builtin.template:
+      src: templates/statefulset.yaml.j2
+      dest: /tmp/vault-statefulset.yaml
+#}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: {{ vault_namespace | default('vault') }}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+    app.kubernetes.io/part-of: golden-master
+spec:
+  serviceName: vault
+  replicas: {{ vault_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+      app.kubernetes.io/component: secrets-management
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault
+        app.kubernetes.io/component: secrets-management
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      serviceAccountName: vault
+      securityContext:
+        fsGroup: {{ vault_fs_group | default(1000) }}
+        runAsNonRoot: true
+        runAsUser: {{ vault_run_as_user | default(100) }}
+      containers:
+      - name: vault
+        image: hashicorp/vault:{{ vault_version | default('1.18') }}
+        imagePullPolicy: IfNotPresent
+        command:
+        - vault
+        - server
+        - -config=/vault/config/vault.hcl
+        env:
+        - name: VAULT_ADDR
+          value: "http://127.0.0.1:{{ vault_api_port | default(8200) }}"
+        - name: VAULT_API_ADDR
+          value: "http://vault.{{ vault_namespace | default('vault') }}.svc.cluster.local:{{
+            vault_api_port | default(8200) }}"
+        - name: VAULT_CLUSTER_ADDR
+          value: "http://vault.{{ vault_namespace | default('vault') }}.svc.cluster.local:{{
+            vault_cluster_port | default(8201) }}"
+        - name: SKIP_SETCAP
+          value: "true"
+        ports:
+        - name: api
+          containerPort: {{ vault_api_port | default(8200) }}
+          protocol: TCP
+        - name: cluster
+          containerPort: {{ vault_cluster_port | default(8201) }}
+          protocol: TCP
+        resources:
+          requests:
+            memory: {{ vault_memory_requests | default('256Mi') | quote }}
+            cpu: {{ vault_cpu_requests | default('250m') | quote }}
+          limits:
+            memory: {{ vault_memory_limits | default('512Mi') | quote }}
+            cpu: {{ vault_cpu_limits | default('500m') | quote }}
+        volumeMounts:
+        - name: data
+          mountPath: /vault/data
+        - name: config
+          mountPath: /vault/config
+        livenessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+            port: {{ vault_api_port | default(8200) }}
+            scheme: HTTP
+          initialDelaySeconds: {{ vault_liveness_initial_delay | default(60) }}
+          periodSeconds: {{ vault_liveness_period | default(10) }}
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+            port: {{ vault_api_port | default(8200) }}
+            scheme: HTTP
+          initialDelaySeconds: {{ vault_readiness_initial_delay | default(30) }}
+          periodSeconds: {{ vault_readiness_period | default(5) }}
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+      volumes:
+      - name: config
+        configMap:
+          name: vault-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app.kubernetes.io/name: vault
+        app.kubernetes.io/component: secrets-management
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: {{ vault_storage_class | default('longhorn') }}
+      resources:
+        requests:
+          storage: {{ vault_storage_size | default('10Gi') }}

@@ -1,0 +1,108 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "argocd"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["argocd_deployed"]
+#   provides: ["argocd_api_configured"]
+#   tags: ["argocd", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable anonymous read-only access for ArgoCD in Tailscale mode.
+#     Patches argocd-cm ConfigMap to enable anonymous users and
+#     argocd-rbac-cm to grant read-only role. Tailscale provides
+#     the authentication layer.
+#   requires_apps: ["argocd"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.argocd.configured"
+#         example: true
+
+- name: Configure ArgoCD anonymous access for Tailscale ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    argocd_namespace: "argocd"
+  tasks:
+    # ========== 1. CHECK IF ARGOCD IS DEPLOYED ==========
+    - name: Check if ArgoCD server pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ argocd_namespace }} -l app.kubernetes.io/name=argocd-server --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: argocd_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if ArgoCD not deployed
+      ansible.builtin.debug:
+        msg: "ArgoCD server not deployed - skipping API configuration"
+      when: argocd_pod_check.rc != 0 or argocd_pod_check.stdout | length == 0
+
+    - name: End play if ArgoCD not available
+      ansible.builtin.meta: end_play
+      when: argocd_pod_check.rc != 0 or argocd_pod_check.stdout | length == 0
+
+    # ========== 2. ENABLE ANONYMOUS ACCESS VIA ARGOCD-CM ==========
+    - name: Patch argocd-cm to enable anonymous access
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch configmap argocd-cm -n {{ argocd_namespace }}
+          --type merge
+          -p '{"data":{"users.anonymous.enabled":"true"}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_argocd_cm
+      changed_when: "'patched' in patch_argocd_cm.stdout"
+
+    # ========== 3. CONFIGURE RBAC FOR ANONYMOUS USERS ==========
+    - name: Patch argocd-rbac-cm for anonymous read-only access
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch configmap argocd-rbac-cm -n {{ argocd_namespace }}
+          --type merge
+          -p '{"data":{"policy.default":"role:readonly"}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_argocd_rbac
+      changed_when: "'patched' in patch_argocd_rbac.stdout"
+
+    # ========== 4. WAIT FOR ARGOCD SERVER RELOAD ==========
+    - name: Wait for ArgoCD server to reload after ConfigMap change
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status deployment/argocd-server
+          -n {{ argocd_namespace }}
+          --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: rollout_status
+      changed_when: false
+
+    # ========== 5. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD API Configuration Complete"
+          - "=========================================="
+          - "Anonymous Access: Enabled (Tailscale is auth layer)"
+          - "RBAC Default Policy: role:readonly"
+          - "argocd-cm: {{ 'patched' if patch_argocd_cm.changed else 'already configured' }}"
+          - "argocd-rbac-cm: {{ 'patched' if patch_argocd_rbac.changed else 'already configured' }}"
+          - "Server Reload: {{ 'successful' if rollout_status.rc == 0 else 'failed' }}"
+          - "=========================================="

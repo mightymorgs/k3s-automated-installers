@@ -1,0 +1,75 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure Prowlarr via API (disable auth for local addresses)
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prowlarr_url }}/api/v1/system/status'
+    - '{{ prowlarr_url }}/api/v1/config/host'
+    - '{{ prowlarr_url }}/api/v1/config/host'
+  04-wire-sonarr.yml:
+    summary: Register Sonarr as an application in Prowlarr for indexer sync
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prowlarr_url }}/api/v1/system/status'
+    - '{{ prowlarr_url }}/api/v1/applications'
+    - '{{ prowlarr_url }}/api/v1/applications'
+    requires_apps:
+    - sonarr
+    references_services:
+    - sonarr
+  05-wire-radarr.yml:
+    summary: Register Radarr as an application in Prowlarr for indexer sync
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prowlarr_url }}/api/v1/system/status'
+    - '{{ prowlarr_url }}/api/v1/applications'
+    - '{{ prowlarr_url }}/api/v1/applications'
+    requires_apps:
+    - radarr
+    references_services:
+    - radarr
+  06-wire-qbittorrent.yml:
+    summary: Register qBittorrent as torrent download client in Prowlarr
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prowlarr_url }}/api/v1/system/status'
+    - '{{ qbittorrent_url }}/api/v2/app/version'
+    - '{{ prowlarr_url }}/api/v1/downloadclient'
+    - '{{ prowlarr_url }}/api/v1/downloadclient'
+    requires_apps:
+    - qbittorrent
+    references_services:
+    - qbittorrent
+  07-wire-sabnzbd.yml:
+    summary: Register SABnzbd as Usenet download client in Prowlarr
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prowlarr_url }}/api/v1/system/status'
+    - '{{ prowlarr_url }}/api/v1/downloadclient'
+    - '{{ prowlarr_url }}/api/v1/downloadclient'
+    requires_apps:
+    - sabnzbd
+  08-deploy-exporter.yml:
+    summary: Deploy Exportarr sidecar container to Prowlarr StatefulSet for Prometheus
+      metrics scraping. Patches the StatefulSet to add the exportarr container on
+      port 9709 and adds prometheus.io annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+    references_services:
+    - app
+depends_on_apps:
+- app
+- prometheus
+- qbittorrent
+- radarr
+- sabnzbd
+- sonarr

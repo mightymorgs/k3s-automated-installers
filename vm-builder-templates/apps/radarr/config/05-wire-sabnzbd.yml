@@ -1,0 +1,183 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/radarr/05-wire-sabnzbd"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/radarr/config/05-wire-sabnzbd.yml"
+#     category: "apps"
+#     subsystem: "radarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["radarr_deployed", "sabnzbd_deployed"]
+#   provides: ["radarr_sabnzbd_wired"]
+#   tags: ["radarr", "sabnzbd", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Register SABnzbd as download client in Radarr and create movies-radarr category
+#   requires_apps: ["radarr", "sabnzbd"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.radarr.api_key"
+#       - path: "_state.apps.sabnzbd.api_key"
+
+- name: Wire SABnzbd into Radarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    radarr_namespace: "media-stack"
+    sabnzbd_namespace: "media-stack"
+    app_namespace: "{{ radarr_namespace }}"
+    # radarr_url: from BWS _state via Phase 4 extra-vars
+    # sabnzbd_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF SABNZBD NOT INSTALLED ==========
+    - name: Skip if sabnzbd is not installed on this VM
+      when: sabnzbd_api_key is not defined
+      block:
+        - name: "sabnzbd not installed — skipping radarr <-> sabnzbd wiring"
+          ansible.builtin.debug:
+            msg: "sabnzbd is not installed on this VM (no sabnzbd_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if radarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "radarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: radarr_api_key is not defined or radarr_api_key | length == 0
+
+    - name: Fail if sabnzbd_api_key not provided
+      ansible.builtin.fail:
+        msg: "sabnzbd_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sabnzbd_api_key is not defined or sabnzbd_api_key | length == 0
+
+    # ========== VERIFY RADARR API ==========
+    - name: Verify Radarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Radarr API not accessible
+      ansible.builtin.fail:
+        msg: "Radarr API not accessible at {{ radarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== VERIFY SABNZBD API ==========
+    - name: Verify SABnzbd API is accessible
+      ansible.builtin.uri:
+        url: "{{ sabnzbd_url }}/api?mode=version&output=json&apikey={{ sabnzbd_api_key }}"
+        method: GET
+        return_content: false
+      register: sabnzbd_api_status
+      retries: 3
+      delay: 5
+      until: sabnzbd_api_status.status is defined and sabnzbd_api_status.status == 200
+      failed_when: false
+
+    - name: Fail if SABnzbd API not accessible
+      ansible.builtin.fail:
+        msg: "SABnzbd API not accessible at {{ sabnzbd_url }} (status: {{ sabnzbd_api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: sabnzbd_api_status.status is not defined or sabnzbd_api_status.status != 200
+
+    # ========== CREATE MOVIES-RADARR CATEGORY IN SABNZBD VIA API ==========
+    - name: Get existing SABnzbd categories
+      ansible.builtin.uri:
+        url: "{{ sabnzbd_url }}/api?mode=get_config&section=categories&apikey={{ sabnzbd_api_key }}&output=json"
+        method: GET
+        return_content: true
+      register: sabnzbd_cats
+
+    - name: Check if movies-radarr category exists
+      ansible.builtin.set_fact:
+        movies_radarr_exists: "{{ sabnzbd_cats.json.config.categories | default([]) | selectattr('name', 'equalto', 'movies-radarr') | list | length > 0 }}"
+
+    - name: Create movies-radarr category via SABnzbd API
+      ansible.builtin.uri:
+        url: "{{ sabnzbd_url }}/api?mode=set_config&section=categories&keyword=movies-radarr&name=name&value=movies-radarr&apikey={{ sabnzbd_api_key }}&output=json"
+        method: GET
+        return_content: true
+      register: add_movies_radarr
+      when: not movies_radarr_exists
+
+    # ========== REGISTER SABNZBD AS DOWNLOAD CLIENT ==========
+    - name: Get existing download clients
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/downloadclient"
+        method: GET
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        status_code: [200]
+      register: existing_download_clients
+
+    - name: Check if SABnzbd download client exists
+      ansible.builtin.set_fact:
+        sabnzbd_client_exists: "{{ (existing_download_clients.json | selectattr('name', 'equalto', 'SABnzbd') | list | length) > 0 }}"
+
+    - name: Add SABnzbd as download client (Usenet)
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          enable: true
+          protocol: "usenet"
+          priority: 1
+          name: "SABnzbd"
+          implementation: "Sabnzbd"
+          configContract: "SabnzbdSettings"
+          fields:
+            - name: "host"
+              value: "{{ sabnzbd_service_name }}.{{ sabnzbd_namespace }}.svc.cluster.local"
+            - name: "port"
+              value: "{{ sabnzbd_service_port }}"
+            - name: "useSsl"
+              value: false
+            - name: "urlBase"
+              value: ""
+            - name: "apiKey"
+              value: "{{ sabnzbd_api_key }}"
+            - name: "username"
+              value: ""
+            - name: "password"
+              value: ""
+            - name: "movieCategory"
+              value: "movies-radarr"
+            - name: "recentMoviePriority"
+              value: -100
+            - name: "olderMoviePriority"
+              value: -100
+        status_code: [200, 201]
+        return_content: true
+      register: add_sabnzbd_result
+      when: not sabnzbd_client_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Radarr <-> SABnzbd Wiring Complete"
+          - "=========================================="
+          - "SABnzbd category: movies-radarr ({{ 'created' if not movies_radarr_exists else 'exists' }})"
+          - "Download client: SABnzbd ({{ 'added' if (not sabnzbd_client_exists and add_sabnzbd_result is defined and add_sabnzbd_result.status | default(0) in [200, 201]) else ('exists' if sabnzbd_client_exists else 'FAILED') }})"
+          - "=========================================="

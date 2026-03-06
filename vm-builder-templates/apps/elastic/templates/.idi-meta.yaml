@@ -1,0 +1,27 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  configmap.yaml.j2:
+    summary: 'Jinja2 template: configmap.yaml.j2'
+    source: inferred
+    confidence: medium
+  elasticsearch-service.yaml.j2:
+    summary: 'Jinja2 template: elasticsearch-service.yaml.j2'
+    source: inferred
+    confidence: medium
+  kibana-deployment.yaml.j2:
+    summary: 'Jinja2 template: kibana-deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  kibana-service.yaml.j2:
+    summary: 'Jinja2 template: kibana-service.yaml.j2'
+    source: inferred
+    confidence: medium
+  service.yaml.j2:
+    summary: 'Jinja2 template: service.yaml.j2'
+    source: inferred
+    confidence: medium
+  statefulset.yaml.j2:
+    summary: 'Jinja2 template: statefulset.yaml.j2'
+    source: inferred
+    confidence: medium

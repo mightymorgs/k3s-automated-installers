@@ -1,0 +1,60 @@
+---
+# AWX MCP Server Deployment (J2 template)
+# Defaults match k8s-base/awx-mcp-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: awx-mcp
+  namespace: {{ mcp_namespace | default('mcp-servers') }}
+  labels:
+    app.kubernetes.io/name: awx-mcp
+    app.kubernetes.io/component: ai-operations
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: {{ awx_mcp_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: awx-mcp
+      app.kubernetes.io/component: ai-operations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: awx-mcp
+        app.kubernetes.io/component: ai-operations
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      containers:
+        - name: awx-mcp
+          image: {{ awx_mcp_image | default('ghcr.io/mightymorgs/awx-mcp:latest') }}
+          imagePullPolicy: {{ awx_mcp_image_pull_policy | default('Always') }}
+          env:
+            - name: AWX_HOST
+              value: "{{ awx_mcp_awx_host }}"
+            - name: AWX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ awx_mcp_secret_name | default('awx-mcp-credentials') }}
+                  key: token
+          ports:
+            - name: http
+              containerPort: {{ awx_mcp_port | default(8080) }}
+              protocol: TCP
+          resources:
+            requests:
+              memory: {{ awx_mcp_memory_request | default('128Mi') }}
+              cpu: {{ awx_mcp_cpu_request | default('100m') }}
+            limits:
+              memory: {{ awx_mcp_memory_limit | default('256Mi') }}
+              cpu: {{ awx_mcp_cpu_limit | default('500m') }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ awx_mcp_port | default(8080) }}
+            initialDelaySeconds: {{ awx_mcp_liveness_initial_delay | default(10) }}
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ awx_mcp_port | default(8080) }}
+            initialDelaySeconds: {{ awx_mcp_readiness_initial_delay | default(5) }}
+            periodSeconds: 10

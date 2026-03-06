@@ -1,0 +1,15 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  base/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  base/service.yaml:
+    summary: 'K8s Service: service.yaml'
+    source: inferred
+    confidence: medium
+  base/statefulset.yaml:
+    summary: 'K8s StatefulSet: statefulset.yaml'
+    source: inferred
+    confidence: medium

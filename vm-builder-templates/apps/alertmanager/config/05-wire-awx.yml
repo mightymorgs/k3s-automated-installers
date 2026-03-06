@@ -1,0 +1,272 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/alertmanager/05-wire-awx"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/alertmanager/config/05-wire-awx.yml"
+#     category: "apps"
+#     subsystem: "alertmanager"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["alertmanager_deployed", "awx_deployed"]
+#   provides: ["alertmanager_awx_wired"]
+#   tags: ["alertmanager", "awx", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Alertmanager to send critical alerts to AWX for auto-remediation.
+#     Patches the alertmanager-config ConfigMap to add an awx-webhook receiver
+#     that POSTs to AWX job template launch endpoint with Bearer auth, and adds
+#     a route for severity=critical alerts. Restarts Alertmanager to pick up
+#     the new configuration.
+#   requires_apps: ["alertmanager", "awx"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.api_key"
+#         purpose: "AWX API token for webhook authorization"
+
+- name: Wire AWX Webhook into Alertmanager
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    alertmanager_namespace: "alertmanager"
+    awx_namespace: "awx"
+    # awx_url: from BWS _state via Phase 4 extra-vars
+    awx_internal_url: "{{ awx_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF AWX NOT INSTALLED ==========
+    - name: Skip if awx is not installed on this VM
+      when: awx_api_key is not defined
+      block:
+        - name: "awx not installed — skipping alertmanager <-> awx wiring"
+          ansible.builtin.debug:
+            msg: "awx is not installed on this VM (no awx_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if awx_api_key not provided
+      ansible.builtin.fail:
+        msg: >-
+          awx_api_key must be provided via extra-vars (from BWS inventory).
+          Usage: ansible-playbook 05-wire-awx.yml -e awx_api_key=<token>
+      when: awx_api_key is not defined or awx_api_key | length == 0
+
+    # ========== VERIFY AWX API ==========
+    - name: Verify AWX API is accessible
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/ping/"
+        method: GET
+        return_content: false
+        status_code: [200]
+      register: awx_ping
+      retries: 5
+      delay: 10
+      until: awx_ping.status is defined and awx_ping.status == 200
+      failed_when: false
+
+    - name: End play if AWX API not accessible
+      ansible.builtin.meta: end_play
+      when: awx_ping.status is not defined or awx_ping.status != 200
+
+    # ========== CHECK IF ALERTMANAGER IS DEPLOYED ==========
+    - name: Check if Alertmanager pod is running
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ alertmanager_namespace }}
+          -l app.kubernetes.io/name=alertmanager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alertmanager_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Alertmanager not deployed
+      ansible.builtin.meta: end_play
+      when: alertmanager_pod_check.rc != 0 or alertmanager_pod_check.stdout | length == 0
+
+    # ========== CHECK IF AWX-WEBHOOK RECEIVER ALREADY EXISTS ==========
+    - name: Get current Alertmanager ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap alertmanager-config -n {{ alertmanager_namespace }}
+          -o jsonpath='{.data.alertmanager\.yml}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_alertmanager_config
+      changed_when: false
+      failed_when: false
+
+    - name: Check if awx-webhook receiver already configured
+      ansible.builtin.set_fact:
+        awx_webhook_exists: "{{ 'awx-webhook' in (current_alertmanager_config.stdout | default('')) }}"
+
+    - name: Note awx-webhook already configured
+      ansible.builtin.debug:
+        msg: "AWX webhook receiver already present in Alertmanager config - skipping patch"
+      when: awx_webhook_exists
+
+    # ========== PATCH ALERTMANAGER CONFIGMAP ==========
+    - name: Patch Alertmanager ConfigMap with AWX webhook receiver
+      when: not awx_webhook_exists
+      block:
+        - name: Read existing alertmanager.yml from ConfigMap
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get configmap alertmanager-config -n {{ alertmanager_namespace }}
+              -o jsonpath='{.data.alertmanager\.yml}'
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: existing_config
+          changed_when: false
+
+        - name: Build updated Alertmanager config with AWX webhook
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          ansible.builtin.shell: |
+            # Get the current config
+            CURRENT=$(kubectl get configmap alertmanager-config -n {{ alertmanager_namespace }} \
+              -o jsonpath='{.data.alertmanager\.yml}')
+
+            # Create temp file with updated config that adds awx-webhook receiver
+            # and a route for critical alerts
+            TMPFILE=$(mktemp)
+            cat > "$TMPFILE" <<'YAMLEOF'
+            {{ existing_config.stdout }}
+            YAMLEOF
+
+            # Use python to safely merge the new receiver and route
+            python3 -c "
+            import yaml, sys
+
+            with open('$TMPFILE', 'r') as f:
+                config = yaml.safe_load(f)
+
+            if config is None:
+                config = {}
+
+            # Add awx-webhook receiver
+            if 'receivers' not in config:
+                config['receivers'] = []
+
+            awx_receiver = {
+                'name': 'awx-webhook',
+                'webhook_configs': [{
+                    'url': '{{ awx_internal_url }}/api/v2/job_templates/1/launch/',
+                    'http_config': {
+                        'authorization': {
+                            'type': 'Bearer',
+                            'credentials': '{{ awx_api_key }}'
+                        }
+                    },
+                    'send_resolved': True
+                }]
+            }
+            config['receivers'].append(awx_receiver)
+
+            # Add route for critical alerts
+            if 'route' not in config:
+                config['route'] = {'receiver': 'default', 'routes': []}
+            if 'routes' not in config['route']:
+                config['route']['routes'] = []
+
+            critical_route = {
+                'match': {'severity': 'critical'},
+                'receiver': 'awx-webhook',
+                'continue': True
+            }
+            config['route']['routes'].append(critical_route)
+
+            with open('$TMPFILE', 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+            "
+
+            # Apply the updated ConfigMap
+            kubectl create configmap alertmanager-config \
+              -n {{ alertmanager_namespace }} \
+              --from-file=alertmanager.yml="$TMPFILE" \
+              --dry-run=client -o yaml | \
+              kubectl apply -f -
+
+            rm -f "$TMPFILE"
+            echo "PATCHED"
+          register: config_patch_result
+          changed_when: "'PATCHED' in config_patch_result.stdout"
+
+    # ========== RESTART ALERTMANAGER ==========
+    - name: Determine Alertmanager workload type
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset -n {{ alertmanager_namespace }}
+          -l app.kubernetes.io/name=alertmanager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alertmanager_sts_check
+      changed_when: false
+      failed_when: false
+      when: not awx_webhook_exists
+
+    - name: Restart Alertmanager StatefulSet
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout restart statefulset -n {{ alertmanager_namespace }}
+          -l app.kubernetes.io/name=alertmanager
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: restart_sts
+      changed_when: "'restarted' in restart_sts.stdout"
+      when:
+        - not awx_webhook_exists
+        - alertmanager_sts_check.stdout | length > 0
+
+    - name: Restart Alertmanager Deployment (if not StatefulSet)
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout restart deployment -n {{ alertmanager_namespace }}
+          -l app.kubernetes.io/name=alertmanager
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: restart_deploy
+      changed_when: "'restarted' in restart_deploy.stdout"
+      when:
+        - not awx_webhook_exists
+        - alertmanager_sts_check.stdout | length == 0
+
+    - name: Wait for Alertmanager rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status -n {{ alertmanager_namespace }}
+          --timeout=120s
+          {{ 'statefulset' if alertmanager_sts_check.stdout | length > 0 else 'deployment' }}
+          -l app.kubernetes.io/name=alertmanager
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      failed_when: false
+      when: not awx_webhook_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Alertmanager <-> AWX Wiring Complete"
+          - "=========================================="
+          - ""
+          - "AWX Webhook Receiver: {{ 'Added' if not awx_webhook_exists else 'Already configured' }}"
+          - "Webhook URL: {{ awx_internal_url }}/api/v2/job_templates/1/launch/"
+          - "Auth: Bearer token"
+          - "Route: severity=critical -> awx-webhook (continue: true)"
+          - ""
+          - "Critical alerts will trigger AWX job template #1 for auto-remediation."
+          - "=========================================="

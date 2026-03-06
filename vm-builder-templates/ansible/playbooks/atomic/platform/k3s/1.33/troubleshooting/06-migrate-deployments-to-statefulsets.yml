@@ -1,0 +1,184 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/troubleshooting/06-migrate-deployments-to-statefulsets"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/troubleshooting/06-migrate-deployments-to-statefulsets.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "troubleshooting"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5+k3s1"
+#         longhorn: "latest"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-10"
+#         notes: "Migrates radarr, qbittorrent, overseerr, tautulli to StatefulSets"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "longhorn_installed", "nfs_configured"]
+#   provides: ["statefulsets_deployed"]
+#   tags: ["k3s", "statefulset", "migration", "troubleshooting"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: Migrate Deployments to StatefulSets with NFS and Longhorn storage
+- name: Migrate Deployments to StatefulSets
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    media_namespace: media-stack
+    project_root: "{{ lookup('env', 'PWD') | regex_replace('/ansible$', '') }}"
+    apps_to_migrate: [radarr, qbittorrent, overseerr, tautulli]
+  tasks:
+    - name: Display migration information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Migrating Deployments to StatefulSets
+          - ==========================================
+          - 'Apps: {{ apps_to_migrate }}'
+          - 'Reason: StatefulSets with volumeClaimTemplates for Longhorn'
+          - 'Plus: NFS mounts for /media and /downloads'
+          - ==========================================
+
+    # ========== PHASE 1: Fetch kubeconfig ==========
+    - name: Fetch kubeconfig from remote host
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_raw
+    - name: Save kubeconfig locally
+      ansible.builtin.copy:
+        content: "{{ kubeconfig_raw.content | b64decode | regex_replace('127.0.0.1', ansible_host) }}"
+        dest: /tmp/media-stack-kubeconfig.yaml
+        mode: '0600'
+      delegate_to: localhost
+
+    # ========== PHASE 2: Delete old Deployments ==========
+    - name: Delete old Deployment resources
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: '{{ item }}'
+        namespace: '{{ media_namespace }}'
+        state: absent
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      loop: '{{ apps_to_migrate }}'
+    - name: Wait for Deployments to be deleted
+      ansible.builtin.pause:
+        seconds: 10
+
+    # ========== PHASE 3: Apply StatefulSets individually ==========
+    - name: Apply StatefulSet manifests
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ project_root }}/k8s/media-stack/base/{{ item }}-statefulset.yaml'
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      loop: '{{ apps_to_migrate }}'
+      register: statefulset_apply
+    - name: Display StatefulSet apply results
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ 'created' if item.changed else 'unchanged' }}"
+      loop: '{{ statefulset_apply.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    # ========== PHASE 4: Wait for StatefulSets to be ready ==========
+    - name: Wait for StatefulSets to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: '{{ item }}'
+        namespace: '{{ media_namespace }}'
+        wait: true
+        wait_condition:
+          type: Progressing
+        wait_timeout: 300
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      loop: '{{ apps_to_migrate }}'
+      failed_when: false
+      register: statefulset_wait
+
+    # ========== PHASE 5: Check pod status ==========
+    - name: Get pod status for migrated apps
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        label_selectors: ['app={{ item }}']
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      loop: '{{ apps_to_migrate }}'
+      register: pod_status
+    - name: Display pod status
+      ansible.builtin.debug:
+        msg:
+          - 'App: {{ item.item }}'
+          - 'Pods: {{ item.resources | length }}'
+          - >-
+            Status: {{ item.resources | map(attribute='status.phase') | list
+            if item.resources | length > 0 else ['No pods'] }}
+      loop: '{{ pod_status.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    # ========== PHASE 6: Verify PVCs ==========
+    - name: Get PVCs for StatefulSets
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: '{{ media_namespace }}'
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: all_pvcs
+    - name: Display config PVCs for migrated apps
+      ansible.builtin.debug:
+        msg: >-
+          {{ all_pvcs.resources
+          | selectattr('metadata.name', 'match', '^config-(' + apps_to_migrate |
+          join('|') + ')-.*')
+          | map(attribute='metadata.name') | list }}
+
+    # ========== PHASE 7: Summary ==========
+    - name: Display migration summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Migration Complete!
+          - ==========================================
+          - ''
+          - 'Migrated apps: {{ apps_to_migrate }}'
+          - ''
+          - 'Storage configuration:'
+          - '  - Config: Longhorn PVC (volumeClaimTemplates)'
+          - '  - Media: NFS PVC (nfs-media-pvc → /media)'
+          - '  - Downloads: NFS PVC (nfs-media-pvc → /downloads)'
+          - ''
+          - 'Next steps:'
+          - '  1. Verify pods are Running'
+          - '  2. Check app logs if issues persist'
+          - '  3. Test external HTTPS access'
+          - ==========================================

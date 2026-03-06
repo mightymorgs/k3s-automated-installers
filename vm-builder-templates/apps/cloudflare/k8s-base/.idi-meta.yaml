@@ -1,0 +1,7 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  cloudflared-deployment.yaml:
+    summary: 'K8s Deployment: cloudflared-deployment.yaml'
+    source: inferred
+    confidence: medium

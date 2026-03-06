@@ -1,0 +1,304 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# Infrastructure:                                                #}
+{#   vm_hostname           - VM name (REQUIRED, no default)       #}
+{#   kubeconfig_path       - Path to kubeconfig                   #}
+{#                           (default: /etc/rancher/k3s/k3s.yaml) #}
+{#   registry_path_default - Relative fallback for REGISTRY_PATH  #}
+{#                           (default: playbook_dir/../../../../../../registry.json) #}
+{#                                                                #}
+{# State:                                                         #}
+{#   bws_cache_path        - Path to BWS secrets cache            #}
+{#                           (default: /tmp/bws_secrets.json)     #}
+{#   bws_inventory_prefix  - BWS key prefix for inventory         #}
+{#                           (default: inventory)                 #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   target_hosts          - Ansible host pattern                 #}
+{#                           (default: localhost)                  #}
+{#   ingress_manifests_dir - Temp dir for rendered manifests       #}
+{#                           (default: /tmp/ingressroutes)        #}
+{# ============================================================== #}
+---
+- name: Auto-generate ingress resources from registry metadata
+  hosts: "{{ '{{ ' }} target_hosts | default('{{ target_hosts | default('localhost') }}') {{ ' }}' }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    registry_path: "{{ '{{ ' }} lookup('env', 'REGISTRY_PATH') | default(playbook_dir ~ '/{{ registry_path_default | default('../../../../../../registry.json') }}') {{ ' }}' }}"
+    k3s_kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    bws_access_token: "{{ '{{ ' }} lookup('env', 'BWS_ACCESS_TOKEN') {{ ' }}' }}"
+    ingress_manifests_dir: "{{ ingress_manifests_dir | default('/tmp/ingressroutes') }}"
+
+  tasks:
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - bws_access_token is defined
+          - bws_access_token | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+
+    - name: Check if registry.json exists
+      ansible.builtin.stat:
+        path: "{{ '{{ ' }} registry_path {{ ' }}' }}"
+      register: registry_stat
+      delegate_to: localhost
+
+    - name: Fail if registry.json not found
+      ansible.builtin.fail:
+        msg: "Registry file not found at {{ '{{ ' }} registry_path {{ ' }}' }}"
+      when: not registry_stat.stat.exists
+
+    - name: Read registry.json
+      ansible.builtin.slurp:
+        path: "{{ '{{ ' }} registry_path {{ ' }}' }}"
+      register: registry_raw
+      delegate_to: localhost
+
+    - name: Parse registry JSON
+      ansible.builtin.set_fact:
+        registry: "{{ '{{ ' }} registry_raw.content | b64decode | from_json {{ ' }}' }}"
+
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inventory_id_raw
+      changed_when: false
+
+    - name: Set inventory ID
+      ansible.builtin.set_fact:
+        _inventory_id: "{{ '{{ ' }} _inventory_id_raw.stdout | trim {{ ' }}' }}"
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ '{{ ' }} inventory_raw.stdout | from_json {{ ' }}' }}"
+
+    - name: Extract ingress configuration from inventory
+      ansible.builtin.set_fact:
+        ingress_mode: "{{ '{{ ' }} inventory.ingress.mode {{ ' }}' }}"
+        ingress_domain: "{{ '{{ ' }} inventory.ingress.domain | default('') {{ ' }}' }}"
+        tailnet_key: "{{ '{{ ' }} inventory.tailscale.tailnet_key | default('') {{ ' }}' }}"
+
+    - name: Resolve tailnet from pointer key
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ '{{ ' }} tailnet_key {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: tailnet_raw
+      changed_when: false
+      when: tailnet_key | length > 0
+
+    - name: Set tailnet value
+      ansible.builtin.set_fact:
+        tailnet: "{{ '{{ ' }} tailnet_raw.stdout | trim if tailnet_key | length > 0 else '' {{ ' }}' }}"
+
+    - name: Extract app overrides from inventory
+      ansible.builtin.set_fact:
+        app_overrides: "{{ '{{ ' }} inventory.ingress.app_overrides | default({}) {{ ' }}' }}"
+
+    - name: Display ingress configuration
+      ansible.builtin.debug:
+        msg:
+          - "Default Ingress Mode: {{ '{{ ' }} ingress_mode {{ ' }}' }}"
+          - "Domain: {{ '{{ ' }} ingress_domain if ingress_mode == 'cloudflare' else 'N/A' {{ ' }}' }}"
+          - "Tailnet: {{ '{{ ' }} tailnet if ingress_mode == 'tailscale' else 'N/A' {{ ' }}' }}"
+          - "App Overrides: {{ '{{ ' }} app_overrides {{ ' }}' }}"
+
+    - name: Extract installed apps list
+      ansible.builtin.set_fact:
+        installed_apps: "{{ '{{ ' }} inventory._state.apps.installed | default([]) {{ ' }}' }}"
+
+    - name: Build list of all ingress-capable installed apps
+      ansible.builtin.set_fact:
+        apps_with_ingress: >-
+          {{ '{{ ' }}
+            registry.apps | dict2items |
+            selectattr('value.ingress.enabled', 'defined') |
+            selectattr('value.ingress.enabled', 'equalto', true) |
+            selectattr('key', 'in', installed_apps) |
+            list
+          {{ ' }}' }}
+
+    - name: Display apps with ingress
+      ansible.builtin.debug:
+        msg: >-
+          Found {{ '{{ ' }} apps_with_ingress | length {{ ' }}' }} installed apps with ingress.enabled:
+          {{ '{{ ' }} apps_with_ingress | map(attribute='key') | list {{ ' }}' }}
+
+    # ===== Split apps by effective ingress mode =====
+    - name: Compute effective mode for each app
+      ansible.builtin.set_fact:
+        _app_modes: >-
+          {{ '{{ ' }} _app_modes | default({}) | combine({item.key: app_overrides[item.key] | default(ingress_mode)}) {{ ' }}' }}
+      loop: "{{ '{{ ' }} apps_with_ingress {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+
+    - name: Split into Cloudflare and Tailscale app lists
+      ansible.builtin.set_fact:
+        cloudflare_apps: >-
+          {{ '{{ ' }} apps_with_ingress | selectattr('key', 'in',
+            _app_modes | dict2items |
+            selectattr('value', 'equalto', 'cloudflare') |
+            map(attribute='key') | list
+          ) | list {{ ' }}' }}
+        tailscale_apps: >-
+          {{ '{{ ' }} apps_with_ingress | selectattr('key', 'in',
+            _app_modes | dict2items |
+            selectattr('value', 'equalto', 'tailscale') |
+            map(attribute='key') | list
+          ) | list {{ ' }}' }}
+
+    - name: Display mode split
+      ansible.builtin.debug:
+        msg:
+          - "Cloudflare mode ({{ '{{ ' }} cloudflare_apps | length {{ ' }}' }}): {{ '{{ ' }} cloudflare_apps | map(attribute='key') | list {{ ' }}' }}"
+          - "Tailscale mode ({{ '{{ ' }} tailscale_apps | length {{ ' }}' }}): {{ '{{ ' }} tailscale_apps | map(attribute='key') | list {{ ' }}' }}"
+          - "Nodeport/skipped: {{ '{{ ' }} _app_modes | dict2items | rejectattr('value', 'in', ['cloudflare', 'tailscale']) | map(attribute='key') | list {{ ' }}' }}"
+
+    # ===== Cleanup stale resources from the opposite mode =====
+    - name: Remove stale Traefik IngressRoutes for Tailscale-mode apps
+      ansible.builtin.command:
+        cmd: >-
+          kubectl delete ingressroute {{ '{{ ' }} item.key {{ ' }}' }}-ingressroute
+          -n {{ '{{ ' }} item.value.ingress.namespace {{ ' }}' }}
+          --ignore-not-found
+      environment:
+        KUBECONFIG: "{{ '{{ ' }} k3s_kubeconfig {{ ' }}' }}"
+      loop: "{{ '{{ ' }} tailscale_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: stale_cf_cleanup
+      changed_when: "'deleted' in stale_cf_cleanup.stdout"
+      when: tailscale_apps | length > 0
+
+    - name: Remove stale Tailscale Ingresses for Cloudflare-mode apps
+      ansible.builtin.command:
+        cmd: >-
+          kubectl delete ingress {{ '{{ ' }} item.key {{ ' }}' }}-ts-ingress
+          -n {{ '{{ ' }} item.value.ingress.namespace {{ ' }}' }}
+          --ignore-not-found
+      environment:
+        KUBECONFIG: "{{ '{{ ' }} k3s_kubeconfig {{ ' }}' }}"
+      loop: "{{ '{{ ' }} cloudflare_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: stale_ts_cleanup
+      changed_when: "'deleted' in stale_ts_cleanup.stdout"
+      when: cloudflare_apps | length > 0
+
+    - name: Create manifests directory
+      ansible.builtin.file:
+        path: "{{ '{{ ' }} ingress_manifests_dir {{ ' }}' }}"
+        state: directory
+        mode: '0755'
+
+    # ===== CLOUDFLARE MODE: Traefik IngressRoute CRDs =====
+    - name: Generate Traefik IngressRoute manifests (Cloudflare mode)
+      ansible.builtin.template:
+        src: ingressroute.yaml.j2
+        dest: "{{ '{{ ' }} ingress_manifests_dir {{ ' }}' }}/{{ '{{ ' }} item.key {{ ' }}' }}-ingressroute.yaml"
+      vars:
+        app_name: "{{ '{{ ' }} item.key {{ ' }}' }}"
+        subdomain: "{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}"
+        service_name: "{{ '{{ ' }} item.value.ingress.service_name {{ ' }}' }}"
+        service_port: "{{ '{{ ' }} item.value.ingress.service_port {{ ' }}' }}"
+        namespace: "{{ '{{ ' }} item.value.ingress.namespace {{ ' }}' }}"
+        domain: "{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} ingress_domain {{ ' }}' }}"
+        tls_secret: "{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}-origin-cert"
+        forwardauth_enabled: "{{ '{{ ' }} item.value.sso.forwardauth.enabled | default(false) {{ ' }}' }}"
+      loop: "{{ '{{ ' }} cloudflare_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      delegate_to: localhost
+      when: cloudflare_apps | length > 0
+
+    - name: Apply Traefik IngressRoute manifests (Cloudflare mode)
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ '{{ ' }} ingress_manifests_dir {{ ' }}' }}/{{ '{{ ' }} item.key {{ ' }}' }}-ingressroute.yaml
+      environment:
+        KUBECONFIG: "{{ '{{ ' }} k3s_kubeconfig {{ ' }}' }}"
+      loop: "{{ '{{ ' }} cloudflare_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: cf_apply_result
+      changed_when: "'configured' in cf_apply_result.stdout or 'created' in cf_apply_result.stdout"
+      when: cloudflare_apps | length > 0
+
+    # ===== TAILSCALE MODE: K8s Ingress with Tailscale operator =====
+    - name: Generate Tailscale Ingress manifests
+      ansible.builtin.template:
+        src: tailscale-ingress.yaml.j2
+        dest: "{{ '{{ ' }} ingress_manifests_dir {{ ' }}' }}/{{ '{{ ' }} item.key {{ ' }}' }}-ts-ingress.yaml"
+      vars:
+        app_name: "{{ '{{ ' }} item.key {{ ' }}' }}"
+        subdomain: "{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}"
+        service_name: "{{ '{{ ' }} item.value.ingress.service_name {{ ' }}' }}"
+        service_port: "{{ '{{ ' }} item.value.ingress.service_port {{ ' }}' }}"
+        namespace: "{{ '{{ ' }} item.value.ingress.namespace {{ ' }}' }}"
+      loop: "{{ '{{ ' }} tailscale_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      delegate_to: localhost
+      when: tailscale_apps | length > 0
+
+    - name: Apply Tailscale Ingress manifests
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ '{{ ' }} ingress_manifests_dir {{ ' }}' }}/{{ '{{ ' }} item.key {{ ' }}' }}-ts-ingress.yaml
+      environment:
+        KUBECONFIG: "{{ '{{ ' }} k3s_kubeconfig {{ ' }}' }}"
+      loop: "{{ '{{ ' }} tailscale_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: ts_apply_result
+      changed_when: "'configured' in ts_apply_result.stdout or 'created' in ts_apply_result.stdout"
+      when: tailscale_apps | length > 0
+
+    # ===== Write ingress URLs to BWS =====
+    - name: Write ingress URLs to BWS for each app
+      ansible.builtin.shell: |
+        INVENTORY=$(bws secret get {{ '{{ ' }} _inventory_id {{ ' }}' }} --output json | jq -r '.value' | jq .)
+
+        {% raw %}{% if _app_modes[item.key] == 'cloudflare' %}{% endraw %}
+        URL="https://{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} ingress_domain {{ ' }}' }}"
+        {% raw %}{% elif _app_modes[item.key] == 'tailscale' %}{% endraw %}
+        URL="https://{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} tailnet {{ ' }}' }}"
+        {% raw %}{% else %}{% endraw %}
+        URL="http://nodeport"
+        {% raw %}{% endif %}{% endraw %}
+        UPDATED=$(echo "$INVENTORY" | jq --arg url "$URL" '._state.apps.{{ '{{ ' }} item.key {{ ' }}' }}.ingress_url = $url')
+
+        bws secret edit {{ '{{ ' }} _inventory_id {{ ' }}' }} --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ '{{ ' }} bws_access_token {{ ' }}' }}"
+      loop: "{{ '{{ ' }} apps_with_ingress {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: bws_write_result
+      changed_when: true
+      no_log: true
+      when: "_app_modes[item.key] in ['cloudflare', 'tailscale']"
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Ingress Resources Created"
+          - "=========================================="
+          - ""
+          - "Cloudflare Mode (Traefik IngressRoute): {{ '{{ ' }} cloudflare_apps | map(attribute='key') | list | default(['(none)']) | join(', ') {{ ' }}' }}"
+          - "Tailscale Mode (K8s Ingress -> Operator): {{ '{{ ' }} tailscale_apps | map(attribute='key') | list | default(['(none)']) | join(', ') {{ ' }}' }}"
+          - ""
+          - "=========================================="

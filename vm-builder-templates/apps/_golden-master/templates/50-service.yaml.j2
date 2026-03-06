@@ -1,0 +1,26 @@
+{#
+  Service for {{ app_name }}.
+  Prefix 50 → uses kubectl {{ kubectl_action }}.
+  NodePort is always parameterized: {{ app_nodeport | default(XXXXX) }}
+#}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name }}
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/managed-by: idi-ansible
+    app.kubernetes.io/part-of: golden-master
+spec:
+  type: {{ service_type | default('ClusterIP') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name }}
+  ports:
+    - name: http
+      port: {{ service_port | default(container_port | default(8080)) }}
+      targetPort: {{ container_port | default(8080) }}
+{% if service_type | default('ClusterIP') == 'NodePort' %}
+      nodePort: {{ app_nodeport | default(30000) }}
+{% endif %}

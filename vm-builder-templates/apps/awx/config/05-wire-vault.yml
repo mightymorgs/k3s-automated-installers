@@ -1,0 +1,306 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/05-wire-vault"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/config/05-wire-vault.yml"
+#     category: "apps"
+#     subsystem: "awx"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["awx_operator_deployed", "awx_instance_running", "vault_deployed", "vault_initialized"]
+#   provides: ["awx_vault_wired", "awx_vault_credential_created"]
+#   tags: ["awx", "vault", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Wire AWX to HashiCorp Vault as a credential backend. Creates a
+#     "HashiCorp Vault Secret Lookup" credential in AWX pointing at
+#     Vault's KV v2 engine via internal K8s DNS. This credential can
+#     then be linked to Machine credentials as an input_source, allowing
+#     AWX job templates to pull secrets from Vault at runtime.
+#   requires_apps: ["awx", "vault"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.root_token"
+#         purpose: "Vault token for AWX credential lookup"
+#       - path: "_state.apps.awx.admin_password"
+#         purpose: "AWX admin password for API authentication"
+#     writes:
+#       - path: "_state.apps.awx.vault_credential_id"
+#         example: 15
+#       - path: "_state.apps.awx.vault_wired"
+#         example: true
+
+
+- name: Wire AWX to HashiCorp Vault
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    awx_namespace: "awx"
+    awx_service_name: awx-service
+    # awx_url: from BWS _state via Phase 4 extra-vars
+    awx_api_url: "{{ awx_url }}/api/v2"
+    awx_username: admin
+    vault_namespace: "vault"
+    # vault_url: from BWS _state via Phase 4 extra-vars
+    vault_internal_addr: "{{ vault_url }}"
+    vault_kv_path: apps
+    vault_api_version: v2
+    vault_credential_name: "HashiCorp Vault (Homelab)"
+    organization_id: 1
+    bws_awx_admin_password_key: awx/admin_password
+    # Vault token passed as extra-var or from BWS
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========================================
+    # VALIDATE PREREQUISITES
+    # ========================================
+
+    # ========== SKIP IF VAULT NOT INSTALLED ==========
+    - name: Skip if vault is not installed on this VM
+      when: vault_root_token is not defined
+      block:
+        - name: "vault not installed — skipping awx <-> vault wiring"
+          ansible.builtin.debug:
+            msg: "vault is not installed on this VM (no vault_root_token in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Validate vault_root_token is provided
+      ansible.builtin.fail:
+        msg: >-
+          vault_root_token must be provided via extra-vars (from BWS _state.apps.vault.root_token)
+      when: vault_root_token is not defined or vault_root_token | length == 0
+
+    - name: Check if AWX is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ awx_namespace }} -l app.kubernetes.io/name=awx --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: awx_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if AWX not deployed
+      ansible.builtin.debug:
+        msg: "AWX not deployed - skipping Vault wiring"
+      when: awx_check.rc != 0 or awx_check.stdout | length == 0
+
+    - name: End play if AWX not available
+      ansible.builtin.meta: end_play
+      when: awx_check.rc != 0 or awx_check.stdout | length == 0
+
+    # ========================================
+    # GET AWX ADMIN CREDENTIALS
+    # ========================================
+    - name: Check if BWS CLI is available
+      ansible.builtin.command: which bws
+      register: bws_check
+      failed_when: false
+      changed_when: false
+
+    - name: Retrieve AWX admin password from BWS
+      ansible.builtin.command:
+        cmd: bws secret get "{{ bws_awx_admin_password_key }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_password
+      changed_when: false
+      no_log: true
+      when: bws_check.rc == 0
+
+    - name: Parse AWX admin password
+      ansible.builtin.set_fact:
+        awx_admin_password: "{{ (bws_password.stdout | from_json).value }}"
+      no_log: true
+      when: bws_check.rc == 0
+
+    - name: Fail if AWX admin password not available
+      ansible.builtin.fail:
+        msg: "AWX admin password not found in BWS. Ensure AWX is deployed and configured."
+      when: awx_admin_password is not defined
+
+    # ========================================
+    # AUTHENTICATE WITH AWX API
+    # ========================================
+    - name: Wait for AWX API to be accessible
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/ping/"
+        method: GET
+        status_code: 200
+        validate_certs: false
+      register: awx_ping
+      until: awx_ping.status == 200
+      retries: 15
+      delay: 10
+
+    - name: Get AWX API token
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/tokens/"
+        method: POST
+        user: "{{ awx_username }}"
+        password: "{{ awx_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          description: "Vault wiring automation token"
+          scope: write
+        status_code: [201]
+        validate_certs: false
+      register: awx_token
+      no_log: true
+
+    - name: Set AWX API token fact
+      ansible.builtin.set_fact:
+        awx_api_token: "{{ awx_token.json.token }}"
+        awx_token_id: "{{ awx_token.json.id }}"
+      no_log: true
+
+    # ========================================
+    # FIND VAULT SECRET LOOKUP CREDENTIAL TYPE
+    # ========================================
+    - name: Find HashiCorp Vault Secret Lookup credential type
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/credential_types/?name__startswith=HashiCorp%20Vault%20Secret%20Lookup"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        validate_certs: false
+        status_code: [200]
+      register: vault_cred_type
+
+    - name: Fail if Vault credential type not found
+      ansible.builtin.fail:
+        msg: >-
+          HashiCorp Vault Secret Lookup credential type not found in AWX.
+          This is a built-in type and should be available by default.
+          Check: GET {{ awx_api_url }}/credential_types/?name__startswith=HashiCorp
+      when: vault_cred_type.json.count == 0
+
+    - name: Set Vault credential type ID
+      ansible.builtin.set_fact:
+        vault_cred_type_id: "{{ vault_cred_type.json.results[0].id }}"
+
+    - name: Display credential type info
+      ansible.builtin.debug:
+        msg: "Found credential type '{{ vault_cred_type.json.results[0].name }}' (ID: {{ vault_cred_type_id }})"
+
+    # ========================================
+    # CREATE VAULT CREDENTIAL (IDEMPOTENT)
+    # ========================================
+    - name: Check if Vault credential already exists
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/credentials/?name={{ vault_credential_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        validate_certs: false
+        status_code: [200]
+      register: existing_vault_cred
+
+    - name: Create HashiCorp Vault credential
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/credentials/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        body_format: json
+        body:
+          name: "{{ vault_credential_name }}"
+          description: "HashiCorp Vault KV v2 backend at {{ vault_internal_addr }}"
+          organization: "{{ organization_id }}"
+          credential_type: "{{ vault_cred_type_id | int }}"
+          inputs:
+            url: "{{ vault_internal_addr }}"
+            token: "{{ vault_root_token }}"
+            api_version: "{{ vault_api_version }}"
+            default_auth_path: ""
+        status_code: [201]
+        validate_certs: false
+      register: vault_cred_create
+      when: existing_vault_cred.json.count == 0
+
+    - name: Set Vault credential ID
+      ansible.builtin.set_fact:
+        vault_credential_id: >-
+          {{
+            vault_cred_create.json.id if vault_cred_create is not skipped
+            else existing_vault_cred.json.results[0].id
+          }}
+
+    - name: Display Vault credential status
+      ansible.builtin.debug:
+        msg: >-
+          Vault credential '{{ vault_credential_name }}'
+          {{ 'created' if vault_cred_create is not skipped else 'already exists' }}
+          (ID: {{ vault_credential_id }})
+
+    # ========================================
+    # VERIFY VAULT CONNECTIVITY
+    # ========================================
+    - name: Test Vault credential lookup
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/credentials/{{ vault_credential_id | trim }}/test/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        body_format: json
+        body: {}
+        status_code: [200, 202, 404]
+        validate_certs: false
+      register: vault_test
+      failed_when: false
+
+    - name: Display Vault test result
+      ansible.builtin.debug:
+        msg: >-
+          Vault credential test:
+          {{ 'passed' if vault_test.status in [200, 202] else 'endpoint not available (non-critical)' }}
+
+    # ========================================
+    # DISPLAY RESULT
+    # ========================================
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "AWX <-> Vault Wiring Complete"
+          - "=========================================="
+          - ""
+          - "Vault Credential: {{ vault_credential_name }} (ID: {{ vault_credential_id | trim }})"
+          - "Vault Address: {{ vault_internal_addr }}"
+          - "KV API Version: {{ vault_api_version }}"
+          - "Organization: Default (ID: {{ organization_id }})"
+          - ""
+          - "Next Steps:"
+          - "  1. Link Machine credentials to Vault:"
+          - "     POST /api/v2/credentials/<machine_id>/input_sources/"
+          - '     {"source_credential": {{ vault_credential_id | trim }},'
+          - '      "input_field_name": "password",'
+          - '      "metadata": {"secret_path": "apps/data/<app>/<key>",'
+          - '                   "secret_key": "value"}}'
+          - ""
+          - "  2. Or use AWX UI: Credentials -> Edit -> External Credential"
+          - "=========================================="
+
+    # ========================================
+    # CLEANUP: REVOKE API TOKEN
+    # ========================================
+    - name: Revoke AWX API token
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/tokens/{{ awx_token_id }}/"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        validate_certs: false
+        status_code: [204]
+      no_log: true

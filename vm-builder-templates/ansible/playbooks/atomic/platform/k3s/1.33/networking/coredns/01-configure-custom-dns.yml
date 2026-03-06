@@ -1,0 +1,93 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/networking/coredns/01-configure-custom-dns"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/networking/coredns/01-configure-custom-dns.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "networking"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "coredns"
+#       folder_version: "1.33"
+#       supported_versions: ["1.10.x+"]
+#       version_range: ">=1.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - coredns: "k3s-bundled"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Uses K3s bundled CoreDNS with custom ConfigMap"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed"]
+#   provides: ["coredns_custom_dns_configured"]
+#   tags: ["coredns", "dns", "kubernetes", "networking"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure CoreDNS with custom DNS entries from ConfigMap
+- name: Configure CoreDNS Custom DNS Entries
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    coredns_configmap_path: >-
+      {{ configmap_path | default(project_root + '/k8s/media-stack/base/coredns-configmap.yaml') }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display CoreDNS configuration information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Configuring CoreDNS Custom DNS
+          - ==========================================
+          - 'ConfigMap: {{ coredns_configmap_path }}'
+          - 'Purpose: Custom domain resolution for services'
+          - ==========================================
+    - name: Copy CoreDNS ConfigMap to master node
+      ansible.builtin.copy:
+        src: '{{ coredns_configmap_path }}'
+        dest: /tmp/coredns-custom.yaml
+        mode: '0644'
+    - name: Apply CoreDNS custom ConfigMap
+      ansible.builtin.command: kubectl apply -f /tmp/coredns-custom.yaml
+      register: coredns_apply
+      changed_when: "'created' in coredns_apply.stdout or 'configured' in coredns_apply.stdout"
+    - name: Restart CoreDNS deployment
+      ansible.builtin.command: kubectl rollout restart deployment coredns -n kube-system
+      when: coredns_apply is changed
+      register: coredns_restart
+      changed_when: true
+    - name: Wait for CoreDNS to be ready
+      ansible.builtin.command: kubectl rollout status deployment coredns -n kube-system
+        --timeout=2m
+      when: coredns_apply is changed
+      changed_when: false
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - CoreDNS Custom DNS Configured
+          - ==========================================
+          - "Status: {{ 'Updated' if coredns_apply is changed else 'Already configured' }}"
+          - ''
+          - 'Verify DNS resolution from cluster:'
+          - '  kubectl run dns-test --rm -i --restart=Never --image=busybox -- nslookup
+            <your-domain>'
+          - ==========================================

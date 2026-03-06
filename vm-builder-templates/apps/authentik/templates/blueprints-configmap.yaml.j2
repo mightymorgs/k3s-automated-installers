@@ -1,0 +1,25 @@
+---
+# Authentik Blueprints ConfigMap
+# Auto-configures ForwardAuth providers on startup
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ app_name | default('authentik') }}-blueprints
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app: {{ app_name | default('authentik') }}
+    app.kubernetes.io/name: {{ app_name | default('authentik') }}
+    app.kubernetes.io/managed-by: idi-phase5
+data:
+  # Placeholder blueprint — OAuth apps are created dynamically by
+  # the 01-create-oauth-apps.yml playbook via Authentik API.
+  # This ConfigMap is mounted at /blueprints/custom/ and can be
+  # populated with static blueprints if needed.
+  README.yaml: |
+    # yaml-language-server: $schema=https://goauthentik.io/blueprints/schema.json
+    version: 1
+    metadata:
+      name: "IDI Platform - README"
+      labels:
+        blueprints.goauthentik.io/instantiate: "false"
+    entries: []

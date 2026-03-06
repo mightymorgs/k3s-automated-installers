@@ -1,0 +1,400 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/verify/grafana-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "grafana_configuration_verified"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/verify/01-verify-grafana-config.yml"
+#     category: "platform"
+#     subsystem: "grafana"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "grafana"
+#       supported_versions: ["10.x", "11.x"]
+#       version_range: ">=10.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - grafana: "11.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies Grafana configuration (datasources, dashboards, folders)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_grafana_verification"
+#   dependencies: ["grafana_deployed"]
+#   provides: ["grafana_config_verified"]
+#   tags: ["grafana", "verification", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that Grafana is properly configured. Checks that expected
+#     datasources exist and are healthy, required dashboards are present,
+#     and folders are created. Provides a comprehensive health check
+#     for Grafana observability setup.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_token"
+#         purpose: "Grafana API admin token for authentication"
+#       - path: "_state.apps.grafana.url"
+#         purpose: "Grafana base URL"
+#       - path: "_state.apps.grafana.datasources"
+#         purpose: "Expected datasources to verify"
+#       - path: "_state.apps.grafana.dashboards"
+#         purpose: "Expected dashboards to verify"
+#       - path: "_state.apps.grafana.folders"
+#         purpose: "Expected folders to verify"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - Grafana Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    grafana_base_url: "{{ grafana_url }}"
+    grafana_api_base: "{{ grafana_base_url }}/api"
+
+    # Expected resources to verify (can be overridden by caller or BWS state)
+    expected_datasources: "{{ expected_datasources_input | default([]) }}"
+    expected_dashboards: "{{ expected_dashboards_input | default([]) }}"
+    expected_folders: "{{ expected_folders_input | default([]) }}"
+
+    # Verification options
+    check_datasource_health: "{{ check_datasource_health_input | default(true) }}"
+    fail_on_unhealthy: "{{ fail_on_unhealthy_input | default(false) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying Grafana Configuration"
+          - "=========================================="
+          - "Base URL: {{ grafana_base_url }}"
+          - "Expected Datasources: {{ expected_datasources | length }}"
+          - "Expected Dashboards: {{ expected_dashboards | length }}"
+          - "Expected Folders: {{ expected_folders | length }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Grafana admin token
+      ansible.builtin.set_fact:
+        grafana_admin_token: >-
+          {{
+            inventory._state.apps.grafana.admin_token | default(grafana_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        grafana_base_url: "{{ inventory._state.apps.grafana.url }}"
+        grafana_api_base: "{{ inventory._state.apps.grafana.url }}/api"
+      when: inventory._state.apps.grafana.url is defined
+
+    - name: Load expected resources from BWS state if not provided
+      ansible.builtin.set_fact:
+        expected_datasources: >-
+          {{
+            expected_datasources if expected_datasources | length > 0
+            else (inventory._state.apps.grafana.datasources | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_dashboards: >-
+          {{
+            expected_dashboards if expected_dashboards | length > 0
+            else (inventory._state.apps.grafana.dashboards | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_folders: >-
+          {{
+            expected_folders if expected_folders | length > 0
+            else (inventory._state.apps.grafana.folders | default({}) | dict2items | map(attribute='key') | list)
+          }}
+
+    # ===== STEP 2: Verify Grafana API is accessible =====
+    - name: Check Grafana API health
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/health"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: grafana_health
+      failed_when: false
+
+    - name: Assert Grafana API is healthy
+      ansible.builtin.assert:
+        that:
+          - grafana_health.status == 200
+        fail_msg: "Grafana API is not accessible at {{ grafana_base_url }}"
+        success_msg: "Grafana API is healthy"
+
+    - name: Record API health status
+      ansible.builtin.set_fact:
+        api_healthy: "{{ grafana_health.status == 200 }}"
+
+    # ===== STEP 3: Verify Datasources =====
+    - name: List all datasources
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/datasources"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: datasources_list
+      no_log: false
+
+    - name: Extract datasource names
+      ansible.builtin.set_fact:
+        existing_datasource_names: "{{ datasources_list.json | map(attribute='name') | list }}"
+
+    - name: Check expected datasources exist
+      ansible.builtin.set_fact:
+        datasource_results: >-
+          {{
+            datasource_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_datasource_names
+            }]
+          }}
+      loop: "{{ expected_datasources }}"
+      when: expected_datasources | length > 0
+
+    - name: Check datasource health for each existing datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/datasources/name/{{ item | urlencode }}/health"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200, 400, 502]
+        validate_certs: false
+      register: datasource_health_results
+      loop: "{{ expected_datasources }}"
+      when:
+        - check_datasource_health | bool
+        - expected_datasources | length > 0
+        - item in existing_datasource_names
+      failed_when: false
+      no_log: false
+
+    - name: Build datasource health summary
+      ansible.builtin.set_fact:
+        datasource_health_summary: >-
+          {{
+            datasource_health_summary | default([]) + [{
+              'name': item.item,
+              'status': item.json.status | default('unknown'),
+              'message': item.json.message | default('No message'),
+              'healthy': (item.json.status | default('error')) == 'OK'
+            }]
+          }}
+      loop: "{{ datasource_health_results.results | default([]) }}"
+      when:
+        - item.json is defined
+        - check_datasource_health | bool
+
+    # ===== STEP 4: Verify Folders =====
+    - name: List all folders
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/folders"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: folders_list
+      no_log: false
+
+    - name: Extract folder titles
+      ansible.builtin.set_fact:
+        existing_folder_titles: "{{ folders_list.json | map(attribute='title') | list }}"
+        existing_folder_uids: "{{ folders_list.json | map(attribute='uid') | list }}"
+
+    - name: Check expected folders exist
+      ansible.builtin.set_fact:
+        folder_results: >-
+          {{
+            folder_results | default([]) + [{
+              'title': item,
+              'exists': item in existing_folder_titles or item in existing_folder_uids
+            }]
+          }}
+      loop: "{{ expected_folders }}"
+      when: expected_folders | length > 0
+
+    # ===== STEP 5: Verify Dashboards =====
+    - name: Search for all dashboards
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/search?type=dash-db"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: dashboards_list
+      no_log: false
+
+    - name: Extract dashboard titles and UIDs
+      ansible.builtin.set_fact:
+        existing_dashboard_titles: "{{ dashboards_list.json | map(attribute='title') | list }}"
+        existing_dashboard_uids: "{{ dashboards_list.json | map(attribute='uid') | list }}"
+
+    - name: Check expected dashboards exist
+      ansible.builtin.set_fact:
+        dashboard_results: >-
+          {{
+            dashboard_results | default([]) + [{
+              'title': item,
+              'exists': item in existing_dashboard_titles or item in existing_dashboard_uids
+            }]
+          }}
+      loop: "{{ expected_dashboards }}"
+      when: expected_dashboards | length > 0
+
+    # ===== STEP 6: Calculate Verification Results =====
+    - name: Calculate datasource verification result
+      ansible.builtin.set_fact:
+        all_datasources_exist: >-
+          {{
+            (datasource_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+        all_datasources_healthy: >-
+          {{
+            (datasource_health_summary | default([]) | selectattr('healthy', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate folder verification result
+      ansible.builtin.set_fact:
+        all_folders_exist: >-
+          {{
+            (folder_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate dashboard verification result
+      ansible.builtin.set_fact:
+        all_dashboards_exist: >-
+          {{
+            (dashboard_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            api_healthy | bool and
+            all_datasources_exist | bool and
+            all_folders_exist | bool and
+            all_dashboards_exist | bool and
+            (not check_datasource_health or all_datasources_healthy | bool)
+          }}
+
+    # ===== STEP 7: Verification Summary =====
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          grafana_url: "{{ grafana_base_url }}"
+          api_healthy: "{{ api_healthy }}"
+          datasources:
+            expected: "{{ expected_datasources | length }}"
+            found: "{{ datasource_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_datasources_exist }}"
+            health_checked: "{{ check_datasource_health }}"
+            all_healthy: "{{ all_datasources_healthy | default(true) }}"
+            details: "{{ datasource_results | default([]) }}"
+            health_details: "{{ datasource_health_summary | default([]) }}"
+          folders:
+            expected: "{{ expected_folders | length }}"
+            found: "{{ folder_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_folders_exist }}"
+            details: "{{ folder_results | default([]) }}"
+          dashboards:
+            expected: "{{ expected_dashboards | length }}"
+            found: "{{ dashboard_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_dashboards_exist }}"
+            details: "{{ dashboard_results | default([]) }}"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana Configuration Verification Summary"
+          - "=========================================="
+          - ""
+          - "Grafana URL: {{ grafana_base_url }}"
+          - "API Health: {{ 'HEALTHY' if api_healthy else 'UNHEALTHY' }}"
+          - ""
+          - "DATASOURCES:"
+          - "  Expected: {{ expected_datasources | length }}"
+          - "  Found: {{ datasource_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_datasources_exist }}"
+          - "  {% if check_datasource_health %}Health Check: {{ 'PASSED' if all_datasources_healthy else 'FAILED' }}{% endif %}"
+          - ""
+          - "FOLDERS:"
+          - "  Expected: {{ expected_folders | length }}"
+          - "  Found: {{ folder_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_folders_exist }}"
+          - ""
+          - "DASHBOARDS:"
+          - "  Expected: {{ expected_dashboards | length }}"
+          - "  Found: {{ dashboard_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_dashboards_exist }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Display missing resources if any
+      ansible.builtin.debug:
+        msg:
+          - "MISSING RESOURCES:"
+          - "  Datasources: {{ datasource_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Folders: {{ folder_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='title') | list }}"
+          - "  Dashboards: {{ dashboard_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='title') | list }}"
+      when: not all_checks_passed
+
+    - name: Display unhealthy datasources if any
+      ansible.builtin.debug:
+        msg:
+          - "UNHEALTHY DATASOURCES:"
+          - "{{ datasource_health_summary | default([]) | selectattr('healthy', 'equalto', false) | list }}"
+      when:
+        - check_datasource_health | bool
+        - not all_datasources_healthy | bool
+
+    - name: Fail if critical checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          Grafana configuration verification failed.
+          See summary above for details.
+      when: not all_checks_passed and fail_on_unhealthy | bool
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "Grafana configuration verification complete - all checks passed"
+      when: all_checks_passed

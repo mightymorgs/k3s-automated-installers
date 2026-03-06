@@ -1,0 +1,27 @@
+---
+# NFS Persistent Volume for Homelab NAS
+# Server: 192.168.0.103
+# Share: /volume2/NAS/media
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-shared-nfs-pv
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+    storage-type: nfs
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: 192.168.0.103
+    path: /volume2/NAS/media
+  mountOptions:
+    - nfsvers=4.1
+    - hard
+    - noatime

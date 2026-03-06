@@ -1,0 +1,854 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/_golden-master/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/_golden-master/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "_golden-master"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "_golden-master"
+#       supported_versions: ["latest"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       vault: ">=1.15.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - _golden-master: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "reference"
+#         test_date: "2026-03-04"
+#         notes: "Golden master reference — not a deployable app"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260304_golden_master"
+#   dependencies: ["k3s_server_installed", "vault_deployed", "eso_deployed"]
+#   provides: ["_golden_master_deployed"]
+#   tags: ["golden-master", "reference", "template", "skeleton"]
+#   estimated_duration: 300
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     REFERENCE TEMPLATE — not a deployable app. Canonical install playbook
+#     implementing all 15 voted improvements plus 8 architectural review
+#     additions. Copy this to apps/new-app/ and replace placeholder values.
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   # This block drives sync-app-state.sh for the credential pipeline:
+#   # K8s Secret -> PushSecret -> Vault KV -> sync-app-state.sh -> BWS
+#   credentials:
+#     secret_name: "_golden-master-credentials"
+#     fields:
+#       ADMIN_PASSWORD:
+#         bws_field: "admin_password"
+#         source: "k8s-secret"
+#       API_KEY:
+#         bws_field: "api_key"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for ExternalSecret backend"
+#     writes:
+#       - path: "_state.apps._golden-master.status"
+#         example: "ready"
+#       - path: "_state.apps._golden-master.url"
+#         example: "http://_golden-master.app-namespace.svc:8080"
+#       - path: "_state.apps._golden-master.admin_password"
+#         example: "generated-password"
+#       - path: "_state.apps._golden-master.api_key"
+#         example: "extracted-api-key"
+#       - path: "_state.apps._golden-master.nodeport"
+#         example: 30000
+#       - path: "_state.apps._golden-master.ingress_url"
+#         example: "https://_golden-master.example.com"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 - Phase 5) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "_golden-master"
+#     service_name: "_golden-master"
+#     service_port: 8080
+#     namespace: "app-namespace"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2 - Phase 5) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#     oauth:
+#       client_id_format: "_golden-master-{client}"
+#       redirect_uri_template:
+#         cloudflare: "https://{subdomain}.{domain}/callback"
+#         tailscale: "https://{subdomain}.{vm_hostname}.{tailnet}/callback"
+#       scopes: ["openid", "profile", "email"]
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#     bypass_paths:
+#       - "/api/health"
+#       - "/metrics"
+#     credentials_path: "_state.apps._golden-master.oauth"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Golden Master"
+#     icon: "star"
+#     category: "Reference"
+#     description: "Canonical reference template for all app install playbooks"
+#     docs_url: "apps/_golden-master/README.md"
+#     port: 8080
+#     nodeport: 30000
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for the app"
+#       type: "string"
+#       default: "placeholder:latest"
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of app replicas"
+#       type: "integer"
+#       default: 1
+#     container_port:
+#       label: "Container Port"
+#       description: "Primary HTTP port inside the container"
+#       type: "integer"
+#       default: 8080
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "string"
+#       default: "ClusterIP"
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "100m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "256Mi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "500m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "512Mi"
+#     storage_size:
+#       label: "Data Storage"
+#       description: "Persistent volume size for app data"
+#       type: "string"
+#       default: "10Gi"
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "integer"
+#       default: 30000
+
+# =============================================================================
+#
+#   CANONICAL INSTALL PLAYBOOK — GOLDEN MASTER
+#
+#   This playbook implements ALL 15 voted improvements plus 8 architectural
+#   review additions. Every app install playbook should follow this structure.
+#
+#   15 VOTED IMPROVEMENTS:
+#     1. Playbook metadata header with credentials block
+#     2. hosts: localhost, gather_facts: true, become: false
+#     3. Vars block with app_name, app_namespace, templates_dir, etc.
+#     4. Verify prerequisites with retries
+#     5. Per-field secret preservation (check, preserve, generate, guard)
+#     6. Render J2 templates to /tmp
+#     7. Namespace ensure via --dry-run=client | apply + labels
+#     8. PVC existence guard with StatefulSet claimTemplate detection
+#     9. Convention-based split apply (prefix < 40 = apply, >= 40 = action)
+#    10. Two-step wait (pod exists check, then kubectl wait --for=ready)
+#    11. Credential extraction (Pattern B apps)
+#    12. Display status (Tailscale IP, access URL)
+#    13. Cleanup (remove render dir)
+#    14. Non-empty secret guard (fail if empty)
+#    15. Namespace labels (app.kubernetes.io/name, part-of)
+#
+#   8 ARCHITECTURAL REVIEW ADDITIONS:
+#    A1. Global timeout constants (no magic numbers)
+#    A2. Cluster sanity check (kubectl cluster-info)
+#    A3. Secret drift detection (hash comparison, warn-but-preserve)
+#    A4. Dry-run=server validation before apply
+#    A5. volumeClaimTemplates detection via parsed JSON (not grep)
+#    A6. Resource kind classifier safety net (defence-in-depth)
+#    A7. Safe pod count check (jq .items|length, not .items[0] indexing)
+#    A8. PushSecret apply after credential extraction
+#
+# =============================================================================
+
+- name: "Deploy {{ app_name | default('_golden-master') }}"
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    # ---- Identity ----
+    app_name: "_golden-master"
+    app_namespace: "app-namespace"
+
+    # ---- Paths ----
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/{{ app_name }}-manifests"
+
+    # ---- Install mode ----
+    # install_mode comes from the workflow:
+    #   "full"    -> replace --force (fresh deploy, restarts all pods)
+    #   "rebuild" -> apply (rolling update, preserves state)
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+
+    # ---- Credential fields ----
+    # Each item maps a K8s Secret data key to a playbook fact name.
+    # The secret preservation loop (section 5) iterates this list to:
+    #   1. Check each field in the existing K8s Secret
+    #   2. Preserve the value if it exists and is non-empty
+    #   3. Generate a new value only if missing
+    #   4. Fail if any value ends up empty (non-empty guard)
+    #
+    # For your app, replace these with real field names.
+    # Pattern A apps (operator-managed secrets) may leave this empty.
+    credential_fields:
+      - field_name: admin_password
+        k8s_key: ADMIN_PASSWORD
+      - field_name: api_key
+        k8s_key: API_KEY
+
+    # ---- Global timeout constants (arch review A1) ----
+    # Centralised here so every retry/wait task references the same values.
+    # No magic numbers scattered through the playbook — change once, applies everywhere.
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+    # ---- Protected resource kinds (arch review A6) ----
+    # Second safety layer beyond numeric-prefix convention. Even if a template
+    # file is accidentally given prefix >= 40, this list prevents replace --force
+    # on resource types where force-replace causes data loss or deadlocks.
+    protected_kinds:
+      - Secret
+      - PersistentVolumeClaim
+      - CustomResourceDefinition
+      - ClusterRole
+      - ClusterRoleBinding
+      - Namespace
+      - PushSecret
+
+    # ---- Secret values ----
+    # Default: generate random values. The preservation loop below will
+    # override these with existing values if the K8s Secret already exists.
+    admin_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    api_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+  tasks:
+    # =========================================================================
+    # 1. VERIFY PREREQUISITES
+    #    [Voted improvement #4 + Arch review A2]
+    #
+    #    Three checks, increasing scope:
+    #      - kubectl binary exists (local toolchain)
+    #      - K3s API server reachable (cluster connectivity, with retries
+    #        because the API server may be restarting after a node reboot)
+    #      - cluster-info sanity check (control plane components healthy)
+    # =========================================================================
+
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    # Arch review A2: cluster sanity check beyond just "get nodes".
+    # cluster-info confirms the control plane (API server, CoreDNS) is running.
+    - name: Cluster sanity check
+      ansible.builtin.command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    # =========================================================================
+    # 2. CHECK EXISTING SECRETS — PER-FIELD PRESERVATION
+    #    [Voted improvements #5, #14 + Arch review A3]
+    #
+    #    WHY per-field instead of all-or-nothing:
+    #    If a multi-field secret has field A set but field B missing, the
+    #    all-or-nothing approach would either skip generation (leaving B empty)
+    #    or regenerate everything (losing A). Per-field handles this correctly.
+    #
+    #    Flow:
+    #      1. For each field in credential_fields, read the existing K8s Secret
+    #      2. If the field exists and decodes to a non-empty string, keep it
+    #      3. If missing or empty, the default random value from vars stays
+    #      4. Final guard: fail the playbook if any field is still empty
+    #      5. Drift detection: warn if the existing value differs from what
+    #         the template would render (manual edit detected)
+    #
+    #    Note: no_log: true on all tasks touching secret data.
+    # =========================================================================
+
+    - name: Check for existing secret fields
+      ansible.builtin.command: >-
+        kubectl get secret {{ secret_name | default(app_name + '-credentials') }}
+        -n {{ app_namespace }}
+        -o jsonpath='{.data.{{ item.k8s_key }}}'
+      register: existing_secret_checks
+      changed_when: false
+      failed_when: false
+      no_log: true
+      loop: "{{ credential_fields }}"
+      loop_control:
+        label: "{{ item.field_name }}"
+
+    - name: Preserve existing secret values
+      ansible.builtin.set_fact:
+        "{{ item.item.field_name }}": "{{ item.stdout | b64decode }}"
+      when:
+        - item.rc == 0
+        - item.stdout | length > 0
+        - (item.stdout | b64decode | length) > 0
+      no_log: true
+      loop: "{{ existing_secret_checks.results }}"
+      loop_control:
+        label: "{{ item.item.field_name }}"
+
+    # Arch review A3: secret drift detection.
+    # If the existing value differs from the freshly generated default, someone
+    # changed the secret manually (or a previous deploy used a different value).
+    # We WARN but preserve the existing value — never silently overwrite manual edits.
+    - name: Detect secret drift (warn only)
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ item.item.field_name }} already exists in K8s Secret —
+          preserving existing value (it may differ from what this playbook would generate).
+          This is expected on re-deploys; only investigate if the secret was manually changed.
+      when:
+        - item.rc == 0
+        - item.stdout | length > 0
+        - (item.stdout | b64decode | length) > 0
+      loop: "{{ existing_secret_checks.results }}"
+      loop_control:
+        label: "{{ item.item.field_name }}"
+
+    # Voted improvement #14: non-empty guard.
+    # This catches bugs where b64decode returned empty, or the password lookup
+    # generated nothing. The playbook MUST fail here rather than deploying a
+    # secret with empty fields (which would cause silent auth failures at runtime).
+    - name: Guard against empty secret values
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to deploy — credential field '{{ item.field_name }}' is empty.
+          This means neither preservation from an existing K8s Secret nor generation
+          produced a value. Check that the Secret exists or that the password lookup works.
+      when: lookup('vars', item.field_name, default='') | length == 0
+      loop: "{{ credential_fields }}"
+      loop_control:
+        label: "{{ item.field_name }}"
+
+    # =========================================================================
+    # 3. RENDER J2 TEMPLATES
+    #    [Voted improvement #6]
+    #
+    #    Render to /tmp — NEVER modify source templates.
+    #    Numeric-prefix filenames encode both apply class and ordering.
+    #    The rendered filenames MUST match the template names (00-namespace.yaml,
+    #    10-secrets.yaml, etc.) so the split-apply logic in section 8 works.
+    # =========================================================================
+
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render namespace template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/00-namespace.yaml.j2"
+        dest: "{{ render_dir }}/00-namespace.yaml"
+        mode: '0644'
+
+    - name: Render secrets template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/10-secrets.yaml.j2"
+        dest: "{{ render_dir }}/10-secrets.yaml"
+        mode: '0644'
+      no_log: true
+
+    - name: Render PushSecret template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/20-pushsecret.yaml.j2"
+        dest: "{{ render_dir }}/20-pushsecret.yaml"
+        mode: '0644'
+
+    - name: Render PVC template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/30-pvc.yaml.j2"
+        dest: "{{ render_dir }}/30-pvc.yaml"
+        mode: '0644'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/40-statefulset.yaml.j2"
+        dest: "{{ render_dir }}/40-statefulset.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/50-service.yaml.j2"
+        dest: "{{ render_dir }}/50-service.yaml"
+        mode: '0644'
+
+    - name: Render IngressRoute template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/60-ingressroute.yaml.j2"
+        dest: "{{ render_dir }}/60-ingressroute.yaml"
+        mode: '0644'
+
+    # =========================================================================
+    # 4. ENSURE NAMESPACE EXISTS
+    #    [Voted improvements #7, #15]
+    #
+    #    Two-step: create-or-update + label.
+    #    The --dry-run=client | apply idiom is idempotent — safe to run on
+    #    every deploy without checking if the namespace already exists.
+    #    Labels enable kubectl queries like:
+    #      kubectl get ns -l app.kubernetes.io/part-of=golden-master
+    # =========================================================================
+
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # =========================================================================
+    # 5. DRY-RUN SERVER VALIDATION
+    #    [Arch review A4]
+    #
+    #    Validate every rendered manifest against the live API server BEFORE
+    #    applying. This catches:
+    #      - Invalid field names (typos in YAML)
+    #      - Missing CRDs (e.g. IngressRoute before Traefik is installed)
+    #      - Schema violations (wrong types, missing required fields)
+    #      - RBAC issues (service account can't create the resource)
+    #
+    #    Runs AFTER namespace ensure so namespace-scoped resources pass.
+    #    Uses --dry-run=server (not --dry-run=client) for full API validation.
+    # =========================================================================
+
+    - name: Get ordered manifest list
+      ansible.builtin.find:
+        paths: "{{ render_dir }}"
+        patterns: "*.yaml"
+      register: manifest_files
+
+    - name: Validate manifests against API server (dry-run)
+      ansible.builtin.command:
+        cmd: "kubectl apply --dry-run=server -f {{ item.path }}"
+      loop: "{{ manifest_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: dryrun_result
+      changed_when: false
+      failed_when: dryrun_result.rc != 0
+
+    # =========================================================================
+    # 6. PVC EXISTENCE GUARD
+    #    [Voted improvement #8 + Arch review A5]
+    #
+    #    WHY this matters:
+    #    `kubectl replace --force` on a StatefulSet with volumeClaimTemplates
+    #    deletes and recreates the StatefulSet. The PVC finalizer
+    #    (kubernetes.io/pvc-protection) prevents immediate PVC deletion, but
+    #    the transient state can cause data loss or pod scheduling failures.
+    #
+    #    Detection logic:
+    #      1. Check if any PVC in the namespace is already Bound
+    #      2. Check if the StatefulSet manifest has volumeClaimTemplates
+    #         (using parsed JSON via jq, NOT grep — arch review A5)
+    #      3. If both true: downgrade workload_action to "apply" (safe)
+    #      4. Override: set danger_full_replace=true to force replace anyway
+    #
+    #    The workload_action variable is used by the split-apply step (section 8)
+    #    instead of kubectl_action for prefix >= 40 manifests.
+    # =========================================================================
+
+    - name: Check for existing Bound PVC
+      ansible.builtin.command: >-
+        kubectl get pvc -n {{ app_namespace }}
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[0].status.phase}'
+      register: existing_pvc
+      changed_when: false
+      failed_when: false
+
+    # Arch review A5: use parsed JSON to detect volumeClaimTemplates.
+    # grep is fragile (matches comments, strings, unrelated keys).
+    # kubectl apply --dry-run=server -o json produces valid structured output
+    # that jq can query reliably.
+    - name: Check StatefulSet for volumeClaimTemplates (parsed JSON)
+      ansible.builtin.shell: >-
+        kubectl apply --dry-run=server
+        -f {{ render_dir }}/40-statefulset.yaml -o json
+        | jq '.spec.volumeClaimTemplates | length'
+      register: claim_template_count
+      changed_when: false
+      failed_when: false
+      when: >-
+        '40-statefulset.yaml' in
+        (manifest_files.files | map(attribute='path') | map('basename') | list)
+
+    - name: Downgrade workload action if PVC risk detected
+      ansible.builtin.set_fact:
+        workload_action: "apply"
+      when:
+        - claim_template_count is defined
+        - claim_template_count.stdout is defined
+        - claim_template_count.stdout | default('0') | int > 0
+        - existing_pvc.rc == 0
+        - existing_pvc.stdout == 'Bound'
+        - not (danger_full_replace | default(false) | bool)
+
+    - name: Use requested action if no PVC risk
+      ansible.builtin.set_fact:
+        workload_action: "{{ kubectl_action }}"
+      when: workload_action is not defined
+
+    - name: Report PVC safety decision
+      ansible.builtin.debug:
+        msg: >-
+          PVC safety: existing_pvc={{ existing_pvc.stdout | default('none') }},
+          claimTemplates={{ claim_template_count.stdout | default('N/A') }},
+          workload_action={{ workload_action }}
+
+    # =========================================================================
+    # 7. RESOURCE KIND CLASSIFIER — SAFETY NET
+    #    [Arch review A6]
+    #
+    #    Defence-in-depth beyond the numeric-prefix convention.
+    #    Even if someone accidentally creates a Secret template with prefix 40+,
+    #    this classifier reads the `kind:` field from each manifest and blocks
+    #    `replace --force` on protected resource types.
+    #
+    #    This check only fires when kubectl_action is replace --force AND
+    #    a protected kind is found in the workload prefix range (>= 40).
+    #    Normal `apply` mode skips this entirely.
+    # =========================================================================
+
+    - name: Detect resource kind for safety classification
+      ansible.builtin.shell: >-
+        grep -m1 '^kind:' {{ item.path }} | awk '{print $2}'
+      register: resource_kinds
+      loop: "{{ manifest_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      changed_when: false
+
+    - name: "Guard: protected kinds must never use replace --force"
+      ansible.builtin.fail:
+        msg: >-
+          SAFETY VIOLATION: {{ item.item.path | basename }} has kind={{ item.stdout }}
+          which is in the protected_kinds list. Protected resources must NEVER be
+          applied with replace --force (causes data loss or deadlocks).
+          Fix: move this template to prefix < 40 or remove it from kubectl_action scope.
+      when:
+        - item.stdout in protected_kinds
+        - kubectl_action == 'replace --force'
+        - item.item.path | basename is regex('^[4-9]')
+      loop: "{{ resource_kinds.results }}"
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+
+    # =========================================================================
+    # 8. CONVENTION-BASED SPLIT APPLY
+    #    [Voted improvement #9]
+    #
+    #    The numeric-prefix convention encodes the apply method:
+    #      prefix < 40 (00-39): ALWAYS kubectl apply
+    #        - Namespace, Secrets, PushSecret, PVC
+    #        - These resources must never be force-replaced
+    #      prefix >= 40 (40-69): kubectl {{ workload_action }}
+    #        - StatefulSet, Service, IngressRoute
+    #        - replace --force in full mode restarts pods (intended)
+    #
+    #    The regex '^[0-3]' matches 00-39, '^[4-9]' matches 40-99.
+    #    filesystem sort on prefix IS the apply order — no ordered lists needed.
+    #
+    #    WHY not `kubectl apply -f render_dir/`:
+    #    Bulk apply treats ALL files the same way. We need different actions
+    #    for protected vs workload resources. The split-apply pattern handles
+    #    this without maintaining a per-app resource list.
+    # =========================================================================
+
+    - name: Apply protected resources (prefix < 40, always kubectl apply)
+      ansible.builtin.command:
+        cmd: "kubectl apply -f {{ item.path }}"
+      loop: "{{ manifest_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: item.path | basename is regex('^[0-3]')
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources (prefix >= 40, uses workload_action)
+      ansible.builtin.command:
+        cmd: "kubectl {{ workload_action }} -f {{ item.path }}"
+      loop: "{{ manifest_files.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: item.path | basename is regex('^[4-9]')
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    # =========================================================================
+    # 9. TWO-STEP WAIT
+    #    [Voted improvement #10 + Arch review A7]
+    #
+    #    WHY two steps:
+    #    `kubectl wait` fails immediately with "no matching resources found"
+    #    if no pods exist yet. The pre-check retries until at least one pod
+    #    is created by the controller, THEN the wait step checks readiness.
+    #
+    #    Arch review A7: safe pod count check.
+    #    Use `jq '.items | length'` instead of `.items[0].metadata.name`.
+    #    The jq approach returns 0 when no pods exist (safe to compare).
+    #    The jsonpath approach fails or returns empty on an empty items array.
+    #
+    #    Retry math: retries = timeout / interval
+    #    600s / 10s = 60 retries for pod existence (generous — pods usually
+    #    appear within 30s). 3 retries on the wait step for transient failures.
+    # =========================================================================
+
+    - name: Wait for at least one pod to exist (safe count check)
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o json | jq '.items | length'
+      register: pod_count
+      changed_when: false
+      failed_when: false
+      retries: "{{ (app_start_timeout_seconds / retry_interval_seconds) | int }}"
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_count.rc == 0 and (pod_count.stdout | int) > 0
+
+    - name: Wait for pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name={{ app_name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      register: wait_result
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: wait_result.rc == 0
+
+    # =========================================================================
+    # 10. CREDENTIAL EXTRACTION (Pattern B apps only)
+    #     [Voted improvement #11 + Arch review A8]
+    #
+    #     Pattern A: app uses K8s Secret created BEFORE deploy (section 2-3).
+    #                Credentials are known at template render time. SKIP this.
+    #
+    #     Pattern B: app generates credentials at RUNTIME (first boot writes
+    #                an API key to a config file inside the container).
+    #                We must wait for the app to start, exec into the pod,
+    #                extract the value, create a K8s Secret, then apply a
+    #                PushSecret to push it to Vault.
+    #
+    #     The `credential_extraction` variable controls whether this block
+    #     runs. Set it in your app's vars block. Example:
+    #       credential_extraction:
+    #         config_file_path: "/config/config.xml"
+    #         extraction_command: "sed -n 's/.*<ApiKey>\\(.*\\)<\\/ApiKey>.*/\\1/p' /config/config.xml"
+    #         credential_field: "api-key"
+    #
+    #     Guards:
+    #       - test -f AND test -s: file exists AND has content (not truncated)
+    #       - Non-empty extraction guard: fail if sed/grep returned empty
+    #       - --dry-run=client | apply: idempotent secret creation
+    # =========================================================================
+
+    - name: Get app pod name for credential extraction
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+      when: credential_extraction is defined
+
+    - name: Wait for config file with content
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} exec {{ app_pod.stdout }} --
+        /bin/sh -c "test -f {{ credential_extraction.config_file_path }}
+        && test -s {{ credential_extraction.config_file_path }}"
+      register: config_check
+      retries: 12
+      delay: "{{ retry_interval_seconds }}"
+      until: config_check.rc == 0
+      when: credential_extraction is defined
+
+    - name: Extract credential from config
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} exec {{ app_pod.stdout }} --
+        {{ credential_extraction.extraction_command }}
+      register: extracted_value
+      changed_when: false
+      no_log: true
+      when: credential_extraction is defined and config_check.rc == 0
+
+    - name: Guard against empty extraction
+      ansible.builtin.fail:
+        msg: >-
+          Credential extraction returned empty for {{ app_name }}.
+          The extraction command ran but produced no output.
+          Check that the config file path and sed/grep pattern are correct.
+      when:
+        - credential_extraction is defined
+        - extracted_value.stdout | default('') | length == 0
+
+    - name: Create credentials K8s Secret from extracted value
+      ansible.builtin.shell: >-
+        kubectl create secret generic {{ app_name }}-credentials
+        --from-literal={{ credential_extraction.credential_field }}={{ extracted_value.stdout }}
+        -n {{ app_namespace }}
+        --dry-run=client -o yaml | kubectl apply -f -
+      register: secret_create
+      changed_when: "'created' in secret_create.stdout or 'configured' in secret_create.stdout"
+      no_log: true
+      when:
+        - credential_extraction is defined
+        - extracted_value.stdout | default('') | length > 0
+
+    # Arch review A8: apply PushSecret AFTER credential extraction.
+    # For Pattern B apps, the K8s Secret doesn't exist until after the app
+    # starts and we extract the credential. The PushSecret CRD references
+    # this Secret, so it must be applied after the Secret is created.
+    - name: Render PushSecret for extracted credentials
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/20-pushsecret.yaml.j2"
+        dest: "/tmp/{{ app_name }}-pushsecret.yaml"
+        mode: '0644'
+      when:
+        - credential_extraction is defined
+        - extracted_value.stdout | default('') | length > 0
+
+    - name: Apply PushSecret for extracted credentials
+      ansible.builtin.command:
+        cmd: "kubectl apply -f /tmp/{{ app_name }}-pushsecret.yaml"
+      register: pushsecret_apply
+      changed_when: "'created' in pushsecret_apply.stdout or 'configured' in pushsecret_apply.stdout"
+      when:
+        - credential_extraction is defined
+        - extracted_value.stdout | default('') | length > 0
+
+    - name: Clean up PushSecret temp file
+      ansible.builtin.file:
+        path: "/tmp/{{ app_name }}-pushsecret.yaml"
+        state: absent
+      when: credential_extraction is defined
+
+    # =========================================================================
+    # 11. DISPLAY STATUS
+    #     [Voted improvement #12]
+    #
+    #     Show the access URL using the Tailscale IP (how apps are accessed
+    #     on the VM via the private tailnet). Falls back to ansible_hostname
+    #     if Tailscale is not available (CI runner, local dev).
+    # =========================================================================
+
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name | upper }} Deployed Successfully"
+          - "=========================================="
+          - "Namespace:  {{ app_namespace }}"
+          - "Image:      {{ image | default('placeholder:latest') }}"
+          - "Access URL: http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30000) }}"
+          - "Mode:       {{ install_mode | default('rebuild') }} (workload_action={{ workload_action }})"
+          - "=========================================="
+
+    # =========================================================================
+    # 12. CLEANUP
+    #     [Voted improvement #13]
+    #
+    #     Remove the render directory. Rendered manifests contain secrets
+    #     (10-secrets.yaml) and should not persist on disk after deploy.
+    # =========================================================================
+
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

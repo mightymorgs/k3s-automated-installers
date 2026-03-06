@@ -1,0 +1,90 @@
+---
+# qBittorrent StatefulSet (J2 template)
+# Defaults match k8s-standalone/base/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('qbittorrent') }}
+  namespace: {{ app_namespace | default('media-stack') }}
+  labels:
+    app: {{ app_name | default('qbittorrent') }}
+    app.kubernetes.io/name: {{ app_name | default('qbittorrent') }}
+    app.kubernetes.io/component: downloader
+    app.kubernetes.io/part-of: media-stack
+spec:
+  serviceName: {{ app_name | default('qbittorrent') }}
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('qbittorrent') }}
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('qbittorrent') }}
+        app.kubernetes.io/name: {{ app_name | default('qbittorrent') }}
+    spec:
+      containers:
+        - name: {{ app_name | default('qbittorrent') }}
+          image: {{ image | default('lscr.io/linuxserver/qbittorrent:latest') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          env:
+            - name: PUID
+              value: "{{ puid | default('1000') }}"
+            - name: PGID
+              value: "{{ pgid | default('1000') }}"
+            - name: TZ
+              value: "{{ timezone | default('Australia/Sydney') }}"
+            - name: WEBUI_PORT
+              value: "{{ container_port | default(8081) }}"
+          ports:
+            - name: http
+              containerPort: {{ container_port | default(8081) }}
+              protocol: TCP
+            - name: bittorrent-tcp
+              containerPort: {{ bittorrent_port | default(6881) }}
+              protocol: TCP
+            - name: bittorrent-udp
+              containerPort: {{ bittorrent_port | default(6881) }}
+              protocol: UDP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: shared-media
+              mountPath: {{ downloads_mount_path | default('/downloads') }}
+              subPath: {{ downloads_subpath | default('downloads') }}
+          resources:
+            requests:
+              cpu: {{ cpu_request | default('200m') }}
+              memory: {{ memory_request | default('512Mi') }}
+            limits:
+              cpu: {{ cpu_limit | default('2000m') }}
+              memory: {{ memory_limit | default('2Gi') }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ liveness_initial_delay | default(60) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ readiness_initial_delay | default(30) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: shared-media
+          persistentVolumeClaim:
+            claimName: {{ media_pvc_name | default('media-shared-pvc') }}
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+        labels:
+          app: {{ app_name | default('qbittorrent') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ config_storage_size | default('1Gi') }}

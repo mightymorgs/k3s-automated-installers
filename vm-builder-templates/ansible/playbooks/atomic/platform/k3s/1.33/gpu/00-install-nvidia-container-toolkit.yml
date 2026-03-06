@@ -1,0 +1,150 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/gpu/00-install-nvidia-container-toolkit"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/gpu/00-install-nvidia-container-toolkit.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "gpu-support"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "nvidia-container-toolkit"
+#       folder_version: "1.33"
+#       supported_versions: ["1.16.x", "1.17.x"]
+#       version_range: ">=1.16.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       nvidia_driver: ">=535.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - nvidia_container_toolkit: "1.17.3"
+#         k3s: "1.33.5"
+#         nvidia_driver: "580.95.05"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "NVIDIA Container Toolkit for GPU workloads in k3s"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "nvidia_driver_installed"]
+#   provides: ["nvidia_container_toolkit_installed", "k3s_nvidia_runtime_configured"]
+#   tags: ["k3s", "nvidia", "gpu", "container-toolkit", "containerd"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: Install NVIDIA Container Toolkit and configure K3s containerd for GPU support
+- name: Install NVIDIA Container Toolkit for K3s
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Display installation information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Installing NVIDIA Container Toolkit for K3s
+          - ==========================================
+          - 'Purpose: Enable GPU support in K3s containers'
+          - 'Runtime: containerd (K3s default)'
+          - ''
+          - 'This playbook will:'
+          - '  1. Install NVIDIA Container Toolkit'
+          - '  2. Configure containerd to use nvidia runtime'
+          - '  3. Restart K3s to apply changes'
+          - ==========================================
+    - name: Check if NVIDIA drivers are present
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_check
+      failed_when: false
+      changed_when: false
+    - name: Fail if NVIDIA drivers not installed
+      ansible.builtin.fail:
+        msg: NVIDIA drivers must be installed before NVIDIA Container Toolkit
+      when: nvidia_check.rc != 0
+    - name: Check if NVIDIA Container Toolkit is installed
+      ansible.builtin.command: nvidia-ctk --version
+      register: nvidia_ctk_check
+      failed_when: false
+      changed_when: false
+    - name: Add NVIDIA Container Toolkit repository
+      ansible.builtin.shell: |
+        set -eo pipefail
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+          gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && \
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+          sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+          tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      args:
+        executable: /bin/bash
+        creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      when: nvidia_ctk_check.rc != 0
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      when: nvidia_ctk_check.rc != 0
+    - name: Install NVIDIA Container Toolkit
+      ansible.builtin.apt:
+        name: nvidia-container-toolkit
+        state: present
+      when: nvidia_ctk_check.rc != 0
+    - name: Configure containerd for nvidia runtime (K3s)
+      ansible.builtin.command: >-
+        nvidia-ctk runtime configure
+        --runtime=containerd
+        --config=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
+      register: containerd_config
+      changed_when: containerd_config.rc == 0
+      failed_when: false
+    - name: Display containerd configuration result
+      ansible.builtin.debug:
+        msg: ['Containerd configuration:', '{{ containerd_config.stdout_lines }}']
+    - name: Restart K3s to apply nvidia runtime  # noqa: no-handler
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+      when: containerd_config is changed
+    - name: Wait for K3s to be ready after restart  # noqa: no-handler
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: k8s_nodes
+      retries: 30
+      delay: 10
+      until:
+        - k8s_nodes.resources | length > 0
+        - k8s_nodes.resources | selectattr('status.conditions', 'defined') | list
+          | length > 0
+        - >-
+          k8s_nodes.resources[0].status.conditions |
+          selectattr('type', 'equalto', 'Ready') |
+          selectattr('status', 'equalto', 'True') | list | length > 0
+      when: containerd_config is changed
+    - name: Verify NVIDIA Container Toolkit installation
+      ansible.builtin.command: nvidia-ctk --version
+      register: nvidia_ctk_version
+      changed_when: false
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - NVIDIA Container Toolkit Installed
+          - ==========================================
+          - 'Version: {{ nvidia_ctk_version.stdout }}'
+          - 'Runtime: containerd (K3s)'
+          - 'Config: /var/lib/rancher/k3s/agent/etc/containerd/config.toml'
+          - "K3s Status: {{ 'Restarted' if containerd_config is changed else 'No restart needed' }}"
+          - ''
+          - 'Next step: Deploy NVIDIA Device Plugin'
+          - '  atomic/platform/k3s/1.33/gpu/01-install-nvidia-device-plugin.yml'
+          - ==========================================

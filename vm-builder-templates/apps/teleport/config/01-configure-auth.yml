@@ -1,0 +1,149 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/02-configure-auth"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/config/01-configure-auth.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["teleport_manifests_applied"]
+#   provides: ["teleport_auth_configured", "teleport_admin_created"]
+#   tags: ["teleport", "auth", "users", "golden-master"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure Teleport authentication and create initial admin user
+
+- name: Configure Teleport Auth
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    teleport_namespace: "teleport"
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    teleport_admin_user: admin
+    teleport_admin_roles: "editor,access"
+    store_in_bws: "{{ teleport_store_token_in_bws | default(false) }}"
+    bws_teleport_invite_secret: "teleport/admin_invite_token"
+
+  tasks:
+    # ========================================
+    # CHECK IF TELEPORT IS DEPLOYED
+    # ========================================
+    - name: Check if Teleport is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ teleport_namespace }} -l app=teleport
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: teleport_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set Teleport availability fact
+      ansible.builtin.set_fact:
+        teleport_available: "{{ teleport_check.rc == 0 and teleport_check.stdout | length > 0 }}"
+
+    - name: Skip if Teleport not deployed
+      ansible.builtin.debug:
+        msg: "Teleport not deployed - skipping configuration"
+      when: not teleport_available
+
+    - name: End play if Teleport not available
+      ansible.builtin.meta: end_play
+      when: not teleport_available
+
+    # ========================================
+    # GET POD NAME DYNAMICALLY
+    # ========================================
+    - name: Get Teleport pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ teleport_namespace }} \
+          -l app.kubernetes.io/name=teleport \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ teleport_namespace }} \
+          -l app=teleport \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+
+    - name: Check if admin user already exists
+      ansible.builtin.shell: |
+        kubectl exec -n {{ teleport_namespace }} {{ app_pod.stdout }} -- \
+          tctl users ls --format=json 2>/dev/null | \
+          grep -q '"{{ teleport_admin_user }}"' && echo "exists" || echo "not_found"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: admin_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create admin user invite
+      when: admin_check.stdout == "not_found"
+      block:
+        - name: Generate invite token for admin
+          ansible.builtin.shell: |
+            kubectl exec -n {{ teleport_namespace }} {{ app_pod.stdout }} -- \
+              tctl users add {{ teleport_admin_user }} --roles={{ teleport_admin_roles }} --format=json
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: admin_invite
+          changed_when: true
+          no_log: true
+
+        - name: Parse invite token
+          ansible.builtin.set_fact:
+            teleport_invite_url: "{{ (admin_invite.stdout | from_json).signup_url | default('') }}"
+            teleport_invite_token: "{{ (admin_invite.stdout | from_json).token | default('') }}"
+          no_log: true
+
+        - name: Store invite in BWS (if enabled)
+          when: store_in_bws | bool
+          block:
+            - name: Create BWS secret for invite
+              ansible.builtin.command:
+                cmd: >
+                  bws secret create
+                  --name "{{ bws_teleport_invite_secret }}"
+                  --value "{{ teleport_invite_url }}"
+                  --note "Teleport admin invite URL - expires in 1 hour"
+              environment:
+                BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+              register: bws_create
+              failed_when: false
+              changed_when: bws_create.rc == 0
+              no_log: true
+
+            - name: Update BWS secret if exists
+              ansible.builtin.command:
+                cmd: >
+                  bws secret edit "{{ bws_teleport_invite_secret }}"
+                  --value "{{ teleport_invite_url }}"
+              environment:
+                BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+              when: bws_create.rc != 0
+              changed_when: true
+              no_log: true
+
+        - name: Display invite information
+          ansible.builtin.debug:
+            msg:
+              - "========== Teleport Admin Invite =========="
+              - "User: {{ teleport_admin_user }}"
+              - "Roles: {{ teleport_admin_roles }}"
+              - "Invite URL: [Stored in teleport_invite_url fact]"
+              - ""
+              - "IMPORTANT: Invite expires in 1 hour!"
+              - "Complete registration at the signup URL"
+
+    - name: Skip creation (admin exists)
+      ansible.builtin.debug:
+        msg: "Admin user '{{ teleport_admin_user }}' already exists - skipping"
+      when: admin_check.stdout == "exists"

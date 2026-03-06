@@ -1,0 +1,256 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/operations/alertrule-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "grafana.provisioning.alert-rules.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/operations/alertrule-create.yml"
+#     category: "platform"
+#     subsystem: "grafana"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "grafana"
+#       supported_versions: ["10.x", "11.x"]
+#       version_range: ">=10.0.0"
+#       notes: "Alerting Provisioning API available since Grafana 9.4"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - grafana: "11.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Grafana Alerting Provisioning API"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_grafana_operations"
+#   dependencies: ["grafana_deployed", "grafana_admin_token_available", "grafana_datasource_created"]
+#   provides: ["grafana_alertrule_created"]
+#   tags: ["grafana", "alerting", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an alert rule in Grafana using the Alerting Provisioning API.
+#     This operation is idempotent - if an alert rule with the same title
+#     in the same folder/group exists, it will be skipped. Supports all
+#     alert rule types including Prometheus-style queries.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_token"
+#         purpose: "Grafana API admin token for authentication"
+#       - path: "_state.apps.grafana.url"
+#         purpose: "Grafana base URL"
+#       - path: "_state.apps.grafana.folders.{folder_name}.uid"
+#         purpose: "Target folder UID for alert rule"
+#       - path: "_state.apps.grafana.datasources.{datasource_name}.uid"
+#         purpose: "Datasource UID for alert queries"
+#
+#     writes:
+#       - path: "_state.apps.grafana.alertrules.{rule_title}.uid"
+#         example: "alert-123abc"
+#       - path: "_state.apps.grafana.alertrules.{rule_title}.rule_group"
+#         example: "platform-alerts"
+#       - path: "_state.apps.grafana.alertrules.{rule_title}.folder_uid"
+#         example: "platform-dashboards"
+
+- name: Grafana - Create Alert Rule
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    grafana_base_url: "{{ grafana_url }}"
+    grafana_api_base: "{{ grafana_base_url }}/api"
+    endpoint: "/v1/provisioning/alert-rules"
+
+    # Required fields (must be provided by caller)
+    # title: Alert rule name (required)
+    # rule_group: Name of the rule group to add the alert to (required)
+    # folder_uid: Folder UID where the alert will be stored (required)
+    # data: Array of query definitions with conditions (required)
+
+    # Optional fields with sensible defaults
+    condition: "{{ condition_input | default('C') }}"
+    no_data_state: "{{ no_data_state_input | default('NoData') }}"
+    exec_err_state: "{{ exec_err_state_input | default('Error') }}"
+    for_duration: "{{ for_duration_input | default('5m') }}"
+    labels: "{{ labels_input | default({}) }}"
+    annotations: "{{ annotations_input | default({}) }}"
+    is_paused: "{{ is_paused_input | default(false) }}"
+    org_id: "{{ org_id_input | default(1) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - title is defined and title | length > 0
+          - rule_group is defined and rule_group | length > 0
+          - folder_uid is defined and folder_uid | length > 0
+          - data is defined and data | length > 0
+        fail_msg: "Required inputs missing: title, rule_group, folder_uid, data"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Grafana admin token
+      ansible.builtin.set_fact:
+        grafana_admin_token: >-
+          {{
+            inventory._state.apps.grafana.admin_token | default(grafana_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        grafana_base_url: "{{ inventory._state.apps.grafana.url }}"
+        grafana_api_base: "{{ inventory._state.apps.grafana.url }}/api"
+      when: inventory._state.apps.grafana.url is defined
+
+    # ===== STEP 3: Check for Existing Alert Rule (Idempotency) =====
+    - name: List existing alert rules in folder/group
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}{{ endpoint }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: existing_rules
+      no_log: false
+
+    - name: Filter for existing alert rule by title and folder
+      ansible.builtin.set_fact:
+        existing_rule: >-
+          {{
+            existing_rules.json
+            | selectattr('title', 'equalto', title)
+            | selectattr('folderUID', 'equalto', folder_uid)
+            | list
+            | first
+            | default(none)
+          }}
+      no_log: false
+
+    - name: Skip creation if alert rule exists
+      ansible.builtin.debug:
+        msg: >-
+          Alert rule '{{ title }}' already exists in folder '{{ folder_uid }}'
+          with UID {{ existing_rule.uid }}
+      when: existing_rule is not none
+
+    # ===== STEP 4: Build Alert Rule Payload =====
+    - name: Build alert rule creation payload
+      ansible.builtin.set_fact:
+        alertrule_payload:
+          title: "{{ title }}"
+          ruleGroup: "{{ rule_group }}"
+          folderUID: "{{ folder_uid }}"
+          condition: "{{ condition }}"
+          noDataState: "{{ no_data_state }}"
+          execErrState: "{{ exec_err_state }}"
+          for: "{{ for_duration }}"
+          orgId: "{{ org_id }}"
+          labels: "{{ labels }}"
+          annotations: "{{ annotations }}"
+          isPaused: "{{ is_paused }}"
+          data: "{{ data }}"
+      when: existing_rule is none
+      no_log: false
+
+    # ===== STEP 5: Create Alert Rule =====
+    - name: Create alert rule in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+          Content-Type: "application/json"
+          X-Disable-Provenance: "true"
+        body_format: json
+        body: "{{ alertrule_payload }}"
+        status_code: [200, 201, 202]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: existing_rule is none
+
+    - name: Set alert rule result from creation or existing
+      ansible.builtin.set_fact:
+        result_alertrule_uid: >-
+          {{ existing_rule.uid if existing_rule is not none else create_result.json.uid }}
+        result_alertrule_title: "{{ title }}"
+        result_alertrule_group: "{{ rule_group }}"
+        result_alertrule_folder: "{{ folder_uid }}"
+      no_log: false
+
+    # ===== STEP 6: Write Result to BWS._state =====
+    - name: Derive alertrule key name for BWS writeback
+      ansible.builtin.set_fact:
+        alertrule_key: "{{ title | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with alertrule info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge alertrule info into _state.apps.grafana.alertrules
+        UPDATED=$(echo "$CURRENT" | jq --arg rule "{{ alertrule_key }}" \
+          --arg rule_uid "{{ result_alertrule_uid }}" \
+          --arg rule_group "{{ result_alertrule_group }}" \
+          --arg folder_uid "{{ result_alertrule_folder }}" \
+          '
+          if ._state.apps.grafana == null then ._state.apps.grafana = {} else . end |
+          if ._state.apps.grafana.alertrules == null then ._state.apps.grafana.alertrules = {} else . end |
+          if ._state.apps.grafana.alertrules[$rule] == null then ._state.apps.grafana.alertrules[$rule] = {} else . end |
+          ._state.apps.grafana.alertrules[$rule].uid = $rule_uid |
+          ._state.apps.grafana.alertrules[$rule].rule_group = $rule_group |
+          ._state.apps.grafana.alertrules[$rule].folder_uid = $folder_uid
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: existing_rule is none
+
+    # ===== STEP 7: Output Result =====
+    - name: Display alert rule creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if existing_rule is not none else 'created' }}"
+          alertrule_uid: "{{ result_alertrule_uid }}"
+          title: "{{ result_alertrule_title }}"
+          rule_group: "{{ result_alertrule_group }}"
+          folder_uid: "{{ result_alertrule_folder }}"
+          for_duration: "{{ for_duration }}"
+          no_data_state: "{{ no_data_state }}"
+          exec_err_state: "{{ exec_err_state }}"

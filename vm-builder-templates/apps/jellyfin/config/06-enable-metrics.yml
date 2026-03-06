@@ -1,0 +1,151 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/jellyfin/06-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/jellyfin/config/06-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "jellyfin"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["jellyfin_deployed"]
+#   provides: ["jellyfin_metrics_enabled"]
+#   tags: ["jellyfin", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Prometheus metrics scraping for Jellyfin. Sets the
+#     JELLYFIN_EnableMetrics=true environment variable to activate the
+#     built-in metrics endpoint on port 8096, then adds pod-level
+#     Prometheus scrape annotations so Prometheus auto-discovers and
+#     scrapes the /metrics endpoint. No sidecar containers needed.
+#   requires_apps: ["jellyfin", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for Jellyfin
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    jellyfin_namespace: "jellyfin"
+    app_namespace: "{{ jellyfin_namespace }}"
+  tasks:
+    # ========== CHECK IF JELLYFIN IS DEPLOYED ==========
+    - name: Check if Jellyfin pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=jellyfin --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: jellyfin_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Jellyfin not deployed
+      ansible.builtin.debug:
+        msg: "Jellyfin not deployed - skipping metrics configuration"
+      when: jellyfin_pod_check.rc != 0 or jellyfin_pod_check.stdout | length == 0
+
+    - name: End play if Jellyfin not available
+      ansible.builtin.meta: end_play
+      when: jellyfin_pod_check.rc != 0 or jellyfin_pod_check.stdout | length == 0
+
+    # ========== DISCOVER WORKLOAD TYPE ==========
+    # Jellyfin may run as a StatefulSet or Deployment. Check both.
+    - name: Check for Jellyfin statefulset
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset -n {{ app_namespace }}
+          -l app=jellyfin
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: sts_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check for Jellyfin deployment
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ app_namespace }}
+          -l app=jellyfin
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: deploy_check
+      changed_when: false
+      failed_when: false
+      when: sts_check.stdout | length == 0
+
+    - name: Set workload facts
+      ansible.builtin.set_fact:
+        workload_kind: "{{ 'statefulset' if sts_check.stdout | length > 0 else 'deployment' }}"
+        workload_name: "{{ sts_check.stdout if sts_check.stdout | length > 0 else (deploy_check.stdout | default('jellyfin')) }}"
+
+    # ========== ENABLE METRICS VIA ENVIRONMENT VARIABLE ==========
+    # Jellyfin requires JELLYFIN_EnableMetrics=true to expose the
+    # /metrics endpoint. Without this, the endpoint is not available.
+    - name: Enable Jellyfin metrics via environment variable
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env {{ workload_kind }}/{{ workload_name }} -n {{ app_namespace }}
+          JELLYFIN_EnableMetrics=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: env_result
+      changed_when: "'updated' in env_result.stdout"
+
+    # ========== CHECK IF ANNOTATIONS ALREADY PRESENT ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get {{ workload_kind }} {{ workload_name }} -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to Jellyfin
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch {{ workload_kind }} {{ workload_name }} -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"8096","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    - name: Annotations already present
+      ansible.builtin.debug:
+        msg: "Prometheus scrape annotations already present on {{ workload_kind }}/{{ workload_name }} - skipping patch"
+      when: current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Jellyfin rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status {{ workload_kind }}/{{ workload_name }} -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Jellyfin Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: {{ workload_kind }}/{{ workload_name }}"
+          - "Namespace: {{ app_namespace }}"
+          - "JELLYFIN_EnableMetrics: true {{ '(set)' if env_result.changed else '(already set)' }}"
+          - "Scrape Port: 8096"
+          - "Metrics Path: /metrics"
+          - "Annotations: {{ 'added' if current_scrape.stdout != 'true' else 'already configured' }}"
+          - "=========================================="

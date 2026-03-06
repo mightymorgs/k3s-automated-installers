@@ -1,0 +1,15 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  configmap.yaml.j2:
+    summary: 'Jinja2 template: configmap.yaml.j2'
+    source: inferred
+    confidence: medium
+  deployment.yaml.j2:
+    summary: 'Jinja2 template: deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  service.yaml.j2:
+    summary: 'Jinja2 template: service.yaml.j2'
+    source: inferred
+    confidence: medium

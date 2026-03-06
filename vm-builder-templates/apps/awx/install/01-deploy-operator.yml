@@ -1,0 +1,581 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/01-deploy-operator"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/install/01-deploy-operator.yml"
+#     category: "apps"
+#     subsystem: "awx"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["24.x", "25.x"]
+#       version_range: ">=24.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - awx: "24.6.1"
+#         awx_operator: "2.19.1"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-22"
+#         notes: "Deploys AWX operator and instance via kustomize"
+#
+#   # ========== ARCHITECTURE NOTES ==========
+#   architecture:
+#     description: "AWX (Ansible Tower) automation platform for in-cluster operations"
+#     components:
+#       - name: "awx-operator"
+#         purpose: "Manages AWX lifecycle via custom resources"
+#       - name: "awx-web"
+#         purpose: "Web UI and REST API server"
+#         exposed: true
+#         port: 80
+#       - name: "awx-task"
+#         purpose: "Ansible job execution engine"
+#       - name: "awx-postgres"
+#         purpose: "Database backend"
+#       - name: "awx-redis"
+#         purpose: "Task queue and caching"
+#     deployment_method: "AWX Operator via kustomize from official repository"
+#     monitoring: "Executes Ansible playbooks from synced Git repository"
+#
+#   # ========== KUBERNETES ARTIFACTS ==========
+#   artifacts:
+#     namespace: "awx"
+#     manifests:
+#       platform_path: "k8s-base"
+#     resources:
+#       - type: "Namespace"
+#         name: "awx"
+#       - type: "CustomResourceDefinition"
+#         name: "awxs.awx.ansible.com"
+#       - type: "Deployment"
+#         names: ["awx-operator-controller-manager", "awx-web", "awx-task"]
+#       - type: "StatefulSet"
+#         names: ["awx-postgres-15"]
+#       - type: "Service"
+#         names: ["awx-service", "awx-postgres"]
+#       - type: "Secret"
+#         names: ["awx-admin-password", "awx-postgres-configuration"]
+#       - type: "PersistentVolumeClaim"
+#         names: ["awx-postgres-15", "awx-projects-claim"]
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["awx_operator_deployed", "awx_instance_running", "awx_ui_accessible"]
+#   tags: ["awx", "ansible-tower", "golden-master", "automation"]
+#   idempotent: true
+#   estimated_duration: 600
+#   parallel_safe: false
+#   description: Deploy AWX operator and instance for in-cluster Ansible automation
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   credentials:
+#     secret_name: "awx-admin-password"
+#     fields:
+#       password:
+#         bws_field: "admin_password"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.vault.url"
+#         purpose: "Vault endpoint for secret management"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.awx.status"
+#         example: "ready"
+#       - path: "_state.apps.awx.url"
+#         example: "http://awx-service.awx.svc:80"
+#       - path: "_state.apps.awx.password"
+#         example: "extracted-from-k8s-secret"
+#       - path: "_state.apps.awx.nodeport"
+#         example: 30180
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "awx"
+#     service_name: "awx-service"
+#     service_port: 80
+#     namespace: "awx"
+#
+#     # Ingress mode from inventory
+#     mode_from_inventory: "ingress.mode"
+#
+#     # Cloudflare Tunnel mode
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#
+#       # Origin certificate (Cloudflare → Traefik HTTPS)
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#
+#     # Tailscale MagicDNS mode
+#     tailscale:
+#       in_cluster: true
+#
+#       # Tailscale certificate
+#       cert:
+#         method: "tailscale-cert"
+#
+#     # Path routing
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#
+#     # OAuth configuration
+#     oauth:
+#       client_id_format: "awx-{client}"
+#
+#       # Redirect URIs (mode-dependent)
+#       redirect_uri_template:
+#         cloudflare: "https://{subdomain}.{domain}/sso/complete/oidc/"
+#         tailscale: "https://{subdomain}.{vm_hostname}.{tailnet}/sso/complete/oidc/"
+#
+#       scopes: ["openid", "profile", "email"]
+#
+#     # ForwardAuth middleware configuration
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#
+#     # Bypass SSO for these paths
+#     bypass_paths:
+#       - "/api/v2/ping/"
+#       - "/api/v2/health/"
+#
+#     # OAuth credentials written here
+#     credentials_path: "_state.apps.awx.oauth"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "AWX"
+#     icon: "terminal"
+#     category: "Automation"
+#     description: "Ansible automation platform (Tower)"
+#     docs_url: "https://ansible.readthedocs.io/projects/awx/"
+#     port: 80
+#     nodeport: 30180
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PostgreSQL and projects PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type for AWX CRD"
+#       type: "string"
+#       default: "ClusterIP"
+#     admin_user:
+#       label: "Admin Username"
+#       description: "AWX admin account username"
+#       type: "string"
+#       default: "admin"
+#     admin_email:
+#       label: "Admin Email"
+#       description: "AWX admin account email address"
+#       type: "string"
+#       default: "admin@example.com"
+#     admin_password:
+#       label: "Admin Password"
+#       description: "AWX admin account password (auto-generated if not set)"
+#       type: "string"
+#       default: "auto-generated"
+#     web_replicas:
+#       label: "Web Replicas"
+#       description: "Number of AWX web pod replicas"
+#       type: "integer"
+#       default: "1"
+#     task_replicas:
+#       label: "Task Replicas"
+#       description: "Number of AWX task pod replicas"
+#       type: "integer"
+#       default: "1"
+#     web_cpu_limit:
+#       label: "Web CPU Limit"
+#       description: "Maximum CPU for AWX web pods"
+#       type: "string"
+#       default: "1000m"
+#     web_memory_limit:
+#       label: "Web Memory Limit"
+#       description: "Maximum memory for AWX web pods"
+#       type: "string"
+#       default: "2Gi"
+#     task_cpu_limit:
+#       label: "Task CPU Limit"
+#       description: "Maximum CPU for AWX task pods"
+#       type: "string"
+#       default: "1000m"
+#     task_memory_limit:
+#       label: "Task Memory Limit"
+#       description: "Maximum memory for AWX task pods"
+#       type: "string"
+#       default: "2Gi"
+#     ee_cpu_limit:
+#       label: "EE CPU Limit"
+#       description: "Maximum CPU for execution environment"
+#       type: "string"
+#       default: "500m"
+#     ee_memory_limit:
+#       label: "EE Memory Limit"
+#       description: "Maximum memory for execution environment"
+#       type: "string"
+#       default: "512Mi"
+#     postgres_storage_size:
+#       label: "PostgreSQL Storage"
+#       description: "Persistent volume size for PostgreSQL data"
+#       type: "string"
+#       default: "10Gi"
+#     projects_storage_size:
+#       label: "Projects Storage"
+#       description: "Persistent volume size for SCM/Git project checkouts"
+#       type: "string"
+#       default: "10Gi"
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "string"
+#       default: "30180"
+
+- name: Deploy AWX Operator and Instance
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    app_name: "awx"
+    app_namespace: "awx"
+    awx_operator_version: 2.19.1
+    awx_operator_url: github.com/ansible/awx-operator/config/default?ref={{ awx_operator_version }}
+    awx_manifests_dir: "{{ playbook_dir }}/../k8s-base"
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    bws_awx_admin_password_key: awx/admin_password
+    retry_interval_seconds: 10
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display AWX installation information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Installing AWX Automation Platform
+          - ==========================================
+          - 'AWX Operator Version: {{ awx_operator_version }}'
+          - 'Namespace: {{ app_namespace }}'
+          - 'Operator URL: {{ awx_operator_url }}'
+          - ''
+          - 'AWX Components:'
+          - '  - awx-operator (lifecycle management)'
+          - '  - awx-web (Web UI + REST API)'
+          - '  - awx-task (job execution engine)'
+          - '  - awx-postgres (database)'
+          - '  - awx-redis (cache + task queue)'
+          - ''
+          - 'Storage: Longhorn (PostgreSQL + Projects)'
+          - ==========================================
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    - name: Create AWX operator install info ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ awx_manifests_dir }}/awx-operator.yaml'
+      register: operator_info
+    - name: Deploy AWX Operator via kustomize
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('kubernetes.core.kustomize', dir=awx_operator_url) }}"
+        namespace: '{{ app_namespace }}'
+        wait: false
+      register: operator_deploy
+    - name: Display operator deployment status
+      ansible.builtin.debug:
+        msg: AWX Operator deployment initiated
+    - name: Wait for AWX Operator CRD to be established
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: awxs.awx.ansible.com
+      register: crd_check
+      until: >
+        crd_check.resources | length > 0 and
+        crd_check.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Established') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 60
+      delay: 5
+    - name: Display CRD status
+      ansible.builtin.debug:
+        msg: AWX CRD (awxs.awx.ansible.com) established successfully
+    - name: Wait for AWX Operator deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: awx-operator-controller-manager
+        namespace: '{{ app_namespace }}'
+        wait: true
+        wait_condition:
+          type: Available
+          status: 'True'
+        wait_timeout: 300
+      register: operator_ready
+    - name: Display operator ready status
+      ansible.builtin.debug:
+        msg:
+          - AWX Operator is ready
+          - 'Deployment: awx-operator-controller-manager'
+          - >-
+            Replicas:
+            {{ operator_ready.resources[0].status.readyReplicas | default(0) }}/{{
+              operator_ready.resources[0].spec.replicas
+            }}
+    - name: Deploy AWX instance custom resource
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ awx_manifests_dir }}/awx-instance.yaml'
+        namespace: '{{ app_namespace }}'
+      register: awx_instance_deploy
+    - name: Display AWX instance deployment status
+      ansible.builtin.debug:
+        msg:
+          - AWX instance custom resource created
+          - Operator will now provision AWX components
+          - This may take 5-10 minutes...
+    - name: Wait for AWX custom resource to report ready status
+      kubernetes.core.k8s_info:
+        api_version: awx.ansible.com/v1beta1
+        kind: AWX
+        name: awx
+        namespace: '{{ app_namespace }}'
+      register: awx_status
+      until: >
+        awx_status.resources | length > 0 and
+        awx_status.resources[0].status is defined and
+        awx_status.resources[0].status.conditions is defined and
+        awx_status.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Running') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 120
+      delay: 10
+      failed_when: false
+    - name: Display AWX deployment progress
+      ansible.builtin.debug:
+        msg:
+          - >-
+            AWX Status:
+            {{
+              awx_status.resources[0].status.conditions | default([])
+              | selectattr('type', 'equalto', 'Running')
+              | map(attribute='reason')
+              | first
+              | default('Deploying')
+            }}
+          - "Version: {{ awx_status.resources[0].status.version | default('deploying...') }}"
+      when: awx_status.resources | length > 0
+    - name: Wait for AWX web deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: '{{ app_namespace }}'
+        name: awx-web
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: awx_web_ready
+      until:
+        - awx_web_ready.resources | default([]) | length > 0
+        - (awx_web_ready.resources[0].status.readyReplicas | default(0)) > 0
+      retries: 60
+      delay: 10
+      failed_when: false
+    - name: Wait for AWX task deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: '{{ app_namespace }}'
+        name: awx-task
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: awx_task_ready
+      until:
+        - awx_task_ready.resources | default([]) | length > 0
+        - (awx_task_ready.resources[0].status.readyReplicas | default(0)) > 0
+      retries: 60
+      delay: 10
+      failed_when: false
+    - name: Wait for AWX PostgreSQL to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        namespace: '{{ app_namespace }}'
+        name: awx-postgres-15
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: awx_postgres_ready
+      until:
+        - awx_postgres_ready.resources | default([]) | length > 0
+        - (awx_postgres_ready.resources[0].status.readyReplicas | default(0)) > 0
+      retries: 60
+      delay: 10
+      failed_when: false
+    - name: Display AWX component status
+      ansible.builtin.debug:
+        msg:
+          - 'AWX Components Status:'
+          - "  - awx-web: {{ 'Available' if (awx_web_ready.resources | default([]) | length > 0) else 'Pending' }}"
+          - "  - awx-task: {{ 'Available' if (awx_task_ready.resources | default([]) | length > 0) else 'Pending' }}"
+          - "  - postgres: {{ 'Ready' if (awx_postgres_ready.resources | default([]) | length > 0) else 'Pending' }}"
+    - name: Retrieve AWX admin password from Secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: awx-admin-password
+        namespace: '{{ app_namespace }}'
+      register: admin_secret
+      until: admin_secret.resources | length > 0
+      retries: 60
+      delay: 10
+    - name: Extract and decode admin password
+      ansible.builtin.set_fact:
+        awx_admin_password: '{{ admin_secret.resources[0].data.password | b64decode }}'
+      no_log: true
+    - name: Display admin password (for immediate use)
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - AWX Admin Credentials
+          - ==========================================
+          - 'Username: admin'
+          - 'Password: {{ awx_admin_password }}'
+          - ==========================================
+          - 'IMPORTANT: Store this password securely!'
+          - It will be saved to Bitwarden Secrets Manager
+          - ==========================================
+    - name: Check if BWS CLI is available
+      ansible.builtin.command: which bws
+      register: bws_check
+      failed_when: false
+      changed_when: false
+    - name: Store admin password in Bitwarden Secrets Manager
+      ansible.builtin.shell:
+        cmd: |
+          bws secret create {{ bws_awx_admin_password_key }} "{{ awx_admin_password }}" || \
+          bws secret edit {{ bws_awx_admin_password_key }} --value "{{ awx_admin_password }}"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_store
+      failed_when: false
+      changed_when: bws_store.rc == 0
+      no_log: true
+      when: bws_check.rc == 0
+    - name: Display BWS storage status
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Admin password stored in BWS: ' + bws_awx_admin_password_key
+            if bws_store is succeeded
+            else 'WARNING: Could not store password in BWS - store manually'
+          }}
+      when: bws_check.rc == 0
+
+    - name: Render and apply PushSecret
+      block:
+        - name: Render PushSecret template
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../templates/pushsecret.yaml.j2"
+            dest: "/tmp/awx-pushsecret.yaml"
+            mode: '0644'
+        - name: Apply PushSecret
+          ansible.builtin.command:
+            cmd: kubectl apply -f /tmp/awx-pushsecret.yaml
+          register: pushsecret_apply
+          changed_when: "'created' in pushsecret_apply.stdout or 'configured' in pushsecret_apply.stdout"
+
+        - name: Clean up PushSecret manifest
+          ansible.builtin.file:
+            path: "/tmp/awx-pushsecret.yaml"
+            state: absent
+
+    - name: Get AWX service details
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: awx-service
+        namespace: '{{ app_namespace }}'
+      register: awx_svc
+    - name: Get node information
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: nodes_info
+    - name: Extract node IP
+      ansible.builtin.set_fact:
+        node_ip: >-
+          {{
+            nodes_info.resources[0].status.addresses
+            | selectattr('type', 'equalto', 'InternalIP')
+            | map(attribute='address')
+            | first
+          }}
+    - name: Get all AWX pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ app_namespace }}'
+        label_selectors: [app.kubernetes.io/part-of=awx]
+      register: awx_pods
+    - name: Display final deployment summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - AWX Installation Complete!
+          - ==========================================
+          - ''
+          - 'Namespace: {{ app_namespace }}'
+          - 'Pods: {{ awx_pods.resources | length }} pod(s) running'
+          - "{{ awx_pods.resources | map(attribute='metadata.name') | map('regex_replace', '^(.*)$', '  - \\1') | list | join('\n') }}"
+          - ''
+          - 'Service: awx-service.{{ app_namespace }}.svc.cluster.local:80'
+          - 'Login: admin / {{ awx_admin_password }}'
+          - 'Password stored in BWS: {{ bws_awx_admin_password_key }}'
+          - ''
+          - ==========================================

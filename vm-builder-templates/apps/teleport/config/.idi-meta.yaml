@@ -1,0 +1,47 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-auth.yml:
+    summary: Configure Teleport authentication and create initial admin user
+    source: inferred
+    confidence: medium
+    references_services:
+    - teleport-invite
+  04-configure-api.yml:
+    summary: "Configure Teleport for Tailscale Ingress mode. Sets the public address\
+      \ to the Tailscale hostname so Teleport issues correct redirect URLs and trusts\
+      \ the proxy path. Also ensures TELEPORT_AUTH_TYPE=local so the built-in auth\
+      \ system remains active \u2014 Teleport is an access platform and cannot have\
+      \ auth disabled. This playbook makes Teleport ACCESSIBLE via the Tailscale network,\
+      \ not auth-bypassed."
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ teleport_url }}/webapi/ping'
+  05-enable-metrics.yml:
+    summary: 'Enable Prometheus metrics scraping for Teleport. Patches the teleport-config
+      ConfigMap to add diag_addr: "0.0.0.0:3434" which enables the diagnostics listener
+      (health + metrics). Then adds pod-level Prometheus scrape annotations on port
+      3434 so Prometheus auto-discovers and scrapes the /metrics endpoint. Requires
+      a StatefulSet restart for the ConfigMap change to take effect.'
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+  06-configure-sso.yml:
+    summary: Configure Teleport OIDC SSO connector backed by Authentik. Creates an
+      OIDC connector resource via tctl that maps the Authentik admins group to the
+      Teleport admin role. Uses kubectl exec to run tctl inside the Teleport pod.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - authentik
+    references_services:
+    - oidc-issuer
+    - oidc-redirect
+depends_on_apps:
+- authentik
+- oidc-issuer
+- oidc-redirect
+- prometheus
+- teleport-invite

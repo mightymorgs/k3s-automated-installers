@@ -1,0 +1,480 @@
+---
+# Golden Master Validation Rules
+#
+# Each rule defines a pattern that all apps should follow.
+# Rules are grouped by category (install, verify, config, templates, credentials).
+#
+# Severity levels:
+#   critical — blocks deployment safety; must be fixed before merge
+#   warning  — best-practice deviation; fix when touching the file
+#
+# Fields:
+#   id           — unique kebab-case identifier
+#   category     — which validation task file checks this rule
+#   severity     — critical or warning
+#   description  — what the rule checks (human-readable)
+#   pattern      — regex or string that SHOULD be present (positive check)
+#   anti_pattern — regex or string that should NOT be present (negative check)
+#   applies_when — optional condition for when the rule is relevant
+
+rules:
+
+  # ===========================================================================
+  # INSTALL RULES (11)
+  # Checked by tasks/validate-install.yml
+  # ===========================================================================
+  install:
+
+    # --- CRITICAL ---
+
+    - id: namespace-first
+      category: install
+      severity: critical
+      description: >-
+        Namespace creation task must exist before any manifest apply.
+        Namespace must be created via 'kubectl create namespace --dry-run=client | kubectl apply'
+        or equivalent idempotent pattern.
+      pattern: 'kubectl create namespace|Ensure namespace'
+      anti_pattern: null
+      applies_when: always
+
+    - id: secret-split-apply
+      category: install
+      severity: critical
+      description: >-
+        Secrets (prefix < 40) must always use kubectl apply, never kubectl replace --force.
+        The split-apply convention ensures secrets are never transiently deleted during rebuild.
+        Secrets must be applied separately from workload resources.
+      pattern: 'kubectl apply.*secret|kubectl apply -f.*10-|prefix.*<.*40.*apply'
+      anti_pattern: 'replace --force.*secret|replace --force.*10-'
+      applies_when: has_secrets
+
+    - id: secret-preservation
+      category: install
+      severity: critical
+      description: >-
+        Apps that generate secrets (via lookup('password'...)) must check for existing
+        secret values before generating new ones. This prevents overwriting credentials
+        on re-deploy that other services may depend on.
+      pattern: 'kubectl get secret|existing_secret|existing_.*_secret'
+      anti_pattern: null
+      applies_when: has_password_generation
+
+    - id: non-empty-secret-guard
+      category: install
+      severity: critical
+      description: >-
+        Secret generation/extraction must be guarded against empty values.
+        An ansible.builtin.fail task must verify length > 0 before applying.
+        Deploying an empty secret corrupts the credential pipeline.
+      pattern: 'length == 0|length > 0|Refusing to apply|empty'
+      anti_pattern: null
+      applies_when: has_password_generation
+
+    - id: pod-exists-before-wait
+      category: install
+      severity: critical
+      description: >-
+        kubectl wait must be preceded by a pod existence pre-check.
+        Without this, kubectl wait fails immediately if no pods exist yet
+        (race condition between StatefulSet creation and pod scheduling).
+      pattern: 'get pods.*app.kubernetes.io/name|Wait for.*pod.*exist|pod_exists|pod_count'
+      anti_pattern: null
+      applies_when: has_kubectl_wait
+
+    - id: sts-pvc-safety-gate
+      category: install
+      severity: critical
+      description: >-
+        StatefulSets with volumeClaimTemplates must have a PVC safety gate
+        that downgrades kubectl action to apply when existing PVCs are Bound.
+        Replace --force on a StatefulSet with claimTemplates causes PVC deletion
+        and data loss due to the pvc-protection finalizer.
+      pattern: 'existing_pvc|volumeClaimTemplates|claim_template|pvc.*safety|workload_action.*apply'
+      anti_pattern: null
+      applies_when: has_statefulset_with_claims
+
+    - id: resource-kind-classifier
+      category: install
+      severity: critical
+      description: >-
+        Protected resource kinds (Secret, PVC, Namespace, CRD, ClusterRole,
+        ClusterRoleBinding, PushSecret) must never be applied with replace --force.
+        This is a defence-in-depth safety net beyond the numeric-prefix convention.
+        Playbooks should classify resource kinds and refuse unsafe actions.
+      pattern: 'protected_kinds|resource.*kind.*classif|kind.*safety|kind.*Secret.*PersistentVolumeClaim'
+      anti_pattern: null
+      applies_when: has_replace_force
+
+    # --- WARNING ---
+
+    - id: namespace-labels
+      category: install
+      severity: warning
+      description: >-
+        Namespace must be labeled with app.kubernetes.io/name and
+        app.kubernetes.io/part-of after creation. Labels enable kubectl
+        queries and kube-linter policy checks.
+      pattern: 'kubectl label namespace|app.kubernetes.io/name'
+      anti_pattern: null
+      applies_when: always
+
+    - id: consistent-namespace-var
+      category: install
+      severity: warning
+      description: >-
+        Install playbooks must use the generic app_namespace variable,
+        not app-specific variants like vault_namespace or grafana_namespace.
+        Phase 4 extra-vars inject app_namespace for all apps uniformly.
+      pattern: 'app_namespace'
+      anti_pattern: null
+      applies_when: always
+
+    - id: global-timeout-constants
+      category: install
+      severity: warning
+      description: >-
+        Playbooks should define timeout/retry values as named variables
+        (app_start_timeout_seconds, retry_interval_seconds) instead of
+        magic numbers. This makes tuning consistent across apps.
+      pattern: 'app_start_timeout_seconds|retry_interval_seconds|timeout.*seconds'
+      anti_pattern: null
+      applies_when: has_retries
+
+    - id: dryrun-validation
+      category: install
+      severity: warning
+      description: >-
+        Rendered manifests should be validated against the API server
+        with kubectl apply --dry-run=server before the real apply.
+        This catches schema errors, invalid field names, and CRD
+        version mismatches before any state change.
+      pattern: 'dry-run=server|dry.run.*server|dryrun'
+      anti_pattern: null
+      applies_when: has_template_rendering
+
+  # ===========================================================================
+  # RUNTIME SAFETY RULES (5)
+  # Checked by tasks/validate-runtime-safety.yml
+  # ===========================================================================
+  runtime_safety:
+
+    # --- CRITICAL ---
+
+    - id: namespace-not-in-bulk-replace
+      category: runtime_safety
+      severity: critical
+      description: >-
+        Namespace manifest must NOT be in the same directory as resources that
+        get replace --force. Namespace deletion cascades to all resources in
+        the namespace. The golden master pattern uses a separate namespace-ensure
+        task (kubectl create namespace --dry-run=client | kubectl apply) and
+        excludes namespace.yaml from the bulk-apply directory.
+      pattern: "kubectl create.*namespace.*--dry-run.*apply"
+      anti_pattern: "namespace.*replace --force"
+      applies_when: has_replace_force
+
+    - id: none-safe-length-check
+      category: runtime_safety
+      severity: critical
+      description: >-
+        Length checks on variables must guard against None/undefined values.
+        Use 'is none or VAR | default("") | length' not just 'VAR | length'.
+        The bare '| length' filter on a None value raises a fatal Jinja2 error
+        at runtime, causing the entire playbook to abort.
+      pattern: "is none|default\\(.*\\).*length|is not defined"
+      anti_pattern: "\\| length == 0"
+      applies_when: has_length_check
+
+    - id: secret-decode-when-exists
+      category: runtime_safety
+      severity: critical
+      description: >-
+        Secret decode tasks must run WHEN the secret exists, not when it doesn't.
+        The when condition should reference the existence check result positively
+        (e.g., existing_secret.rc == 0), not negated. A negated condition causes
+        the decode to run on a nonexistent secret, producing empty credentials.
+      pattern: "b64decode"
+      anti_pattern: null
+      applies_when: has_b64decode
+
+    - id: secrets-always-apply
+      category: runtime_safety
+      severity: critical
+      description: >-
+        K8s Secrets must always use kubectl apply, never replace --force.
+        Rotating secrets causes credential mismatch with PVC-stored data
+        (databases, config files). The golden master pattern uses split-apply:
+        prefix < 40 files (secrets, PVCs) always use kubectl apply, while
+        prefix >= 40 files (workloads) use kubectl_action.
+      pattern: "kubectl apply.*secret|split.*apply"
+      anti_pattern: "replace --force.*secret"
+      applies_when: has_secrets
+
+    - id: stale-register-reference
+      category: runtime_safety
+      severity: critical
+      description: >-
+        After split-apply conversion, the old register variable name
+        (manifests_apply) must not be referenced. Split-apply creates
+        two registers (protected_apply, workload_apply). A stale reference
+        causes 'variable is undefined' at runtime, aborting the playbook.
+      pattern: null
+      anti_pattern: "manifests_apply"
+      applies_when: has_split_apply
+
+    - id: protected-kind-in-kubectl-action
+      category: runtime_safety
+      severity: critical
+      description: >-
+        Protected kinds (PushSecret, Secret, PVC) must never appear in a
+        kubectl {{ kubectl_action }} command. They must always use kubectl apply.
+        This catches the case where individual files are listed in a loop with
+        kubectl_action instead of the bulk-directory anti-pattern.
+      pattern: null
+      anti_pattern: "kubectl_action.*pushsecret|kubectl_action.*secret\\.yaml"
+      applies_when: has_replace_force
+
+    # --- WARNING ---
+
+    - id: verify-label-exists-in-templates
+      category: runtime_safety
+      severity: warning
+      description: >-
+        Verify playbook pod label selectors should match labels defined in the
+        app's J2 templates or kustomize manifests. A mismatched label selector
+        causes the verify playbook to wait indefinitely for a pod that will
+        never match, then fail with a timeout.
+      pattern: "app.kubernetes.io"
+      anti_pattern: null
+      applies_when: has_verify_playbook
+
+  # ===========================================================================
+  # VERIFY RULES (8)
+  # Checked by tasks/validate-verify.yml
+  # ===========================================================================
+  verify:
+
+    # --- CRITICAL ---
+
+    - id: no-ignore-errors
+      category: verify
+      severity: critical
+      description: >-
+        Verify playbooks must never use ignore_errors: true.
+        This silently swallows health check failures, making the
+        pipeline report success when the app is actually broken.
+      pattern: null
+      anti_pattern: 'ignore_errors:\s*true|ignore_errors:\s*yes'
+      applies_when: always
+
+    - id: pod-phase-check-retries
+      category: verify
+      severity: critical
+      description: >-
+        The pod phase check in verify playbooks must have retries + until.
+        Without retries, the jsonpath '{.items[0].status.phase}' crashes
+        with 'array index out of bounds' when no pods exist yet (race
+        condition after replace --force recreates resources). Retries
+        give pods time to be scheduled and created.
+      pattern: null
+      anti_pattern: null
+      applies_when: has_pod_phase_check
+
+    - id: no-contradictory-error-handling
+      category: verify
+      severity: critical
+      description: >-
+        No task should combine failed_when with ignore_errors: true.
+        This is contradictory — failed_when defines failure conditions
+        while ignore_errors discards them. Pick one.
+      pattern: null
+      anti_pattern: 'failed_when:.*\n.*ignore_errors|ignore_errors:.*\n.*failed_when'
+      applies_when: always
+
+    - id: health-retries
+      category: verify
+      severity: critical
+      description: >-
+        Health check tasks must use retries + until for transient failure
+        tolerance. Apps may take seconds to start responding after pod
+        readiness (especially JVM/Node.js apps with slow init).
+      pattern: 'retries:'
+      anti_pattern: null
+      applies_when: has_health_check
+
+    # --- WARNING ---
+
+    - id: health-hard-fail
+      category: verify
+      severity: warning
+      description: >-
+        Health check tasks must not use failed_when: false.
+        This silently passes even when the health endpoint returns errors.
+        Use failed_when: rc != 0 or omit failed_when entirely.
+      pattern: null
+      anti_pattern: 'failed_when:\s*false'
+      applies_when: has_health_check
+
+    - id: health-auto-detect
+      category: verify
+      severity: warning
+      description: >-
+        Health probes should auto-detect curl vs wget availability.
+        Not all container images ship curl (alpine uses wget).
+        Pattern: command -v curl && curl ... || wget ...
+      pattern: 'command -v curl|curl.*||.*wget'
+      anti_pattern: null
+      applies_when: has_health_check
+
+    - id: health-probe-timeout
+      category: verify
+      severity: warning
+      description: >-
+        Health probe commands must include explicit timeout flags
+        (--max-time for curl, --timeout for wget). Without these,
+        a hung endpoint blocks the entire pipeline indefinitely.
+      pattern: '--max-time|--timeout|health_probe_timeout_seconds'
+      anti_pattern: null
+      applies_when: has_health_check
+
+    - id: ready-pod-selection
+      category: verify
+      severity: warning
+      description: >-
+        Pod discovery should select Ready pods, not just Running ones.
+        A pod can be Running but not Ready (e.g., during init containers
+        or readiness probe failures). Use containerStatuses ready check
+        or --field-selector=status.phase=Running with readiness validation.
+      pattern: 'field-selector.*status.phase=Running|containerStatuses.*ready|Ready'
+      anti_pattern: null
+      applies_when: has_pod_discovery
+
+    - id: consistent-namespace-var
+      category: verify
+      severity: warning
+      description: >-
+        Verify playbooks must use the generic app_namespace variable,
+        not app-specific variants like vault_namespace.
+      pattern: 'app_namespace'
+      anti_pattern: null
+      applies_when: always
+
+    - id: no-duplicate-task-keys
+      category: verify
+      severity: warning
+      description: >-
+        YAML allows duplicate keys but the second silently overwrites
+        the first. Common copy-paste bug: retries/delay/until appear
+        twice on the same task. Ansible only uses the last occurrence.
+        Detected by comparing retries: count to task count.
+      pattern: null
+      anti_pattern: null
+      applies_when: always
+
+  # ===========================================================================
+  # CONFIG RULES (2)
+  # Checked by tasks/validate-config.yml
+  # ===========================================================================
+  config:
+
+    # --- CRITICAL ---
+
+    - id: no-hardcoded-pod-names
+      category: config
+      severity: critical
+      description: >-
+        Config playbooks must use dynamic pod lookup via kubectl get pods
+        with label selectors, never hardcoded pod names like app-0.
+        StatefulSet pod names change with scaling and are not guaranteed.
+      pattern: 'kubectl.*get pods|app.kubernetes.io/name'
+      anti_pattern: "default\\('.*-0'\\)"
+      applies_when: has_kubectl_exec
+
+    # --- WARNING ---
+
+    - id: consistent-config-namespace-var
+      category: config
+      severity: warning
+      description: >-
+        Config playbooks must use app_namespace, not app-specific
+        namespace variables. Phase 4 extra-vars use app_namespace.
+      pattern: 'app_namespace'
+      anti_pattern: null
+      applies_when: always
+
+  # ===========================================================================
+  # TEMPLATE RULES (2)
+  # Checked by tasks/validate-templates.yml
+  # ===========================================================================
+  templates:
+
+    # --- WARNING ---
+
+    - id: consistent-labels
+      category: templates
+      severity: warning
+      description: >-
+        J2 templates must use standard app.kubernetes.io/ labels.
+        At minimum: app.kubernetes.io/name and app.kubernetes.io/part-of.
+        These labels enable consistent kubectl queries, kube-linter checks,
+        and label-based pod selection in install/verify playbooks.
+      pattern: 'app.kubernetes.io/name'
+      anti_pattern: null
+      applies_when: always
+
+    - id: secret-naming
+      category: templates
+      severity: warning
+      description: >-
+        K8s Secret name should follow the convention: {{ app_name }}-credentials.
+        Override with secret_name variable only for operator-managed apps
+        (argocd, awx) where the operator dictates the secret name.
+      pattern: "credentials|secret_name"
+      anti_pattern: null
+      applies_when: has_secret_template
+
+  # ===========================================================================
+  # CREDENTIAL RULES (3)
+  # Checked by tasks/validate-credentials.yml
+  # ===========================================================================
+  credentials:
+
+    # --- CRITICAL ---
+
+    - id: non-empty-extraction-guard
+      category: credentials
+      severity: critical
+      description: >-
+        Credential extraction commands must be guarded against empty output.
+        An empty credential silently corrupts the pipeline — the K8s Secret
+        is created with an empty value, PushSecret pushes empty to Vault,
+        and sync-app-state.sh writes empty to BWS.
+      pattern: 'length == 0|length > 0|Refusing|empty|fail.*empty'
+      anti_pattern: null
+      applies_when: has_credential_extraction
+
+    # --- WARNING ---
+
+    - id: credentials-metadata-exists
+      category: credentials
+      severity: warning
+      description: >-
+        Install playbooks should have a credentials: block in the
+        playbook metadata header. This drives sync-app-state.sh
+        generically — without it, the app needs a legacy fallback
+        case in the sync script.
+      pattern: 'credentials:'
+      anti_pattern: null
+      applies_when: has_secrets
+
+    - id: config-file-content-check
+      category: credentials
+      severity: warning
+      description: >-
+        When checking for config files to extract credentials from,
+        use both test -f (file exists) AND test -s (file non-empty).
+        A zero-byte config file passes test -f but contains no data.
+      pattern: 'test -s|test.*-s'
+      anti_pattern: null
+      applies_when: has_config_file_check

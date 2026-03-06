@@ -1,0 +1,179 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/external-secrets/00-render-manifests"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/external-secrets/render/00-render-manifests.yml"
+#     category: "platform"
+#     subsystem: "external-secrets"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "external-secrets-operator"
+#       supported_versions: ["v0.9.x", "v0.10.x"]
+#       version_range: ">=v0.9.0"
+#
+#     requires:
+#       bws: ">=0.5.0"
+#       jinja2: ">=3.0.0"
+#       vault: ">=1.15.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - eso: "v0.9.13"
+#         os: "ubuntu-24.04"
+#         vault: "1.18.x"
+#         result: "pending"
+#         test_date: "2026-01-23"
+#         notes: "Renders ESO K8s manifests from J2 templates with BWS inventory"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["bws_access_configured", "vault_manifests_rendered"]
+#   provides: ["eso_manifests_rendered"]
+#   tags: ["external-secrets", "eso", "templates", "jinja2", "manifests", "golden-master"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >
+#     Render External Secrets Operator manifests from J2 templates using BWS inventory variables
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for ClusterSecretStore backend"
+#       - path: "external_secrets.namespace"
+#         purpose: "ESO deployment namespace"
+#       - path: "platform_versions.external_secrets"
+#         purpose: "ESO version to deploy"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.external_secrets.status"
+#         example: "ready"
+#       - path: "_state.apps.external_secrets.url"
+#         example: "http://external-secrets-webhook.external-secrets.svc:443"
+
+- name: Render External Secrets Operator manifests from J2 templates
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    inventory_key: "{{ inventory_key }}"
+    output_dir: "/tmp/external-secrets"
+
+  tasks:
+    # ========================================
+    # VALIDATE INPUT
+    # ========================================
+    - name: Verify INVENTORY_KEY is provided
+      ansible.builtin.assert:
+        that:
+          - inventory_key | length > 0
+        fail_msg: "INVENTORY_KEY environment variable must be set"
+
+    - name: Verify BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+
+    # ========================================
+    # FETCH VM INVENTORY
+    # ========================================
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.command:
+        cmd: bws secret get {{ inventory_key }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_inventory
+      no_log: true
+      changed_when: false
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_inventory.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    # ========================================
+    # CREATE OUTPUT DIRECTORY
+    # ========================================
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+        mode: '0755'
+
+    # ========================================
+    # RENDER ESO MANIFESTS
+    # ========================================
+    - name: Render ESO Deployment
+      ansible.builtin.template:
+        src: >-
+          {{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/deployment.yaml.j2
+        dest: "{{ output_dir }}/deployment.yaml"
+        mode: '0644'
+      vars:
+        eso_version: "{{ inventory.platform_versions.external_secrets | default('v0.9.13') }}"
+        eso_replicas: "{{ inventory.external_secrets.replicas | default(1) }}"
+        app_namespace: "{{ inventory.external_secrets.namespace | default('external-secrets') }}"
+        eso_concurrent: "{{ inventory.external_secrets.concurrent | default(1) }}"
+        eso_metrics_port: "{{ inventory.external_secrets.metrics_port | default(8080) }}"
+        eso_healthz_port: "{{ inventory.external_secrets.healthz_port | default(8081) }}"
+        eso_poller_interval: "{{ inventory.external_secrets.poller_interval | default(60000) }}"
+        eso_memory_requests: "{{ inventory.external_secrets.memory_requests | default('128Mi') }}"
+        eso_memory_limits: "{{ inventory.external_secrets.memory_limits | default('256Mi') }}"
+        eso_cpu_requests: "{{ inventory.external_secrets.cpu_requests | default('100m') }}"
+        eso_cpu_limits: "{{ inventory.external_secrets.cpu_limits | default('200m') }}"
+
+    - name: Render ESO Service
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/service.yaml.j2"
+        dest: "{{ output_dir }}/service.yaml"
+        mode: '0644'
+      vars:
+        app_namespace: "{{ inventory.external_secrets.namespace | default('external-secrets') }}"
+        webhook_port: "{{ inventory.external_secrets.webhook_port | default(443) }}"
+        webhook_target_port: "{{ inventory.external_secrets.webhook_target_port | default(10250) }}"
+
+    - name: Render ESO ClusterSecretStore
+      ansible.builtin.template:
+        src: >-
+          {{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/secretstore.yaml.j2
+        dest: "{{ output_dir }}/secretstore.yaml"
+        mode: '0644'
+      vars:
+        vault_addr: "{{ inventory.external_secrets.vault_addr }}"
+        vault_path: "{{ inventory.external_secrets.vault_path | default('secret') }}"
+        vault_version: "{{ inventory.external_secrets.vault_version | default('v2') }}"
+        vault_auth_method: "{{ inventory.external_secrets.vault_auth_method | default('kubernetes') }}"
+        vault_k8s_mount_path: "{{ inventory.external_secrets.vault_k8s_mount_path | default('kubernetes') }}"
+        vault_k8s_role: "{{ inventory.external_secrets.vault_k8s_role | default('external-secrets') }}"
+        vault_service_account: >-
+          {{ inventory.external_secrets.vault_service_account | default('external-secrets') }}
+        vault_namespace: "{{ inventory.external_secrets.namespace | default('external-secrets') }}"
+        secretstore_name: "{{ inventory.external_secrets.secretstore_name | default('vault-backend') }}"
+
+    # ========================================
+    # SUMMARY
+    # ========================================
+    - name: Display render summary
+      ansible.builtin.debug:
+        msg:
+          - "External Secrets Operator manifests rendered successfully"
+          - "Output directory: {{ output_dir }}"
+          - "Files created:"
+          - "  - deployment.yaml"
+          - "  - service.yaml"
+          - "  - secretstore.yaml"
+          - ""
+          - "ESO version: {{ inventory.platform_versions.external_secrets | default('v0.9.13') }}"
+          - "Namespace: {{ inventory.external_secrets.namespace | default('external-secrets') }}"
+          - "Vault backend: {{ inventory.external_secrets.vault_addr }}"

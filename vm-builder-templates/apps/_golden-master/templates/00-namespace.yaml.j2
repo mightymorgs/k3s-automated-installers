@@ -1,0 +1,13 @@
+{#
+  Namespace for {{ app_name }}.
+  Prefix 00 → always kubectl apply (never replace --force).
+  Labels are applied here; the install playbook also labels via kubectl.
+#}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/part-of: golden-master

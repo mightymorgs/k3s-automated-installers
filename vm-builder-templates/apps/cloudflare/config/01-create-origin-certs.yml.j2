@@ -1,0 +1,247 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# Infrastructure:                                                #}
+{#   vm_hostname           - VM name (REQUIRED, no default)       #}
+{#   kubeconfig_path       - Path to kubeconfig                   #}
+{#                           (default: /etc/rancher/k3s/k3s.yaml) #}
+{#   registry_path_default - Relative fallback for REGISTRY_PATH  #}
+{#                           (default: playbook_dir/../../../registry.json) #}
+{#                                                                #}
+{# State:                                                         #}
+{#   bws_cache_path        - Path to BWS secrets cache            #}
+{#                           (default: /tmp/bws_secrets.json)     #}
+{#   bws_inventory_prefix  - BWS key prefix for inventory         #}
+{#                           (default: inventory)                 #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   target_hosts          - Ansible host pattern                 #}
+{#                           (default: k3s_servers)               #}
+{#   cert_validity_days    - Origin cert validity in days          #}
+{#                           (default: 5475, ~15 years)           #}
+{#   cert_request_type     - Cloudflare cert type                  #}
+{#                           (default: origin-rsa)                #}
+{#   cert_key_size         - RSA key size for CSR generation       #}
+{#                           (default: 2048)                      #}
+{# ============================================================== #}
+---
+- name: Create Cloudflare Origin Certificates for Apps
+  hosts: "{{ '{{ ' }} target_hosts | default('{{ target_hosts | default('k3s_servers') }}') {{ ' }}' }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    registry_path: "{{ '{{ ' }} lookup('env', 'REGISTRY_PATH') | default(playbook_dir ~ '/{{ registry_path_default | default('../../../registry.json') }}') {{ ' }}' }}"
+    cert_validity_days: {{ cert_validity_days | default(5475) }}
+    cert_request_type: "{{ cert_request_type | default('origin-rsa') }}"
+
+  tasks:
+    # === Read VM inventory from BWS cache ===
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ '{{ ' }} inventory_raw.stdout | from_json {{ ' }}' }}"
+
+    # === Read app registry ===
+    - name: Read app registry
+      ansible.builtin.slurp:
+        src: "{{ '{{ ' }} registry_path {{ ' }}' }}"
+      register: registry_content
+      delegate_to: localhost
+      become: false
+
+    - name: Parse registry
+      ansible.builtin.set_fact:
+        app_registry: "{{ '{{ ' }} registry_content.content | b64decode | from_json {{ ' }}' }}"
+
+    # === Extract config ===
+    - name: Extract ingress config
+      ansible.builtin.set_fact:
+        base_domain: "{{ '{{ ' }} _inventory.ingress.domain {{ ' }}' }}"
+        default_ingress_mode: "{{ '{{ ' }} _inventory.ingress.mode | default('nodeport') {{ ' }}' }}"
+        app_overrides: "{{ '{{ ' }} _inventory.ingress.app_overrides | default({}) {{ ' }}' }}"
+        installed_apps: "{{ '{{ ' }} _inventory._state.apps.installed | default([]) {{ ' }}' }}"
+
+    # === Resolve Cloudflare Origin CA key from pointer ===
+    - name: Resolve Cloudflare Origin CA key from pointer
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ '{{ ' }} _inventory.cloudflare.origin_ca_key {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_origin_ca_raw
+      changed_when: false
+      no_log: true
+
+    - name: Set Cloudflare Origin CA key
+      ansible.builtin.set_fact:
+        cloudflare_origin_ca_key: "{{ '{{ ' }} cf_origin_ca_raw.stdout | trim {{ ' }}' }}"
+      no_log: true
+
+    # === Per-app mode override resolution ===
+    - name: Build list of apps overridden away from cloudflare
+      ansible.builtin.set_fact:
+        _non_cf_overrides: >-
+          {{ '{{ ' }} app_overrides | dict2items |
+          rejectattr('value', 'equalto', 'cloudflare') |
+          map(attribute='key') | list {{ ' }}' }}
+
+    - name: Build list of apps overridden TO cloudflare
+      ansible.builtin.set_fact:
+        _cf_overrides: >-
+          {{ '{{ ' }} app_overrides | dict2items |
+          selectattr('value', 'equalto', 'cloudflare') |
+          map(attribute='key') | list {{ ' }}' }}
+
+    - name: Extract installed apps with ingress enabled
+      ansible.builtin.set_fact:
+        _all_ingress_apps: >-
+          {{ '{{ ' }} app_registry.apps | dict2items |
+          selectattr('value.ingress.enabled', 'defined') |
+          selectattr('value.ingress.enabled', 'equalto', true) |
+          selectattr('key', 'in', installed_apps) |
+          list {{ ' }}' }}
+
+    - name: Filter to effective cloudflare-mode apps (default=cloudflare)
+      ansible.builtin.set_fact:
+        cloudflare_cert_apps: >-
+          {{ '{{ ' }} _all_ingress_apps |
+          rejectattr('key', 'in', _non_cf_overrides) |
+          list {{ ' }}' }}
+      when: default_ingress_mode == 'cloudflare'
+
+    - name: Filter to effective cloudflare-mode apps (default!=cloudflare)
+      ansible.builtin.set_fact:
+        cloudflare_cert_apps: >-
+          {{ '{{ ' }} _all_ingress_apps |
+          selectattr('key', 'in', _cf_overrides) |
+          list {{ ' }}' }}
+      when: default_ingress_mode != 'cloudflare'
+
+    - name: Display apps requiring origin certificates
+      ansible.builtin.debug:
+        msg: "Creating origin certs for {{ '{{ ' }} cloudflare_cert_apps | length {{ ' }}' }} apps: {{ '{{ ' }} cloudflare_cert_apps | map(attribute='key') | join(', ') {{ ' }}' }}"
+
+    # === Generate keys + CSRs, request origin certificates ===
+    - name: Generate private key and CSR for each app
+      ansible.builtin.shell: |
+        set -eu
+        HOSTNAME="{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} base_domain {{ ' }}' }}"
+        KEY_FILE="/tmp/origin-{{ '{{ ' }} item.key {{ ' }}' }}.key"
+        CSR_FILE="/tmp/origin-{{ '{{ ' }} item.key {{ ' }}' }}.csr"
+        openssl req -new -newkey rsa:{{ cert_key_size | default(2048) }} -nodes \
+          -keyout "$KEY_FILE" -out "$CSR_FILE" \
+          -subj "/CN=${HOSTNAME}" 2>/dev/null
+        cat "$CSR_FILE"
+      loop: "{{ '{{ ' }} cloudflare_cert_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: csr_results
+      changed_when: false
+      no_log: true
+
+    - name: Request origin certificate from Cloudflare
+      ansible.builtin.shell: |
+        set -eu
+        CSR=$(cat /tmp/origin-{{ '{{ ' }} item.item.key {{ ' }}' }}.csr)
+        RESPONSE=$(curl -s -X POST \
+          -H "X-Auth-User-Service-Key: $CF_ORIGIN_CA_KEY" \
+          -H "Content-Type: application/json" \
+          -d "$(jq -n --arg csr "$CSR" \
+            --argjson validity {{ '{{ ' }} cert_validity_days {{ ' }}' }} \
+            '{hostnames: ["{{ '{{ ' }} item.item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} base_domain {{ ' }}' }}"], requested_validity: $validity, request_type: "{{ '{{ ' }} cert_request_type {{ ' }}' }}", csr: $csr}')" \
+          "https://api.cloudflare.com/client/v4/certificates")
+        SUCCESS=$(printf '%s\n' "$RESPONSE" | jq -r '.success')
+        if [ "$SUCCESS" != "true" ]; then
+          printf '%s\n' "$RESPONSE" | jq -c '.errors' >&2
+          exit 1
+        fi
+        printf '%s\n' "$RESPONSE"
+      environment:
+        CF_ORIGIN_CA_KEY: "{{ '{{ ' }} cloudflare_origin_ca_key {{ ' }}' }}"
+      loop: "{{ '{{ ' }} csr_results.results {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.item.key {{ ' }}' }}"
+      register: cert_creation_results
+      changed_when: true
+      no_log: true
+
+    # === Store certs in app namespace ===
+    - name: Create K8s TLS secret for origin cert in app namespace
+      ansible.builtin.shell: |
+        set -eu
+        CERT=$(echo '{{ '{{ ' }} item.stdout {{ ' }}' }}' | jq -r '.result.certificate')
+        KEY=$(cat /tmp/origin-{{ '{{ ' }} item.item.item.key {{ ' }}' }}.key)
+        kubectl create secret tls "{{ '{{ ' }} item.item.item.value.ingress.subdomain {{ ' }}' }}-origin-cert" \
+          --namespace "{{ '{{ ' }} item.item.item.value.ingress.namespace {{ ' }}' }}" \
+          --cert=<(echo "$CERT") \
+          --key=<(echo "$KEY") \
+          --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: {{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}
+      loop: "{{ '{{ ' }} cert_creation_results.results {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.item.item.key {{ ' }}' }}"
+      when: (item.stdout | from_json).success | default(false)
+      no_log: true
+
+    - name: Clean up temporary key and CSR files
+      ansible.builtin.shell: |
+        rm -f /tmp/origin-*.key /tmp/origin-*.csr
+      changed_when: false
+
+    # === Build cert metadata for BWS ===
+    - name: Build origin cert mapping
+      ansible.builtin.set_fact:
+        origin_certs_map: >-
+          {{ '{{ ' }} origin_certs_map | default({}) |
+          combine({item.item.item.key: (item.stdout | from_json).result.id}) {{ ' }}' }}
+      loop: "{{ '{{ ' }} cert_creation_results.results {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.item.item.key {{ ' }}' }}"
+      when: (item.stdout | from_json).success | default(false)
+
+    - name: Display created certificates
+      ansible.builtin.debug:
+        msg:
+          - "Origin certificates created: {{ '{{ ' }} origin_certs_map | default({}) | length {{ ' }}' }}"
+          - "Cert IDs: {{ '{{ ' }} origin_certs_map | default({}) | to_nice_json {{ ' }}' }}"
+
+    # === Write state to BWS via secret ID ===
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Write origin cert state to BWS
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ '{{ ' }} _inv_id_raw.stdout | trim {{ ' }}' }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        updated=$(printf '%s' "$inv" | jq --argjson certs '{{ '{{ ' }} origin_certs_map | default({}) | to_json {{ ' }}' }}' \
+          '._state.ingress.origin_certs = $certs')
+
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ '{{ ' }} lookup('env', 'BWS_ACCESS_TOKEN') {{ ' }}' }}"
+      changed_when: true
+      when: origin_certs_map | default({}) | length > 0
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "Cloudflare origin certificates created for {{ '{{ ' }} cloudflare_cert_apps | length {{ ' }}' }} apps"
+          - "Certs stored in each app's own namespace (not cert-manager)"
+          - "BWS state: _state.ingress.origin_certs"

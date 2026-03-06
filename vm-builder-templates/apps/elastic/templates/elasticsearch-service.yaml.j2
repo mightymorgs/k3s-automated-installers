@@ -1,0 +1,27 @@
+---
+# Elasticsearch ClusterIP Service (J2 template)
+# Internal service for inter-node transport and HTTP API
+# Defaults match k8s-base/elasticsearch-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: {{ app_namespace | default('elastic') }}
+  labels:
+    app: elasticsearch
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/component: {{ app_component | default('observability') }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ app_name | default('elastic') }}
+    app.kubernetes.io/name: {{ app_name | default('elastic') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(9200) }}
+      targetPort: http
+      protocol: TCP
+    - name: transport
+      port: {{ transport_port | default(9300) }}
+      targetPort: transport
+      protocol: TCP

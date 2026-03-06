@@ -1,0 +1,45 @@
+---
+# Traefik Helm Values
+# Minimal configuration for NodePort exposure
+
+# Use NodePort for Tailscale/homelab access
+service:
+  type: NodePort
+
+# Port configuration
+ports:
+  web:
+    # Internal container port (default: 8000 in Traefik v3)
+    port: 8000
+    # Expose on NodePort
+    nodePort: 30800
+    # Don't expose as HostPort
+    hostPort: null
+  websecure:
+    # Internal container port (default: 8443 in Traefik v3)
+    port: 8443
+    # Expose on NodePort
+    nodePort: 30443
+    hostPort: null
+    tls:
+      enabled: true
+
+# Disable metrics endpoint to avoid port conflicts
+metrics:
+  prometheus: null
+
+# Minimal resource requests for small VMs
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# Enable access logs for debugging
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true

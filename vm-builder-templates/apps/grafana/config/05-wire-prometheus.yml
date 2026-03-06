@@ -1,0 +1,120 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/05-wire-prometheus"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/05-wire-prometheus.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "prometheus_deployed"]
+#   provides: ["grafana_prometheus_wired"]
+#   tags: ["grafana", "prometheus", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus as the default datasource in Grafana via the HTTP API.
+#     Uses Grafana basic auth (admin user) and internal K8s DNS for the
+#     Prometheus URL. Idempotent: 409 means datasource already exists.
+#   requires_apps: ["grafana", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Wire Prometheus into Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    # prometheus_url: from BWS _state via Phase 4 extra-vars
+    prometheus_internal_url: "{{ prometheus_url }}"
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== VERIFY GRAFANA API ==========
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== CHECK IF DATASOURCE ALREADY EXISTS ==========
+    - name: Get existing datasources
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: existing_datasources
+      changed_when: false
+
+    - name: Check if Prometheus datasource already exists
+      ansible.builtin.set_fact:
+        prometheus_ds_exists: >-
+          {{ (existing_datasources.json | selectattr('type', 'equalto', 'prometheus') | list | length) > 0 }}
+
+    # ========== ADD PROMETHEUS DATASOURCE ==========
+    - name: Add Prometheus as default datasource in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Prometheus"
+          type: "prometheus"
+          url: "{{ prometheus_internal_url }}"
+          access: "proxy"
+          isDefault: true
+          jsonData:
+            httpMethod: "POST"
+            timeInterval: "15s"
+        status_code: [200, 409]
+      register: add_prometheus
+      changed_when: add_prometheus.status == 200
+      when: not prometheus_ds_exists
+
+    - name: Prometheus datasource already configured
+      ansible.builtin.debug:
+        msg: "Prometheus datasource already exists in Grafana - skipping"
+      when: prometheus_ds_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana <-> Prometheus Wiring Complete"
+          - "=========================================="
+          - "Datasource: Prometheus ({{ 'Added as default' if not prometheus_ds_exists else 'Already configured' }})"
+          - "Internal URL: {{ prometheus_internal_url }}"
+          - "Access Mode: proxy (server-side)"
+          - "=========================================="

@@ -1,0 +1,26 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-teleport-config.yml:
+    summary: Comprehensive verification of Teleport cluster configuration. Validates
+      cluster health, auth connectors (OIDC/SAML/GitHub), RBAC roles, users with role
+      assignments, registered applications, and connected nodes. Provides a detailed
+      health report with optional fail_on_unhealthy behavior.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ teleport_base_url }}/webapi/ping'
+    - '{{ teleport_api_base }}/oidc'
+    - '{{ teleport_api_base }}/saml'
+    - '{{ teleport_api_base }}/github'
+    - '{{ teleport_api_base }}/roles'
+    - '{{ teleport_api_base }}/roles/{{ item }}'
+    - '{{ teleport_api_base }}/users'
+    - '{{ teleport_api_base }}/users/{{ item }}'
+    - '{{ teleport_api_base }}/apps'
+    - '{{ teleport_api_base }}/apps/{{ item }}'
+    - '{{ teleport_api_base }}/nodes'
+    references_services:
+    - teleport-proxy
+depends_on_apps:
+- teleport-proxy

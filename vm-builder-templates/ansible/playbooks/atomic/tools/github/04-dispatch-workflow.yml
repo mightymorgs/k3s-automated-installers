@@ -1,0 +1,144 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/github/04-dispatch-workflow"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/github/04-dispatch-workflow.yml"
+#     category: "tools"
+#     subsystem: "github"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "gh-api"
+#       folder_version: null
+#       supported_versions: ["2020-01-01+"]
+#       version_range: ">=2020-01-01"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - gh-api: "2024-11-01"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-13"
+#         notes: "Dispatches workflow via GitHub REST API, exports dispatched_run_id for downstream use"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["github_repo_created"]
+#   provides: ["github_workflow_dispatched"]
+#   tags: ["github", "actions", "workflow", "dispatch"]
+#   estimated_duration: 10
+#   parallel_safe: true
+#   idempotent: true
+#   description: Dispatch the GitHub Actions workflow (deploy.yml) on the default branch
+- name: Dispatch GitHub Actions workflow
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    repo_name: "{{ target_repo_name | default('media-stack') }}"
+    workflow_file: deploy.yml
+    ref_branch: "{{ target_ref | default('main') }}"
+    bws_access_token: "{{ lookup('env','BWS_ACCESS_TOKEN') }}"
+    secrets_json_path: "{{ project_root | default(playbook_dir + '/../../../../..') }}/secrets/secrets.json"
+  pre_tasks:
+    - name: Resolve GitHub PAT from Bitwarden (key ~ github + (token|pat))
+      ansible.builtin.command: >-
+        docker run --rm
+        -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+        bitwarden/bws secret list --output json
+      register: bws_list
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: bws_access_token | length > 0
+    - name: Parse GitHub PAT secret id from BWS list
+      ansible.builtin.set_fact:
+        github_pat_secret_id: >-
+          {{ (vars.get('bws_list', {}).get('stdout', '[]') | from_json
+             | selectattr('key','search','github')
+             | selectattr('key','search','token|pat')
+             | map(attribute='id') | list | first | default('')) }}
+      no_log: true
+    - name: Fetch GitHub PAT value from Bitwarden
+      ansible.builtin.command: >-
+        docker run --rm
+        -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+        bitwarden/bws secret get {{ github_pat_secret_id }} --output json
+      register: bws_pat
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: github_pat_secret_id | default('') | length > 0
+    - name: Set GitHub PAT fact from BWS or secrets.json
+      ansible.builtin.set_fact:
+        github_pat: >-
+          {{ (bws_pat.stdout | default('') | ternary((bws_pat.stdout | from_json).value,
+          ''))
+              if (bws_pat is defined and bws_pat.stdout is defined and bws_pat.stdout|length>0)
+              else ((lookup('file', secrets_json_path) | from_json).github.token
+          | default('')) }}
+      no_log: true
+    - name: Assert GitHub PAT resolved
+      ansible.builtin.assert:
+        that: [github_pat | length > 0]
+        fail_msg: GitHub PAT not found via Bitwarden or secrets.json
+      no_log: true
+    - name: Resolve GitHub owner via API
+      ansible.builtin.uri:
+        url: https://api.github.com/user
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: gh_user
+      no_log: true
+    - name: Set GitHub owner fact
+      ansible.builtin.set_fact:
+        github_owner: "{{ (gh_user.json.login | default('')) }}"
+  tasks:
+    - name: Dispatch workflow on ref
+      ansible.builtin.uri:
+        url: >-
+          https: >-
+            //api.github.com/repos/{{ github_owner }}/{{ repo_name }}/actions/workflows/{{
+          workflow_file }}/dispatches
+        method: POST
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+          Content-Type: application/json
+        body_format: json
+        body:
+          ref: '{{ ref_branch }}'
+        status_code: 204
+      register: dispatch_result
+      changed_when: true
+    - name: List recent runs for this workflow only
+      ansible.builtin.uri:
+        url: >-
+          https://api.github.com/repos/{{ github_owner }}/{{ repo_name }}/actions/workflows/{{
+            workflow_file
+          }}/runs?event=workflow_dispatch&per_page=1
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: runs_list
+      no_log: true
+    - name: Set latest run id fact (this workflow)
+      ansible.builtin.set_fact:
+        dispatched_run_id: "{{ (runs_list.json.workflow_runs | first).id | default('') }}"
+    - name: Export dispatched run id
+      ansible.builtin.set_stats:
+        data:
+          dispatched_run_id: '{{ dispatched_run_id }}'

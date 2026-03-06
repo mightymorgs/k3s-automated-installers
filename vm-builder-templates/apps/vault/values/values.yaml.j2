@@ -1,0 +1,52 @@
+# Helm values for HashiCorp Vault deployment on the central cluster
+# Generated via Ansible template; defaults to the cluster's Longhorn storage class for Raft and audit data
+
+global:
+  enabled: true
+
+injector:
+  enabled: false
+
+server:
+  ui:
+    enabled: true
+  ha:
+    enabled: true
+    replicas: {{ vault_replicas }}
+    raft:
+      enabled: true
+      setNodeId: true
+  auditStorage:
+    enabled: true
+    size: {{ vault_audit_storage_size }}
+    storageClass: {{ vault_storage_class }}
+  dataStorage:
+    enabled: true
+    size: {{ vault_data_storage_size }}
+    storageClass: {{ vault_storage_class }}
+  service:
+    enabled: true
+    type: ClusterIP
+  # Expose via Traefik; TLS terminates at ingress controller.
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/router.middlewares: infrastructure-https-redirect@kubernetescrd
+    hosts:
+      - host: {{ vault_domain }}
+        paths:
+          - /
+  readinessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200"
+  livenessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200"
+  extraLabels:
+    app.kubernetes.io/part-of: central-secure-stack
+
+# Ensure integrated storage is used by default and the agent injector stays disabled in OSS deployment.
+standalone:
+  enabled: false

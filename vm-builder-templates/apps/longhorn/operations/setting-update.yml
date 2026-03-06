@@ -1,0 +1,208 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/operations/setting-update"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "longhorn.settings.update"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/operations/setting-update.yml"
+#     category: "platform"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["v1.5.x", "v1.6.x", "v1.7.x"]
+#       version_range: ">=v1.5.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - longhorn: "v1.6.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Longhorn CRD schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_longhorn_operations"
+#   dependencies: []
+#   provides: ["longhorn_setting_updated"]
+#   tags: ["longhorn", "storage", "settings", "crd", "operations", "configuration"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Update a Longhorn Setting via CRD. Settings control Longhorn behavior
+#     such as backup target, replica count defaults, storage policies, etc.
+#     Common settings: backup-target, default-replica-count, storage-over-provisioning-percentage.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.longhorn.status"
+#         purpose: "Verify Longhorn is ready before updating settings"
+#
+#     writes:
+#       - path: "_state.apps.longhorn.settings.{setting_name}"
+#         example: "s3://my-bucket@us-east-1/"
+
+- name: Longhorn - Update Setting
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    longhorn_namespace: "{{ longhorn_namespace_input | default('longhorn-system') }}"
+
+    # Required fields
+    # setting_name: Name of the setting to update (required)
+    # setting_value: New value for the setting (required)
+
+    # Common settings reference:
+    # - backup-target: S3/NFS/Azure Blob URL for backups
+    # - backup-target-credential-secret: Secret name for backup credentials
+    # - default-replica-count: Default number of replicas (1-10)
+    # - storage-over-provisioning-percentage: How much to over-provision (0-1000)
+    # - storage-minimal-available-percentage: Minimum free space (0-100)
+    # - replica-soft-anti-affinity: Allow replicas on same node (true/false)
+    # - upgrade-checker: Enable version check (true/false)
+    # - default-data-path: Default storage path on nodes
+    # - default-data-locality: Default locality (disabled/best-effort/strict-local)
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - setting_name is defined and setting_name | length > 0
+          - setting_value is defined
+        fail_msg: "Required inputs missing: setting_name and setting_value are required"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Check Longhorn System Readiness =====
+    - name: Verify Longhorn manager pods are running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-manager
+      register: longhorn_manager_pods
+
+    - name: Assert Longhorn manager is ready
+      ansible.builtin.assert:
+        that:
+          - longhorn_manager_pods.resources | length > 0
+          - longhorn_manager_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+        fail_msg: "Longhorn manager is not running. Ensure Longhorn is deployed first."
+        success_msg: "Longhorn manager is running"
+
+    # ===== STEP 3: Get Current Setting Value =====
+    - name: Get current setting value
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Setting
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ setting_name }}"
+      register: current_setting
+
+    - name: Display current setting value
+      ansible.builtin.debug:
+        msg: "Current value of '{{ setting_name }}': {{ current_setting.resources[0].value | default('(not set)') }}"
+      when: current_setting.resources | length > 0
+
+    - name: Check if update is needed
+      ansible.builtin.set_fact:
+        update_needed: >-
+          {{ current_setting.resources | length == 0 or
+             current_setting.resources[0].value != (setting_value | string) }}
+
+    - name: Skip update if value unchanged
+      ansible.builtin.debug:
+        msg: "Setting '{{ setting_name }}' already has value '{{ setting_value }}', skipping update"
+      when: not update_needed
+
+    # ===== STEP 4: Update Setting CRD =====
+    - name: Update Longhorn Setting
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: Setting
+          metadata:
+            name: "{{ setting_name }}"
+            namespace: "{{ longhorn_namespace }}"
+          value: "{{ setting_value | string }}"
+      register: setting_result
+      when: update_needed
+
+    # ===== STEP 5: Verify Setting was Applied =====
+    - name: Verify setting was applied
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Setting
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ setting_name }}"
+      register: updated_setting
+
+    - name: Assert setting value matches
+      ansible.builtin.assert:
+        that:
+          - updated_setting.resources | length > 0
+          - updated_setting.resources[0].value == (setting_value | string)
+        fail_msg: >-
+          Setting update verification failed.
+          Expected '{{ setting_value }}',
+          got '{{ updated_setting.resources[0].value | default('') }}'
+        success_msg: "Setting '{{ setting_name }}' updated successfully to '{{ setting_value }}'"
+      when: update_needed
+
+    # ===== STEP 6: Handle Sensitive Settings (no_log) =====
+    - name: Update BWS inventory with setting info (non-sensitive)
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge setting info into _state.apps.longhorn.settings
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg setting "{{ setting_name }}" \
+          --arg value "{{ setting_value }}" \
+          '
+          if ._state.apps.longhorn == null then ._state.apps.longhorn = {} else . end |
+          if ._state.apps.longhorn.settings == null then ._state.apps.longhorn.settings = {} else . end |
+          ._state.apps.longhorn.settings[$setting] = $value
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: "{{ 'credential' in setting_name or 'secret' in setting_name or 'password' in setting_name }}"
+      when:
+        - inventory_secret_name | length > 0
+        - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        - update_needed
+
+    # ===== STEP 7: Output Result =====
+    - name: Display setting update result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'updated' if update_needed else 'unchanged' }}"
+          setting_name: "{{ setting_name }}"
+          previous_value: >-
+            {{ current_setting.resources[0].value | default('(not set)')
+               if current_setting.resources | length > 0 else '(not set)' }}
+          new_value: >-
+            {{ '***REDACTED***'
+               if ('credential' in setting_name or 'secret' in setting_name
+                   or 'password' in setting_name)
+               else setting_value }}
+          namespace: "{{ longhorn_namespace }}"

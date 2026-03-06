@@ -1,0 +1,35 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  blueprints-configmap.yaml.j2:
+    summary: 'Jinja2 template: blueprints-configmap.yaml.j2'
+    source: inferred
+    confidence: medium
+  forwardauth-middleware.yaml.j2:
+    summary: 'Jinja2 template: forwardauth-middleware.yaml.j2'
+    source: inferred
+    confidence: medium
+  ingressroute.yaml.j2:
+    summary: 'Jinja2 template: ingressroute.yaml.j2'
+    source: inferred
+    confidence: medium
+  postgres.yaml.j2:
+    summary: 'Jinja2 template: postgres.yaml.j2'
+    source: inferred
+    confidence: medium
+  redis.yaml.j2:
+    summary: 'Jinja2 template: redis.yaml.j2'
+    source: inferred
+    confidence: medium
+  secrets.yaml.j2:
+    summary: 'Jinja2 template: secrets.yaml.j2'
+    source: inferred
+    confidence: medium
+  server.yaml.j2:
+    summary: 'Jinja2 template: server.yaml.j2'
+    source: inferred
+    confidence: medium
+  worker.yaml.j2:
+    summary: 'Jinja2 template: worker.yaml.j2'
+    source: inferred
+    confidence: medium

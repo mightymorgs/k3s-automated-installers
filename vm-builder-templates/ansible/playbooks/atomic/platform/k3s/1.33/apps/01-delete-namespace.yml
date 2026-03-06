@@ -1,0 +1,97 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/apps/01-delete-namespace"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/apps/01-delete-namespace.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "apps"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-13"
+#         notes: "Deletes namespace with wait_timeout=300s for resource cleanup"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed"]
+#   provides: ["namespace_deleted"]
+#   tags: ["k3s", "namespace", "cleanup"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Delete a Kubernetes namespace and all its resources
+- name: Delete Kubernetes namespace
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    namespace_name: "{{ namespace | default('') }}"
+  vars_prompt:
+    - name: namespace_name_prompt
+      prompt: Enter namespace to delete
+      private: false
+  tasks:
+    - name: Validate namespace parameter
+      ansible.builtin.assert:
+        that: [namespace_name is defined, namespace_name | length > 0]
+        fail_msg: namespace parameter is required
+    - name: Check if namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: '{{ namespace_name }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: ns_check
+      failed_when: false
+    - name: Skip if namespace does not exist
+      ansible.builtin.debug:
+        msg: Namespace {{ namespace_name }} does not exist, skipping deletion
+      when: ns_check.resources | length == 0
+    - name: Delete namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: '{{ namespace_name }}'
+        state: absent
+        wait: true
+        wait_timeout: 300
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      when: ns_check.resources | length > 0
+    - name: Verify namespace deletion
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: '{{ namespace_name }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: ns_verify
+      failed_when: ns_verify.resources | length > 0
+      when: ns_check.resources | length > 0
+    - name: Display deletion summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Namespace Deletion Complete
+          - ==========================================
+          - 'Namespace: {{ namespace_name }}'
+          - "Status: {{ 'Deleted' if ns_check.resources | length > 0 else 'Did not exist' }}"
+          - ==========================================

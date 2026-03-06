@@ -1,0 +1,291 @@
+{#
+  External Secrets Operator — Controller RBAC
+
+  Generated from helm template external-secrets v0.9.13.
+  Includes: controller ClusterRole, view/edit/servicebindings aggregate
+  ClusterRoles, ClusterRoleBinding, leader-election Role + RoleBinding.
+
+  Variables:
+    - app_namespace: Kubernetes namespace (default: "external-secrets")
+    - eso_version: ESO image tag (default: "v0.9.13")
+#}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-secrets-controller
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+rules:
+  - apiGroups:
+    - "external-secrets.io"
+    resources:
+    - "secretstores"
+    - "clustersecretstores"
+    - "externalsecrets"
+    - "clusterexternalsecrets"
+    - "pushsecrets"
+    verbs:
+    - "get"
+    - "list"
+    - "watch"
+  - apiGroups:
+    - "external-secrets.io"
+    resources:
+    - "externalsecrets"
+    - "externalsecrets/status"
+    - "externalsecrets/finalizers"
+    - "secretstores"
+    - "secretstores/status"
+    - "secretstores/finalizers"
+    - "clustersecretstores"
+    - "clustersecretstores/status"
+    - "clustersecretstores/finalizers"
+    - "clusterexternalsecrets"
+    - "clusterexternalsecrets/status"
+    - "clusterexternalsecrets/finalizers"
+    - "pushsecrets"
+    - "pushsecrets/status"
+    - "pushsecrets/finalizers"
+    verbs:
+    - "update"
+    - "patch"
+  - apiGroups:
+    - "generators.external-secrets.io"
+    resources:
+    - "acraccesstokens"
+    - "ecrauthorizationtokens"
+    - "fakes"
+    - "gcraccesstokens"
+    - "passwords"
+    - "vaultdynamicsecrets"
+    verbs:
+    - "get"
+    - "list"
+    - "watch"
+  - apiGroups:
+    - ""
+    resources:
+    - "serviceaccounts"
+    - "namespaces"
+    verbs:
+    - "get"
+    - "list"
+    - "watch"
+  - apiGroups:
+    - ""
+    resources:
+    - "configmaps"
+    verbs:
+    - "get"
+    - "list"
+    - "watch"
+  - apiGroups:
+    - ""
+    resources:
+    - "secrets"
+    verbs:
+    - "get"
+    - "list"
+    - "watch"
+    - "create"
+    - "update"
+    - "delete"
+    - "patch"
+  - apiGroups:
+    - ""
+    resources:
+    - "serviceaccounts/token"
+    verbs:
+    - "create"
+  - apiGroups:
+    - ""
+    resources:
+    - "events"
+    verbs:
+    - "create"
+    - "patch"
+  - apiGroups:
+    - "external-secrets.io"
+    resources:
+    - "externalsecrets"
+    verbs:
+    - "create"
+    - "update"
+    - "delete"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-secrets-view
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups:
+      - "external-secrets.io"
+    resources:
+      - "externalsecrets"
+      - "secretstores"
+      - "clustersecretstores"
+      - "pushsecrets"
+    verbs:
+      - "get"
+      - "watch"
+      - "list"
+  - apiGroups:
+    - "generators.external-secrets.io"
+    resources:
+    - "acraccesstokens"
+    - "ecrauthorizationtokens"
+    - "fakes"
+    - "gcraccesstokens"
+    - "passwords"
+    - "vaultdynamicsecrets"
+    verbs:
+      - "get"
+      - "watch"
+      - "list"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-secrets-edit
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups:
+      - "external-secrets.io"
+    resources:
+      - "externalsecrets"
+      - "secretstores"
+      - "clustersecretstores"
+      - "pushsecrets"
+    verbs:
+      - "create"
+      - "delete"
+      - "deletecollection"
+      - "patch"
+      - "update"
+  - apiGroups:
+    - "generators.external-secrets.io"
+    resources:
+    - "acraccesstokens"
+    - "ecrauthorizationtokens"
+    - "fakes"
+    - "gcraccesstokens"
+    - "passwords"
+    - "vaultdynamicsecrets"
+    verbs:
+      - "create"
+      - "delete"
+      - "deletecollection"
+      - "patch"
+      - "update"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-secrets-servicebindings
+  labels:
+    servicebinding.io/controller: "true"
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+rules:
+  - apiGroups:
+    - "external-secrets.io"
+    resources:
+    - "externalsecrets"
+    verbs:
+    - "get"
+    - "list"
+    - "watch"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: external-secrets-controller
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: external-secrets-controller
+subjects:
+  - name: external-secrets
+    namespace: {{ app_namespace | default('external-secrets') }}
+    kind: ServiceAccount
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: external-secrets-leaderelection
+  namespace: {{ app_namespace | default('external-secrets') }}
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+rules:
+  - apiGroups:
+    - ""
+    resources:
+    - "configmaps"
+    resourceNames:
+    - "external-secrets-controller"
+    verbs:
+    - "get"
+    - "update"
+    - "patch"
+  - apiGroups:
+    - ""
+    resources:
+    - "configmaps"
+    verbs:
+    - "create"
+  - apiGroups:
+    - "coordination.k8s.io"
+    resources:
+    - "leases"
+    verbs:
+    - "get"
+    - "create"
+    - "update"
+    - "patch"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: external-secrets-leaderelection
+  namespace: {{ app_namespace | default('external-secrets') }}
+  labels:
+    app.kubernetes.io/name: external-secrets
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/part-of: golden-master
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: external-secrets-leaderelection
+subjects:
+  - kind: ServiceAccount
+    name: external-secrets
+    namespace: {{ app_namespace | default('external-secrets') }}

@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kibana-config
+  namespace: kibana
+  labels:
+    app.kubernetes.io/name: kibana
+data:
+  # Configuration will be populated by ansible
+  APP_URL: "https://kibana.example.com"

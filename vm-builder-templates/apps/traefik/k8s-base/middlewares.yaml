@@ -1,0 +1,110 @@
+---
+# Common Traefik Middlewares for Enterprise K8s
+# These middlewares can be referenced by IngressRoutes
+
+# HTTPS Redirect Middleware
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: kube-system
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+
+---
+# Security Headers Middleware
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  namespace: kube-system
+spec:
+  headers:
+    frameDeny: true
+    sslRedirect: true
+    browserXssFilter: true
+    contentTypeNosniff: true
+    stsIncludeSubdomains: true
+    stsPreload: true
+    stsSeconds: 31536000
+    customFrameOptionsValue: "SAMEORIGIN"
+    customResponseHeaders:
+      X-Robots-Tag: "noindex, nofollow"
+
+---
+# Rate Limiting Middleware
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit
+  namespace: kube-system
+spec:
+  rateLimit:
+    average: 100
+    burst: 50
+    period: 1m
+
+---
+# Strip Prefix Middleware (for API routes)
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-api-prefix
+  namespace: kube-system
+spec:
+  stripPrefix:
+    prefixes:
+      - /api
+
+---
+# Authentik ForwardAuth Middleware Template
+# NOTE: Configure authentik_url via overlay or environment
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-forwardauth
+  namespace: kube-system
+spec:
+  forwardAuth:
+    address: http://authentik.media-stack.svc.cluster.local:9000/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-authentik-username
+      - X-authentik-groups
+      - X-authentik-email
+      - X-authentik-name
+      - X-authentik-uid
+      - X-authentik-jwt
+      - X-authentik-meta-jwks
+      - X-authentik-meta-outpost
+      - X-authentik-meta-provider
+      - X-authentik-meta-app
+      - X-authentik-meta-version
+
+---
+# Chain Middleware: Security + Rate Limiting
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: secure-chain
+  namespace: kube-system
+spec:
+  chain:
+    middlewares:
+      - name: security-headers
+      - name: rate-limit
+
+---
+# Chain Middleware: Security + SSO
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: secure-sso-chain
+  namespace: kube-system
+spec:
+  chain:
+    middlewares:
+      - name: security-headers
+      - name: authentik-forwardauth

@@ -1,0 +1,995 @@
+---
+name: Phase 2 - Base Infrastructure Provisioning
+on:
+  workflow_dispatch:
+    inputs:
+      inventory_key:
+        description: BWS inventory key (e.g. inventory/homelab-k3s-master-prod-mediastack-libvirt-latest)
+        required: true
+        type: string
+      hypervisor_inventory_key:
+        description: Hypervisor BWS inventory (e.g., inventory/hypervisors/hv-auros15g-libvirt-office)
+        required: true
+        type: string
+      allow_hv_ip_ssh:
+        description: Temporarily allow SSH to hypervisor by TS IP
+        required: false
+        default: 'false'
+        type: string
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      vm_hostname: ${{ steps.vm_config.outputs.vm_hostname }}
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      TS_ALLOW_HYPERVISOR_IP_SSH: ${{ inputs.allow_hv_ip_ssh }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system tools
+        run: sudo apt-get update -qq && sudo apt-get install -y curl jq unzip ansible
+
+      - uses: ./.github/actions/setup-bws
+        id: bws_cache
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Fetch shared versions from BWS
+        id: versions
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          VERSIONS_ID=$(jq -r '.[] | select(.key=="inventory/shared/versions") | .id' /tmp/bws_secrets.json)
+          if [ -n "$VERSIONS_ID" ] && [ "$VERSIONS_ID" != "null" ]; then
+            sleep 1
+            VERSIONS=$(bws secret get "$VERSIONS_ID" --output json | jq -r '.value')
+            echo "github_runner=$(echo "$VERSIONS" | jq -r '.github_runner // "2.332.0"')" >> "$GITHUB_OUTPUT"
+            echo "terragrunt=$(echo "$VERSIONS" | jq -r '.terragrunt // "v0.68.12"')" >> "$GITHUB_OUTPUT"
+          else
+            echo "github_runner=2.332.0" >> "$GITHUB_OUTPUT"
+            echo "terragrunt=v0.68.12" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./.github/actions/tailscale-oauth-token
+        id: ts_oauth
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Set up Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ steps.ts_oauth.outputs.client_id }}
+          oauth-secret: ${{ steps.ts_oauth.outputs.client_secret }}
+          tags: tag:ci
+
+      - name: Show tool versions
+        run: |
+          ansible --version
+          bws --version
+          tailscale --version
+          tailscale status
+
+      - name: Fetch VM inventory from BWS
+        id: vm_inventory
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          # Use cached secret list to avoid rate limiting
+          SECRET_ID=$(jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "null" ]; then
+            echo "ERROR: VM inventory not found at key: $INVENTORY_KEY" >&2
+            echo "Available inventory keys:" >&2
+            jq -r '.[] | select(.key | startswith("inventory/")) | .key' /tmp/bws_secrets.json >&2
+            exit 1
+          fi
+
+          sleep 1  # Small delay between bws calls to avoid rate limiting
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          if [ -z "$INVENTORY" ] || [ "$INVENTORY" = "null" ]; then
+            echo "ERROR: Failed to fetch inventory from BWS" >&2
+            exit 1
+          fi
+
+          echo "Successfully fetched VM inventory for: $INVENTORY_KEY"
+
+          # Store as step output (available in same run, unlike secrets)
+          # Use heredoc to avoid quoting issues with JSON
+          {
+            echo 'json<<EOF'
+            echo "$INVENTORY"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Extract SSH keypair from inventory
+        id: ssh_keypair
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+        run: |
+          # New inventory format has clean JSON (no embedded newlines)
+          # Parse directly without sed manipulation
+          PRIV=$(echo "$INVENTORY_JSON" | jq -r '.ssh.keypair.private_key_b64')
+          PUB=$(echo "$INVENTORY_JSON" | jq -r '.ssh.keypair.public_key')
+          printf 'private_key_b64=%s\n' "$PRIV" >> "$GITHUB_OUTPUT"
+          printf 'public_key=%s\n' "$PUB" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch console credentials from BWS
+        id: console_creds
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          USER_ID=$(id_for 'inventory/shared/secrets/console/username')
+          PASS_ID=$(id_for 'inventory/shared/secrets/console/password')
+
+          if [ -n "$USER_ID" ] && [ "$USER_ID" != "null" ]; then
+            CONSOLE_USER=$(get_val "$USER_ID")
+            echo "console_username=$CONSOLE_USER" >> "$GITHUB_OUTPUT"
+          else
+            echo "console_username=" >> "$GITHUB_OUTPUT"
+            echo "WARN: Console username not found in BWS"
+          fi
+
+          if [ -n "$PASS_ID" ] && [ "$PASS_ID" != "null" ]; then
+            CONSOLE_PASS=$(get_val "$PASS_ID")
+            echo "::add-mask::$CONSOLE_PASS"
+            echo "console_password=$CONSOLE_PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "console_password=" >> "$GITHUB_OUTPUT"
+            echo "WARN: Console password not found in BWS"
+          fi
+
+      - name: Extract hypervisor config from BWS
+        id: hypervisor_config
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          HYPERVISOR_KEY="${{ inputs.hypervisor_inventory_key }}"
+          SECRET_ID=$(jq -r --arg k "$HYPERVISOR_KEY" '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "null" ]; then
+            echo "ERROR: Hypervisor inventory not found at key: $HYPERVISOR_KEY" >&2
+            echo "Available hypervisor inventories:" >&2
+            jq -r '.[] | select(.key | contains("hypervisor")) | .key' /tmp/bws_secrets.json >&2
+            exit 1
+          fi
+
+          sleep 1
+          HV_INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Validate Phase 0 completed — hypervisor must be fully configured
+          PHASE0_OK=$(echo "$HV_INVENTORY" | jq -r '.bootstrap.phase0_qemu_setup_completed // false')
+          READY=$(echo "$HV_INVENTORY" | jq -r '.bootstrap.ready_for_phase2 // false')
+          if [ "$PHASE0_OK" != "true" ] || [ "$READY" != "true" ]; then
+            echo "ERROR: Hypervisor Phase 0 not completed!" >&2
+            echo "  phase0_qemu_setup_completed: $PHASE0_OK" >&2
+            echo "  ready_for_phase2: $READY" >&2
+            echo "Run Phase 0 first: gh workflow run phase0-hypervisor-setup.yml" >&2
+            exit 1
+          fi
+
+          # Extract connection details (v3.1 schema)
+          SSH_USER=$(echo "$HV_INVENTORY" | jq -r '.ssh.user')
+          if [ -z "$SSH_USER" ] || [ "$SSH_USER" = "null" ]; then
+            echo "ERROR: .ssh.user not found in hypervisor inventory" >&2
+            echo "Hypervisor key: $HYPERVISOR_KEY" >&2
+            echo "Ensure the hypervisor BWS inventory has ssh.user set (e.g. 'morgs')" >&2
+            exit 1
+          fi
+          TAILSCALE_NAME=$(echo "$HV_INVENTORY" | jq -r '.identity.full_name // ""')
+          LOCAL_IP=$(echo "$HV_INVENTORY" | jq -r '.hardware.local_ip // ""')
+
+          if [ -z "$TAILSCALE_NAME" ] || [ "$TAILSCALE_NAME" = "null" ]; then
+            echo "ERROR: Could not extract identity.full_name from hypervisor inventory" >&2
+            echo "Inventory JSON:" >&2
+            echo "$HV_INVENTORY" | jq '.' >&2
+            exit 1
+          fi
+
+          # Extract Phase 0 network state for VM provisioning
+          HV_NET_MODE=$(echo "$HV_INVENTORY" | jq -r '._state.network.configured_mode // .network.mode // "nat"')
+          HV_DEFAULT_IFACE=$(echo "$HV_INVENTORY" | jq -r '._state.network.default_interface // "unknown"')
+          HV_BRIDGES=$(echo "$HV_INVENTORY" | jq -r '._state.network.bridges // [] | join(",")')
+          HV_LIBVIRT_NETS=$(echo "$HV_INVENTORY" | jq -r '._state.network.libvirt_networks // [] | join(",")')
+
+          # Per-hypervisor scoping: use full hypervisor name for tag:hv-{name}
+          HV_SHORT_NAME=$(echo "$HV_INVENTORY" | jq -r '.identity.full_name // .identity.name // ""')
+
+          {
+            echo "ssh_user=$SSH_USER"
+            echo "tailscale_name=$TAILSCALE_NAME"
+            echo "local_ip=$LOCAL_IP"
+            echo "hv_net_mode=$HV_NET_MODE"
+            echo "hv_default_iface=$HV_DEFAULT_IFACE"
+            echo "hv_bridges=$HV_BRIDGES"
+            echo "hv_libvirt_nets=$HV_LIBVIRT_NETS"
+            echo "hv_short_name=$HV_SHORT_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Hypervisor: $TAILSCALE_NAME"
+          echo "  Phase 0 completed: $(echo "$HV_INVENTORY" | jq -r '.bootstrap.phase0_qemu_setup_timestamp // "unknown"')"
+          echo "  Network mode: $HV_NET_MODE"
+          echo "  Default iface: $HV_DEFAULT_IFACE"
+          echo "  Bridges: ${HV_BRIDGES:-none}"
+          echo "  Libvirt nets: ${HV_LIBVIRT_NETS:-none}"
+
+          # Export full JSON for later steps
+          {
+            echo "json<<EOF"
+            echo "$HV_INVENTORY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Extract VM config from inventory
+        id: vm_config
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+        run: |
+          # New inventory format has clean JSON - parse directly
+          VM_HOSTNAME=$(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          VM_CLIENT=$(echo "$INVENTORY_JSON" | jq -r '.identity.client')
+          VM_PURPOSE=$(echo "$INVENTORY_JSON" | jq -r '.identity.purpose')
+
+          {
+            echo "vm_hostname=$VM_HOSTNAME"
+            echo "vm_client=$VM_CLIENT"
+            echo "vm_purpose=$VM_PURPOSE"
+          } >> "$GITHUB_OUTPUT"
+
+          # Export full JSON for GitHub Secrets sync
+          {
+            echo "json<<EOF"
+            echo "$INVENTORY_JSON"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Delete existing runner with same name
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          PAT_ID=$(id_for 'inventory/shared/secrets/github/pat')
+          GH_PAT=$(get_val "$PAT_ID")
+          RUNNER_NAME="${{ steps.vm_config.outputs.vm_hostname }}"
+
+          RUNNER_ID=$(curl -s -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+            | jq -r --arg name "$RUNNER_NAME" '.runners[] | select(.name==$name) | .id')
+
+          if [ -n "$RUNNER_ID" ]; then
+            echo "Deleting existing runner: $RUNNER_NAME (ID: $RUNNER_ID)"
+            curl -X DELETE \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners/$RUNNER_ID"
+          else
+            echo "No existing runner found with name: $RUNNER_NAME"
+          fi
+
+      - name: Generate ephemeral runner token
+        id: runner_token
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          PAT_ID=$(id_for 'inventory/shared/secrets/github/pat')
+          GH_PAT=$(get_val "$PAT_ID")
+
+          TOKEN=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
+            | jq -r '.token')
+
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/tailscale-oauth-token
+        id: ts_api_token
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - uses: ./.github/actions/tailscale-delete-device
+        with:
+          hostname: ${{ steps.vm_config.outputs.vm_hostname }}
+          access_token: ${{ steps.ts_api_token.outputs.access_token }}
+
+      - name: Derive VM Tailscale tags
+        id: vm_tags
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+        run: |
+          VM_NAME=$(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          CLIENT=$(echo "$VM_NAME" | cut -d'-' -f1)
+          VMTYPE=$(echo "$VM_NAME" | cut -d'-' -f2)
+          SUBTYPE=$(echo "$VM_NAME" | cut -d'-' -f3)
+          STATE=$(echo "$VM_NAME" | cut -d'-' -f4)
+
+          TAGS='["tag:'"$CLIENT"'", "tag:'"$STATE"'", "tag:service-ssh"]'
+          if [ "$VMTYPE" = "k3s" ] && [ "$SUBTYPE" = "master" ]; then
+            TAGS=$(echo "$TAGS" | jq '. + ["tag:k8s-master", "tag:service-cluster"]')
+          elif [ "$VMTYPE" = "k3s" ] && [ "$SUBTYPE" = "worker" ]; then
+            TAGS=$(echo "$TAGS" | jq '. + ["tag:k8s-worker", "tag:service-cluster"]')
+          fi
+
+          # Per-hypervisor scoping tag — allows the hypervisor to SSH only to its own VMs
+          HV_SHORT="${{ steps.hypervisor_config.outputs.hv_short_name }}"
+          if [ -n "$HV_SHORT" ]; then
+            TAGS=$(echo "$TAGS" | jq --arg hv "tag:$HV_SHORT" '. + [$hv]')
+          fi
+
+          TAGS=$(echo "$TAGS" | jq -c 'unique')
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      # ACL must be updated BEFORE creating auth keys — tagOwners must include all tags
+      # Read-merge-push: fetches current ACL, adds missing tags/rules, pushes back.
+      # Never overwrites existing tags or rules — only additive.
+      - name: Merge VM tags into Tailscale ACL (read-merge-push)
+        shell: bash
+        env:
+          TS_ACCESS_TOKEN: ${{ steps.ts_api_token.outputs.access_token }}
+          CONSOLE_USER: ${{ steps.console_creds.outputs.console_username }}
+        run: |
+          set -euo pipefail
+          VM_TAGS='${{ steps.vm_tags.outputs.tags }}'
+          AUTH_HDR=(-H "Authorization: Bearer $TS_ACCESS_TOKEN")
+
+          # --- 1. Read current ACL ---
+          CURRENT=$(curl -sS -X GET \
+            "https://api.tailscale.com/api/v2/tailnet/-/acl" \
+            -H 'Accept: application/json' "${AUTH_HDR[@]}")
+
+          # --- 2. Merge tags and rules via Python ---
+          export CURRENT_ACL="$CURRENT"
+          export VM_TAGS="$VM_TAGS"
+          MERGED=$(python3 << 'PYEOF'
+          import json, sys, os
+
+          current = json.loads(os.environ["CURRENT_ACL"])
+          vm_tags = json.loads(os.environ["VM_TAGS"])
+          console_user = os.environ.get("CONSOLE_USER", "")
+
+          if not console_user:
+              print("ERROR: CONSOLE_USER is empty", file=sys.stderr)
+              sys.exit(1)
+
+          # --- tagOwners: ensure every VM tag is registered ---
+          tag_owners = current.get("tagOwners", {})
+          for tag in vm_tags:
+              if tag not in tag_owners:
+                  tag_owners[tag] = ["autogroup:admin"]
+          current["tagOwners"] = tag_owners
+
+          # --- ACL rules: ensure per-hypervisor + client scoping rules exist ---
+          acls = current.get("acls", [])
+          # Helper: check if an ACL rule with given src already exists
+          existing_acl_srcs = {tuple(r.get("src", [])) for r in acls}
+
+          skip_tags = {"prod", "staging", "dev", "test", "k8s-master", "k8s-worker",
+                       "service-cluster", "service-ssh"}
+
+          for tag in vm_tags:
+              tag_name = tag.split(":", 1)[1] if ":" in tag else ""
+
+              # Per-hypervisor scoping: tag:hv-* src can reach tag:hv-* dst
+              if tag.startswith("tag:hv-"):
+                  if (tag,) not in existing_acl_srcs:
+                      acls.append({"action": "accept", "src": [tag], "dst": [f"{tag}:*"]})
+
+              # Client scoping: tag:{client} src can reach tag:{client} dst
+              elif tag_name and tag_name not in skip_tags:
+                  if (tag,) not in existing_acl_srcs:
+                      acls.append({"action": "accept", "src": [tag], "dst": [f"{tag}:*"]})
+
+          current["acls"] = acls
+
+          # --- SSH rules: ensure admin + CI dst lists include new tags ---
+          ssh_rules = current.get("ssh", [])
+          admin_tags = {"tag:hypervisor", "tag:vm-host", "tag:service-ssh",
+                        "tag:k8s-master", "tag:k8s-worker"}
+          for rule in ssh_rules:
+              src = rule.get("src", [])
+              # Admin and CI SSH rules: add any new VM tags to dst
+              if "autogroup:admin" in src or "tag:ci" in src:
+                  dst = rule.get("dst", [])
+                  for tag in vm_tags:
+                      if tag not in dst:
+                          dst.append(tag)
+                  rule["dst"] = list(dict.fromkeys(dst))  # dedupe preserving order
+                  # Ensure console_user is in users list
+                  users = rule.get("users", [])
+                  if console_user and console_user not in users:
+                      users.append(console_user)
+                  rule["users"] = users
+
+          # Per-hypervisor SSH: ensure rule exists for each hv-* tag
+          existing_ssh_srcs = {tuple(r.get("src", [])) for r in ssh_rules}
+          for tag in vm_tags:
+              if tag.startswith("tag:hv-"):
+                  if (tag,) not in existing_ssh_srcs:
+                      ssh_rules.append({
+                          "action": "accept",
+                          "src": [tag],
+                          "dst": [tag],
+                          "users": [console_user, "root"] if console_user else ["root"]
+                      })
+
+          current["ssh"] = ssh_rules
+
+          print(json.dumps(current, indent=2))
+          PYEOF
+          )
+
+          # --- 3. Validate merged ACL ---
+          VAL_CODE=$(curl -sS -o /tmp/ts_acl_val.json -w "%{http_code}\n" -X POST \
+            "https://api.tailscale.com/api/v2/tailnet/-/acl/validate" \
+            -H 'Content-Type: application/json' "${AUTH_HDR[@]}" \
+            -d "$MERGED")
+          if [ "$VAL_CODE" != "200" ]; then
+            echo "ACL validate failed ($VAL_CODE):" >&2
+            cat /tmp/ts_acl_val.json >&2 || true
+            echo "Merged ACL that failed validation:" >&2
+            echo "$MERGED" | head -50 >&2
+            exit 1
+          fi
+
+          # --- 4. Push merged ACL ---
+          APP_CODE=$(curl -sS -o /tmp/ts_acl_apply.json -w "%{http_code}\n" -X POST \
+            "https://api.tailscale.com/api/v2/tailnet/-/acl" \
+            -H 'Content-Type: application/json' "${AUTH_HDR[@]}" \
+            -d "$MERGED")
+          if [ "$APP_CODE" != "200" ]; then
+            echo "ACL apply failed ($APP_CODE):" >&2
+            cat /tmp/ts_acl_apply.json >&2 || true
+            exit 1
+          fi
+
+          ADDED=$(echo "$VM_TAGS" | jq -r 'join(", ")')
+          echo "ACL updated (read-merge-push). Ensured tags: $ADDED"
+
+      - uses: ./.github/actions/tailscale-create-authkey
+        id: vm_ts_auth
+        with:
+          access_token: ${{ steps.ts_api_token.outputs.access_token }}
+          tags: ${{ steps.vm_tags.outputs.tags }}
+
+      - name: Render cloud-init from J2 template
+        id: render_cloudinit
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+        run: |
+          set -euo pipefail
+
+          # Create vars file for ansible template
+          cat > /tmp/j2_vars.yml <<EOF
+          hostname: $(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          ssh_authorized_keys:
+            - "${{ steps.ssh_keypair.outputs.public_key }}"
+          console_username: "${{ steps.console_creds.outputs.console_username }}"
+          console_password: "${{ steps.console_creds.outputs.console_password }}"
+          tailscale_auth_key: "${{ steps.vm_ts_auth.outputs.auth_key }}"
+          github_runner_token: "${{ steps.runner_token.outputs.token }}"
+          github_repo: "${{ github.repository }}"
+          github_runner_version: "${{ steps.versions.outputs.github_runner }}"
+          ssh_private_key_b64: "${{ steps.ssh_keypair.outputs.private_key_b64 }}"
+          EOF
+
+          # Render template using ansible
+          ansible localhost -m template \
+            -a "src=vm-builder/vm-builder-templates/ansible/templates/cloud-init/libvirt-userdata.yml.j2 dest=/tmp/user-data.yml" \
+            -e "@/tmp/j2_vars.yml"
+
+          # Output rendered content (base64 to preserve formatting)
+          RENDERED=$(cat /tmp/user-data.yml | base64 -w0)
+          echo "content_b64=$RENDERED" >> "$GITHUB_OUTPUT"
+
+      # NOTE: Merge step disabled - new programmatic inventory is already complete
+      # TODO: Add simple validation for flat inventory format
+      # - name: Merge and validate Bitwarden inventory layers
+      #   shell: bash
+      #   env:
+      #     ANSIBLE_STDOUT_CALLBACK: default
+      #   run: |
+      #     set -euo pipefail
+      #     host_fragment=$(echo "${{ inputs.inventory_key }}" | sed 's#^inventory/##')
+      #     merge_path="logs/inventory/${host_fragment}-merged.json"
+      #     mkdir -p "$(dirname "$merge_path")"
+      #     ansible-playbook -i ansible/inventory/hosts.ini \
+      #       vm-builder/vm-builder-templates/ansible/playbooks/atomic/tools/secrets/02-merge-inventory-layers.yml \
+      #       -e inventory_secret_name=${{ inputs.inventory_key }}
+      #     python3 migrations/validate_secrets.py \
+      #       --inventory-key ${{ inputs.inventory_key }} \
+      #       --schema inventory/schema/v3.json \
+      #       --input "$merge_path"
+
+      - name: Compute runner hostname
+        id: ts_preclean
+        run: |
+          TS_HOSTNAME="ci-${GITHUB_REPOSITORY##*/}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "ts_hostname=$TS_HOSTNAME" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/tailscale-delete-device
+        with:
+          hostname: ${{ steps.ts_preclean.outputs.ts_hostname }}
+          access_token: ${{ steps.ts_api_token.outputs.access_token }}
+
+      - uses: ./.github/actions/tailscale-create-authkey
+        id: tskey
+        with:
+          access_token: ${{ steps.ts_api_token.outputs.access_token }}
+          tags: '["tag:ci"]'
+          ephemeral: 'true'
+
+      - uses: ./.github/actions/tailscale-userspace-connect
+        with:
+          auth_key: ${{ steps.tskey.outputs.auth_key }}
+          hostname: ${{ steps.ts_preclean.outputs.ts_hostname }}
+      # NOTE: Hypervisor tagging skipped - already tagged during Phase 0 join
+      # Hypervisor joined with tag:vm-host in phase0-hypervisor-tailscale-join.sh
+      - name: Get hypervisor Tailscale IP
+        id: hypervisor
+        shell: bash
+        env:
+          TS_ACCESS_TOKEN: ${{ steps.ts_api_token.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          HYPERVISOR_NAME="${{ steps.hypervisor_config.outputs.tailscale_name }}"
+          AUTH_HDR=(-H "Authorization: Bearer $TS_ACCESS_TOKEN")
+
+          DEV=$(curl -sS "https://api.tailscale.com/api/v2/tailnet/-/devices" "${AUTH_HDR[@]}")
+          HYPERVISOR_TS_IP=$(echo "$DEV" | jq -r --arg n "$HYPERVISOR_NAME" \
+            '.devices[] | select(.hostname==$n or (.dnsName//"" | test($n))) | .addresses[0]' | head -n1)
+          echo "hypervisor_ts_ip=$HYPERVISOR_TS_IP" >> "$GITHUB_OUTPUT"
+
+          # Enable Tailscale SSH on device
+          DID=$(echo "$DEV" | jq -r --arg n "$HYPERVISOR_NAME" \
+            '.devices[] | select(.hostname==$n or (.dnsName//"" | test($n))) | .id' | head -n1)
+          if [ -n "$DID" ] && [ "$DID" != "null" ]; then
+            SSH_PAYLOAD='{ "enabled": true }'
+            SSH_CODE=$(curl -sS -o /tmp/ts_ssh_resp.json -w "%{http_code}\n" -X POST \
+              "https://api.tailscale.com/api/v2/device/$DID/ssh" \
+              -H 'Content-Type: application/json' "${AUTH_HDR[@]}" \
+              -d "$SSH_PAYLOAD")
+            if [ "$SSH_CODE" != "200" ] && [ "$SSH_CODE" != "204" ]; then
+              curl -sS -o /tmp/ts_ssh_resp.json -w "HTTP:%{http_code}\n" -X PATCH \
+                "https://api.tailscale.com/api/v2/device/$DID/ssh" \
+                -H 'Content-Type: application/json' "${AUTH_HDR[@]}" \
+                -d "$SSH_PAYLOAD" || true
+            fi
+          fi
+      - name: Remote Terragrunt apply via Tailscale SSH (hypervisor)
+        shell: bash
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+        run: |
+          set -euo pipefail
+          HV_IP="${{ steps.hypervisor.outputs.hypervisor_ts_ip }}"
+          HV_USER="${{ steps.hypervisor_config.outputs.ssh_user }}"
+
+          # Use tailscale ssh for ACL-controlled access (no SSH keys needed)
+          # Use IP address since hostname resolution doesn't work in userspace mode
+          TS_SSH="tailscale --socket=/tmp/tailscaled.sock ssh"
+
+          echo "Connecting to hypervisor at $HV_IP as $HV_USER"
+
+          # Prepare remote dir
+          $TS_SSH ${HV_USER}@${HV_IP} 'rm -rf /tmp/media-stack-tg && mkdir -p /tmp/media-stack-tg'
+
+          # Pack entire infra (modules + terragrunt live) and scripts
+          rm -f tg.tgz
+          tar -cf - vm-builder/vm-builder-templates/infra scripts | gzip -c > tg.tgz
+
+          # Upload tarball via tailscale ssh
+          $TS_SSH ${HV_USER}@${HV_IP} 'cat > /tmp/media-stack-tg/tg.tgz' < tg.tgz
+
+          # Extract and init git repo
+          $TS_SSH ${HV_USER}@${HV_IP} 'cd /tmp/media-stack-tg && tar xzf tg.tgz && git config --global init.defaultBranch main && git init && git add -A && git commit -m "temp" >/dev/null 2>&1 || true'
+
+          # Ensure libvirt permissions are correct for qemu to access images
+          $TS_SSH ${HV_USER}@${HV_IP} 'set -euo pipefail
+            echo "Configuring libvirt permissions..."
+
+            # Check if AppArmor is restricting libvirt and disable if needed
+            if command -v aa-status >/dev/null 2>&1; then
+              echo "AppArmor status for libvirt:"
+              sudo aa-status 2>/dev/null | grep -i libvirt || echo "No libvirt profiles found"
+
+              # Put libvirt/virt-aa-helper in complain mode to allow access
+              if [ -f /etc/apparmor.d/usr.sbin.libvirtd ]; then
+                sudo aa-complain /etc/apparmor.d/usr.sbin.libvirtd 2>/dev/null || true
+              fi
+              if [ -f /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper ]; then
+                sudo aa-complain /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper 2>/dev/null || true
+              fi
+            fi
+
+            # Set security_driver to none in qemu.conf to disable AppArmor/SELinux for VMs
+            if ! grep -q "^security_driver = \"none\"" /etc/libvirt/qemu.conf 2>/dev/null; then
+              echo "Disabling security driver in qemu.conf..."
+              sudo sed -i "/^#security_driver/d" /etc/libvirt/qemu.conf
+              sudo sed -i "/^security_driver/d" /etc/libvirt/qemu.conf
+              echo "security_driver = \"none\"" | sudo tee -a /etc/libvirt/qemu.conf
+            fi
+
+            # Ensure qemu runs as root
+            sudo sed -i "/^user = /d" /etc/libvirt/qemu.conf
+            sudo sed -i "/^group = /d" /etc/libvirt/qemu.conf
+            echo "user = \"root\"" | sudo tee -a /etc/libvirt/qemu.conf
+            echo "group = \"root\"" | sudo tee -a /etc/libvirt/qemu.conf
+
+            # Restart libvirtd to apply changes
+            sudo systemctl restart libvirtd || sudo service libvirtd restart || true
+            sleep 3
+
+            # Verify the settings
+            echo "Updated qemu.conf settings:"
+            sudo grep -E "^(user|group|security_driver) = " /etc/libvirt/qemu.conf
+
+            # Ensure images directory has correct permissions
+            sudo chown -R root:root /var/lib/libvirt/images/ 2>/dev/null || true
+            sudo chmod -R 755 /var/lib/libvirt/images/ 2>/dev/null || true
+
+            echo "Libvirt permissions configured"
+          '
+
+          # Verify Phase 0 networking is in place (no manual bridge creation needed)
+          # Phase 0 already configured NAT or bridge mode on the hypervisor
+          HV_NET_MODE="${{ steps.hypervisor_config.outputs.hv_net_mode }}"
+          echo "Hypervisor network mode: $HV_NET_MODE"
+
+          $TS_SSH ${HV_USER}@${HV_IP} 'set -euo pipefail
+            echo "Verifying libvirt networking..."
+
+            # Ensure the default network is active (terraform requires it)
+            # Use virsh net-list --name (active only) — parsing net-info output is unreliable
+            if sudo virsh net-list --name 2>/dev/null | grep -qw default; then
+              echo "Default network is already active"
+            elif sudo virsh net-info default &>/dev/null; then
+              echo "Default network exists but inactive — starting it..."
+              sudo virsh net-start default
+              sudo virsh net-autostart default
+            else
+              echo "Default network not defined — defining and starting..."
+              sudo virsh net-define /usr/share/libvirt/networks/default.xml 2>/dev/null || true
+              sudo virsh net-start default
+              sudo virsh net-autostart default
+            fi
+
+            echo "Active libvirt networks:"
+            sudo virsh net-list --all
+            echo ""
+            echo "Default route:"
+            ip route show default | head -1
+            echo ""
+            echo "Bridges:"
+            ip -o link show type bridge 2>/dev/null || echo "none"
+          '
+
+          # Clean up any existing VM with the same name (force destroy)
+          VM_NAME="${{ steps.vm_config.outputs.vm_hostname }}"
+          $TS_SSH ${HV_USER}@${HV_IP} "set -euo pipefail
+            echo 'Cleaning up VM: ${VM_NAME}'
+            # Stop VM if running
+            sudo virsh destroy '${VM_NAME}' 2>/dev/null || echo 'VM not running (ok)'
+            # Undefine - try with storage removal first, then without
+            if sudo virsh dominfo '${VM_NAME}' >/dev/null 2>&1; then
+              echo 'Undefining VM...'
+              sudo virsh undefine '${VM_NAME}' --remove-all-storage 2>/dev/null || \
+                sudo virsh undefine '${VM_NAME}' --nvram 2>/dev/null || \
+                sudo virsh undefine '${VM_NAME}' 2>/dev/null || \
+                echo 'WARNING: undefine failed, continuing'
+            fi
+            sleep 2
+            # Verify cleanup succeeded
+            if sudo virsh dominfo '${VM_NAME}' >/dev/null 2>&1; then
+              echo 'ERROR: VM still exists after cleanup!'
+              sudo virsh list --all
+              exit 1
+            fi
+            echo 'VM cleanup verified'
+          "
+
+          # Install terraform + terragrunt if missing
+          # shellcheck disable=SC2016
+          $TS_SSH ${HV_USER}@${HV_IP} 'set -euo pipefail
+            if ! command -v terraform >/dev/null 2>&1; then
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg
+              echo "deb [signed-by=/etc/apt/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(. /etc/os-release; echo $VERSION_CODENAME) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+              sudo apt-get update && sudo apt-get install -y terraform
+            fi
+            if ! command -v terragrunt >/dev/null 2>&1; then
+              VER="${{ steps.versions.outputs.terragrunt }}"
+              curl -fsSL -o /tmp/terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/$VER/terragrunt_linux_amd64
+              sudo install -m 0755 /tmp/terragrunt /usr/local/bin/terragrunt
+            fi
+          '
+
+          # Download Ubuntu cloud image if missing
+          # shellcheck disable=SC2016
+          $TS_SSH ${HV_USER}@${HV_IP} 'set -euo pipefail
+            BASE_IMAGE="/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"
+            if [ ! -f "$BASE_IMAGE" ]; then
+              echo "Downloading Ubuntu 24.04 cloud image..."
+              sudo curl -fsSL -o "$BASE_IMAGE" \
+                "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+              sudo chmod 644 "$BASE_IMAGE"
+              echo "Ubuntu cloud image downloaded"
+            else
+              echo "Ubuntu cloud image already exists"
+            fi
+          '
+
+          # --- Render Terragrunt HCL from J2 templates ---
+          # Derive network name (VM inventory + hypervisor state)
+          HV_NET_MODE="${{ steps.hypervisor_config.outputs.hv_net_mode }}"
+          VM_NET_NAME=$(echo "$INVENTORY_JSON" | jq -r '.network.network_name // .network.bridge // ""')
+          if [ -z "$VM_NET_NAME" ] || [ "$VM_NET_NAME" = "null" ]; then
+            if [ "$HV_NET_MODE" = "bridge" ]; then
+              VM_NET_NAME="${{ steps.hypervisor_config.outputs.hv_bridges }}"
+              VM_NET_NAME="${VM_NET_NAME%%,*}"
+              VM_NET_NAME="${VM_NET_NAME:-br0}"
+            else
+              VM_NET_NAME="default"
+            fi
+            echo "Network name derived from hypervisor state: $VM_NET_NAME"
+          fi
+
+          # Fetch TF Cloud config from BWS (cached secret list)
+          TFC_ORG_ID=$(jq -r '.[] | select(.key=="inventory/shared/secrets/terraform/cloudorganization") | .id' /tmp/bws_secrets.json)
+          TFC_TOKEN_ID=$(jq -r '.[] | select(.key=="inventory/shared/secrets/terraform/cloudtoken") | .id' /tmp/bws_secrets.json)
+          sleep 1; TFC_ORG=$(bws secret get "$TFC_ORG_ID" --output json | jq -r '.value')
+          sleep 1; TFC_TOKEN=$(bws secret get "$TFC_TOKEN_ID" --output json | jq -r '.value')
+
+          # Build J2 vars from all sources
+          # Use full VM hostname as TFC workspace so each VM gets isolated state.
+          # Previously used only the client prefix, which caused deploying one VM
+          # to destroy another VM's resources when they shared the same client name.
+          TFC_WORKSPACE=$(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          VM_SSH_USER=$(echo "$INVENTORY_JSON" | jq -r '.ssh.user')
+          if [ -z "$VM_SSH_USER" ] || [ "$VM_SSH_USER" = "null" ]; then
+            echo "ERROR: .ssh.user not found in VM inventory" >&2
+            echo "Inventory key: ${{ inputs.inventory_key }}" >&2
+            echo "Ensure the VM BWS inventory has ssh.user set" >&2
+            exit 1
+          fi
+          cat > /tmp/tg_vars.yml <<VARS
+          hostname: $(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          inventory_key: "${{ inputs.inventory_key }}"
+          render_timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          vcpu: $(echo "$INVENTORY_JSON" | jq -r '.hardware.vcpu')
+          memory_mb: $(echo "$INVENTORY_JSON" | jq -r '.hardware.memory_mb')
+          disk_size_gb: $(echo "$INVENTORY_JSON" | jq -r '.hardware.disk_size_gb')
+          data_disk_size_gb: $(echo "$INVENTORY_JSON" | jq -r '.hardware.data_disk_size_gb // 0')
+          base_image_path: "/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"
+          network_name: "${VM_NET_NAME}"
+          mac: "$(echo "$INVENTORY_JSON" | jq -r '.identity.mac // ""')"
+          static_ipv4_cidr: "$(echo "$INVENTORY_JSON" | jq -r '.network.static_ipv4_cidr // ""')"
+          gateway_ipv4: "$(echo "$INVENTORY_JSON" | jq -r '.network.gateway // ""')"
+          dns_servers: $(echo "$INVENTORY_JSON" | jq -c '.network.dns // ["1.1.1.1","8.8.8.8"]')
+          ssh_user: ${VM_SSH_USER}
+          ssh_authorized_keys:
+            - "${{ steps.ssh_keypair.outputs.public_key }}"
+          enable_gpu_passthrough: $(echo "$INVENTORY_JSON" | jq -r '.hardware.enable_gpu_passthrough // false')
+          gpu_pci_address: "$(echo "$INVENTORY_JSON" | jq -r '.hardware.gpu_pci_address // ""')"
+          tfc_organization: "${TFC_ORG}"
+          tfc_workspace: "${TFC_WORKSPACE}"
+          github_repo: "${{ github.repository }}"
+          github_runner_version: "${{ steps.versions.outputs.github_runner }}"
+          console_username: "${{ steps.console_creds.outputs.console_username }}"
+          VARS
+
+          # Render both terragrunt templates (same pattern as cloud-init rendering)
+          ansible localhost -m template \
+            -a "src=vm-builder/vm-builder-templates/infra/terragrunt/terragrunt.hcl.j2 dest=vm-builder/vm-builder-templates/infra/terragrunt/terragrunt.hcl" \
+            -e "@/tmp/tg_vars.yml"
+
+          ansible localhost -m template \
+            -a "src=vm-builder/vm-builder-templates/infra/terragrunt/live/media-stack-single-node/terragrunt.hcl.j2 dest=vm-builder/vm-builder-templates/infra/terragrunt/live/media-stack-single-node/terragrunt.hcl" \
+            -e "@/tmp/tg_vars.yml"
+
+          echo "=== Rendered root terragrunt.hcl ==="
+          cat vm-builder/vm-builder-templates/infra/terragrunt/terragrunt.hcl
+          echo ""
+          echo "=== Rendered child terragrunt.hcl ==="
+          cat vm-builder/vm-builder-templates/infra/terragrunt/live/media-stack-single-node/terragrunt.hcl
+
+          # Compose env vars for hypervisor — the static HCL files use get_env()
+          # to stay generic/shareable, and tg.env provides the VM-specific values
+          VM_HOSTNAME=$(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          SSH_USER=$(echo "$INVENTORY_JSON" | jq -r '.ssh.user')
+          if [ -z "$SSH_USER" ] || [ "$SSH_USER" = "null" ]; then
+            echo "ERROR: .ssh.user not found in VM inventory" >&2
+            echo "Inventory key: ${{ inputs.inventory_key }}" >&2
+            echo "Ensure the VM BWS inventory has ssh.user set" >&2
+            exit 1
+          fi
+          DNS_CSV=$(echo "$INVENTORY_JSON" | jq -r '(.network.dns // ["1.1.1.1","8.8.8.8"]) | join(",")')
+          cat > tg.env <<EOF
+          export TF_CLOUD_TOKEN="${TFC_TOKEN}"
+          export TF_TOKEN_app_terraform_io="${TFC_TOKEN}"
+          export TG_TFC_ORGANIZATION="${TFC_ORG}"
+          export TG_NAME="${VM_HOSTNAME}"
+          export TG_VCPU=$(echo "$INVENTORY_JSON" | jq -r '.hardware.vcpu')
+          export TG_MEMORY_MB=$(echo "$INVENTORY_JSON" | jq -r '.hardware.memory_mb')
+          export TG_DISK_SIZE_GB=$(echo "$INVENTORY_JSON" | jq -r '.hardware.disk_size_gb')
+          export TG_DATA_DISK_SIZE_GB=$(echo "$INVENTORY_JSON" | jq -r '.hardware.data_disk_size_gb // 0')
+          export TG_NETWORK_NAME="${VM_NET_NAME}"
+          export TG_MAC="$(echo "$INVENTORY_JSON" | jq -r '.identity.mac // ""')"
+          export TG_STATIC_IPV4_CIDR="$(echo "$INVENTORY_JSON" | jq -r '.network.static_ipv4_cidr // ""')"
+          export TG_GATEWAY_IPV4="$(echo "$INVENTORY_JSON" | jq -r '.network.gateway // ""')"
+          export TG_DNS_SERVERS_CSV="${DNS_CSV}"
+          export TG_SSH_AUTH_KEYS_CSV="${{ steps.ssh_keypair.outputs.public_key }}"
+          export TG_ANSIBLE_USER="${SSH_USER}"
+          export TG_ENABLE_GPU_PASSTHROUGH=$(echo "$INVENTORY_JSON" | jq -r '.hardware.enable_gpu_passthrough // false')
+          export TG_GPU_PCI_ADDRESS="$(echo "$INVENTORY_JSON" | jq -r '.hardware.gpu_pci_address // ""')"
+          export TG_TAILSCALE_AUTH_KEY="${{ steps.vm_ts_auth.outputs.auth_key }}"
+          export TG_RUNNER_TOKEN="${{ steps.runner_token.outputs.token }}"
+          export TG_GITHUB_RUNNER_VERSION="${{ steps.versions.outputs.github_runner }}"
+          export TG_GITHUB_REPO="${{ github.repository }}"
+          export TG_BWS_ACCESS_TOKEN="${{ secrets.BWS_ACCESS_TOKEN }}"
+          export TG_INVENTORY_KEY="${{ inputs.inventory_key }}"
+          export TG_SSH_PRIVATE_KEY_B64="${{ steps.ssh_keypair.outputs.private_key_b64 }}"
+          export TG_CONSOLE_USERNAME="${{ steps.console_creds.outputs.console_username }}"
+          export TG_CONSOLE_PASSWORD="${{ steps.console_creds.outputs.console_password }}"
+          export TG_USER_DATA_CONTENT_B64='${{ steps.render_cloudinit.outputs.content_b64 }}'
+          EOF
+
+      - name: Run Terragrunt apply on hypervisor via Tailscale SSH
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          HV_IP="${{ steps.hypervisor.outputs.hypervisor_ts_ip }}"
+          HV_USER="${{ steps.hypervisor_config.outputs.ssh_user }}"
+          TS_SSH="tailscale --socket=/tmp/tailscaled.sock ssh"
+
+          echo "Running Terragrunt on hypervisor at $HV_IP as $HV_USER"
+
+          # Upload env file to hypervisor
+          $TS_SSH ${HV_USER}@${HV_IP} 'cat > /tmp/media-stack-tg/tg.env' < tg.env
+
+          # Run terragrunt on hypervisor
+          # shellcheck disable=SC2016
+          $TS_SSH ${HV_USER}@${HV_IP} 'set -euo pipefail
+            set -a
+            source /tmp/media-stack-tg/tg.env
+            set +a
+            cd /tmp/media-stack-tg/vm-builder/vm-builder-templates/infra/terragrunt/live/media-stack-single-node
+            export TF_IN_AUTOMATION=true
+            export TG_MODULE_SOURCE="/tmp/media-stack-tg/vm-builder/vm-builder-templates/infra/terraform/modules/k3s-vm-gpu"
+
+            # Pre-flight: verify Terraform Cloud is reachable (with retry)
+            echo "Checking Terraform Cloud connectivity..."
+            for attempt in 1 2 3; do
+              if curl -sf --max-time 10 https://app.terraform.io/.well-known/terraform.json >/dev/null 2>&1; then
+                echo "✅ Terraform Cloud reachable"
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "❌ Cannot reach app.terraform.io after 3 attempts"
+                echo "DNS check:"
+                dig +short app.terraform.io || echo "dig failed"
+                echo "Default route:"
+                ip route show default || echo "no default route"
+                exit 1
+              fi
+              echo "Attempt $attempt/3 failed — retrying in 10s..."
+              sleep 10
+            done
+
+            terragrunt init
+
+            # Full workspace destroy to ensure clean state
+            echo "Destroying existing resources..."
+            terragrunt destroy -auto-approve 2>&1 || true
+
+            # Defensive cleanup: remove any orphaned libvirt domain/volumes
+            # that survive a no-op terragrunt destroy (e.g. TFC state empty
+            # but domain exists from a previous failed apply).
+            if [ -n "${TG_NAME:-}" ]; then
+              echo "Post-destroy libvirt cleanup for: ${TG_NAME}"
+              sudo virsh destroy "${TG_NAME}" 2>/dev/null || true
+              if sudo virsh dominfo "${TG_NAME}" >/dev/null 2>&1; then
+                sudo virsh undefine "${TG_NAME}" --remove-all-storage 2>/dev/null || \
+                  sudo virsh undefine "${TG_NAME}" 2>/dev/null || true
+              fi
+              # Remove orphaned volumes matching the VM name
+              for vol in $(sudo virsh vol-list --pool default 2>/dev/null | grep "${TG_NAME}" | sed "s/^ *//" | cut -d" " -f1); do
+                echo "Removing orphaned volume: ${vol}"
+                sudo virsh vol-delete "${vol}" --pool default 2>/dev/null || true
+              done
+              echo "Libvirt cleanup complete"
+            fi
+
+            echo "Running terragrunt plan..."
+            terragrunt plan -input=false
+
+            echo "Running terragrunt apply..."
+            terragrunt apply -auto-approve
+          '
+
+      # NOTE: The following steps are REMOVED - they now happen in Phase 2.5:
+      # - Join VM to Tailscale (via bootstrap orchestration playbook)
+      # - Tag VM (via bootstrap orchestration playbook)
+      # - Verify base OS (via bootstrap orchestration playbook)
+      #
+      # Phase 2 ends here. VM is provisioned with cloud-init.
+      # Phase 2.5 runs ON the VM via GitHub Actions runner and handles:
+      #   - Install BWS CLI, GitHub CLI
+      #   - Join Tailscale (01-join-via-oauth.yml)
+      #   - Verify tools and network
+      #   - Write bootstrap state to BWS
+      # Verification report upload removed - no report generated in Phase 2
+      # Phase 2.5 will handle verification and reporting
+
+      - name: Clear stale app/config state from BWS inventory
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "" ]; then
+            echo "No inventory found at $INVENTORY_KEY — skipping state clear"
+          else
+            CURRENT=$(get_val "$SECRET_ID")
+
+            # Clear ephemeral state that becomes invalid after re-provisioning:
+            #   _state.apps   — install/config status per app
+            #   _state.storage — active mount state
+            #   _config        — runtime config overrides
+            #   _overrides     — user overrides
+            UPDATED=$(echo "$CURRENT" | jq '
+              del(._state.apps) |
+              del(._state.storage) |
+              del(._config) |
+              del(._overrides)
+            ')
+
+            bws secret edit --value "$UPDATED" "$SECRET_ID"
+            echo "Cleared _state.apps, _state.storage, _config, _overrides from BWS inventory"
+          fi
+
+      - name: Tailscale teardown
+        if: always()
+        shell: bash
+        env:
+          TS_ACCESS_TOKEN: ${{ steps.ts_api_token.outputs.access_token }}
+        run: |
+          # Get our own device ID before logout
+          SELF_ID=$(tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null | jq -r '.Self.ID // empty') || true
+          # Logout locally
+          tailscale --socket=/tmp/tailscaled.sock logout || true
+          killall tailscaled 2>/dev/null || true
+          # Delete device from tailnet
+          if [ -n "${SELF_ID:-}" ]; then
+            curl -sS -o /dev/null -w "HTTP:%{http_code}\n" -X DELETE \
+              -H "Authorization: Bearer $TS_ACCESS_TOKEN" \
+              "https://api.tailscale.com/api/v2/device/${SELF_ID}" || true
+          fi
+
+      - uses: ./.github/actions/tailscale-delete-device
+        if: always()
+        with:
+          hostname: ${{ steps.ts_preclean.outputs.ts_hostname }}
+          access_token: ${{ steps.ts_api_token.outputs.access_token }}
+
+  call-phase2-5:
+    needs: provision
+    uses: ./.github/workflows/phase2.5-vm-self-bootstrap.yml
+    with:
+      vm_hostname: ${{ needs.provision.outputs.vm_hostname }}
+      inventory_key: ${{ inputs.inventory_key }}
+    secrets: inherit

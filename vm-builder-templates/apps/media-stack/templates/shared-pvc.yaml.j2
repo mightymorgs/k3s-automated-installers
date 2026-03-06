@@ -1,0 +1,19 @@
+---
+# Media Stack Shared PVC (J2 template)
+# Defaults match k8s-standalone/overlays/gcp/shared-storage-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ media_pvc_name | default('media-shared-pvc') }}
+  namespace: {{ media_namespace | default('media-stack') }}
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+spec:
+  accessModes:
+    - {{ media_pvc_access_mode | default('ReadWriteMany') }}
+  storageClassName: {{ media_storage_class | default('longhorn') }}
+  resources:
+    requests:
+      storage: {{ media_shared_storage_size | default('100Gi') }}

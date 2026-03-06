@@ -1,0 +1,142 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/qbittorrent/01-configure-auth"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/qbittorrent/config/01-configure-auth.yml"
+#     category: "apps"
+#     subsystem: "qbittorrent"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["qbittorrent_deployed"]
+#   provides: ["qbittorrent_auth_configured"]
+#   tags: ["qbittorrent", "webui", "auth", "configuration"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure qBittorrent WebUI auth bypass for pod/service networks
+#   requires_apps: ["qbittorrent"]
+
+- name: Configure qBittorrent WebUI Authentication
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    qbittorrent_namespace: "media-stack"
+    app_namespace: "{{ qbittorrent_namespace }}"
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+
+  tasks:
+    # ========== CHECK IF QBITTORRENT IS DEPLOYED ==========
+    - name: Check if qBittorrent is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=qbittorrent
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: qbittorrent_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if qBittorrent not deployed
+      ansible.builtin.meta: end_play
+      when: qbittorrent_check.rc != 0 or qbittorrent_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get qBittorrent pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ app_namespace }} \
+          -l app.kubernetes.io/name=qbittorrent \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ app_namespace }} \
+          -l app=qbittorrent \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+
+    - name: Wait for qBittorrent pod to be ready
+      ansible.builtin.command: >-
+        kubectl wait pod/{{ app_pod.stdout }}
+        -n {{ app_namespace }}
+        --for=condition=Ready
+        --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+
+    - name: Check if config file exists
+      ansible.builtin.command: >-
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }}
+        -- test -f /config/qBittorrent/qBittorrent.conf
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: config_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Configure WebUI auth bypass settings
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- sh -c "
+          CONFIG_FILE=/config/qBittorrent/qBittorrent.conf
+
+          # Backup existing config
+          if [ -f \$CONFIG_FILE ]; then
+            cp \$CONFIG_FILE \${CONFIG_FILE}.bak
+          fi
+
+          # Remove old auth settings if they exist
+          sed -i '/^WebUI\\\\LocalHostAuth=/d' \$CONFIG_FILE 2>/dev/null || true
+          sed -i '/^WebUI\\\\AuthSubnetWhitelistEnabled=/d' \$CONFIG_FILE 2>/dev/null || true
+          sed -i '/^WebUI\\\\AuthSubnetWhitelist=/d' \$CONFIG_FILE 2>/dev/null || true
+
+          # Ensure [Preferences] section exists
+          if ! grep -q '^\[Preferences\]' \$CONFIG_FILE 2>/dev/null; then
+            echo '[Preferences]' >> \$CONFIG_FILE
+          fi
+
+          # Add auth bypass settings using printf for multiline
+          printf '%s\n%s\n%s\n' \
+            'WebUI\\LocalHostAuth=false' \
+            'WebUI\\AuthSubnetWhitelistEnabled=true' \
+            'WebUI\\AuthSubnetWhitelist={{ k3s_pod_cidr | default("10.42.0.0/16") }}, {{ k3s_service_cidr | default("10.43.0.0/16") }}, 100.64.0.0/10' \
+            >> \$CONFIG_FILE
+        "
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: config_exists.rc == 0
+      changed_when: true
+
+    - name: Restart qBittorrent to apply settings
+      ansible.builtin.command: >-
+        kubectl delete pod {{ app_pod.stdout }} -n {{ app_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: config_exists.rc == 0
+      changed_when: true
+
+    - name: Wait for qBittorrent to be ready after restart
+      ansible.builtin.command: >-
+        kubectl wait pod/{{ app_pod.stdout }}
+        -n {{ app_namespace }}
+        --for=condition=Ready
+        --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: config_exists.rc == 0
+      changed_when: false
+
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "qBittorrent WebUI Auth Configured"
+          - "=========================================="
+          - "Settings applied:"
+          - "  - LocalHostAuth: disabled"
+          - "  - Subnet whitelist: enabled"
+          - "  - Allowed networks: Pod CIDR + Tailscale"
+          - "=========================================="

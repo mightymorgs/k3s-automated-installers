@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jellyfin-config
+  namespace: jellyfin
+  labels:
+    app.kubernetes.io/name: jellyfin
+data:
+  # Configuration will be populated by ansible
+  APP_URL: "https://jellyfin.example.com"

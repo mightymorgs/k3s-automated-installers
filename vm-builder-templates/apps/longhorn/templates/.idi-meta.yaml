@@ -1,0 +1,11 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  deployment.yaml.j2:
+    summary: 'Jinja2 template: deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  storageclass.yaml.j2:
+    summary: 'Jinja2 template: storageclass.yaml.j2'
+    source: inferred
+    confidence: medium

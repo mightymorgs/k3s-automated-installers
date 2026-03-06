@@ -1,0 +1,35 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  dashboard-ingressroute.yaml.j2:
+    summary: 'Jinja2 template: dashboard-ingressroute.yaml.j2'
+    source: inferred
+    confidence: medium
+  deployment.yaml.j2:
+    summary: 'Jinja2 template: deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  middlewares.yaml.j2:
+    summary: 'Jinja2 template: middlewares.yaml.j2'
+    source: inferred
+    confidence: medium
+  rbac.yaml.j2:
+    summary: 'Jinja2 template: rbac.yaml.j2'
+    source: inferred
+    confidence: medium
+  servertransports.yaml.j2:
+    summary: 'Jinja2 template: servertransports.yaml.j2'
+    source: inferred
+    confidence: medium
+  service.yaml.j2:
+    summary: 'Jinja2 template: service.yaml.j2'
+    source: inferred
+    confidence: medium
+  serviceaccount.yaml.j2:
+    summary: 'Jinja2 template: serviceaccount.yaml.j2'
+    source: inferred
+    confidence: medium
+  tlsoptions.yaml.j2:
+    summary: 'Jinja2 template: tlsoptions.yaml.j2'
+    source: inferred
+    confidence: medium

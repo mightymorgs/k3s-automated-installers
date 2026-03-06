@@ -1,0 +1,71 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  05-wire-alertmanager.yml:
+    summary: 'Configure Loki''s ruler component to send alerts to Alertmanager. Patches
+      the loki-config ConfigMap to add the ruler section with alertmanager_url pointing
+      to the Alertmanager K8s service, then restarts Loki to pick up the new config.
+      Idempotent: checks if ruler alertmanager_url is already configured before patching.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ loki_url }}/ready'
+    requires_apps:
+    - alertmanager
+    references_services:
+    - alertmanager
+  06-deploy-alloy.yml:
+    summary: Deploy Grafana Alloy DaemonSet for log collection into Loki. Loki is
+      deployed but receives zero logs without a collector. Alloy runs on every node,
+      collects from /var/log/pods/**/*.log using loki.source.kubernetes, and pushes
+      to the Loki HTTP endpoint. Includes ServiceAccount with RBAC for pod/namespace
+      discovery.
+    source: inferred
+    confidence: medium
+    references_services:
+    - loki-push
+  07-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to the Loki statefulset. Loki natively
+      exposes metrics on port 3100 at /metrics. This playbook adds pod-level annotations
+      so Prometheus auto-discovers and scrapes the metrics endpoint via its kubernetes-pods
+      scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+  08-configure-alert-rules.yml:
+    summary: 'Push LogQL alert rules to the Loki Ruler via its HTTP API. The ruler
+      must already be configured with alertmanager_url and enable_api: true (done
+      by loki/config/05-wire-alertmanager.yml). Rules cover five log-based alerts:
+      arr import failures, download client disconnects, vault audit errors, authentication
+      failure spikes, and cert renewal errors. Uses the Loki Ruler API (POST /loki/api/v1/rules/{namespace})
+      to create or update rules. Idempotent: checks existing rules before pushing.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ loki_url }}/loki/api/v1/rules'
+    - '{{ loki_url }}/loki/api/v1/rules/{{ ruler_namespace }}'
+    - '{{ loki_url }}/loki/api/v1/rules/{{ ruler_namespace }}'
+    - '{{ loki_url }}/loki/api/v1/rules'
+    requires_apps:
+    - alertmanager
+  09-enable-prometheus-remote-write.yml:
+    summary: 'Configure Loki''s ruler to push Loki-derived metrics to Prometheus via
+      remote_write. Also enables the remote write receiver on the Prometheus deployment.
+      Patches both the Loki ConfigMap and the Prometheus deployment args, then restarts
+      both services. Idempotent: checks existing config before patching.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prometheus_remote_write_url }}'
+    - '{{ prometheus_remote_write_url }}'' > "$TMPFILE'
+    - '{{ loki_url }}/ready'
+    requires_apps:
+    - prometheus
+    references_services:
+    - prometheus-remote-write
+depends_on_apps:
+- alertmanager
+- loki-push
+- prometheus
+- prometheus-remote-write

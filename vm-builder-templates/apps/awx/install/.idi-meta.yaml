@@ -1,0 +1,11 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy-operator.yml:
+    summary: Deploy AWX operator and instance for in-cluster Ansible automation
+    source: inferred
+    confidence: medium
+    references_services:
+    - awx-operator
+depends_on_apps:
+- awx-operator

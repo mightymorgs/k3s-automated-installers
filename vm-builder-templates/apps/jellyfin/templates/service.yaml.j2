@@ -1,0 +1,22 @@
+---
+# Jellyfin Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('jellyfin') }}
+  namespace: {{ app_namespace | default('jellyfin') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('jellyfin') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name | default('jellyfin') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(8096) }}
+      targetPort: http
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30809) }}
+{% endif %}
+      protocol: TCP

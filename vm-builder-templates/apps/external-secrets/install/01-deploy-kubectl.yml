@@ -1,0 +1,438 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/external-secrets/01-deploy-kubectl"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/external-secrets/install/01-deploy-kubectl.yml"
+#     category: "apps"
+#     subsystem: "external-secrets"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "external-secrets-operator"
+#       supported_versions: ["0.9.x"]
+#       version_range: ">=0.9.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - eso: "v0.9.13"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-03-03"
+#         notes: "Static manifest deployment (no Helm) with cert-controller for webhook TLS"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260303_helm_removal"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["eso_deployed"]
+#   tags: ["eso", "external-secrets", "static-manifests", "golden-master"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy External Secrets Operator via static manifests (J2 templates).
+#     Three components: controller, webhook, and cert-controller.
+#     The cert-controller generates and rotates TLS certificates for the
+#     webhook autonomously. CRDs downloaded from GitHub for version pinning.
+#   namespace: "external-secrets"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: false
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: false
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.external-secrets.status"
+#         example: "ready"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "External Secrets Operator"
+#     icon: "key"
+#     category: "Security"
+#     description: "Kubernetes operator to sync secrets from external stores"
+#     docs_url: "https://external-secrets.io/"
+#     port: null
+#     nodeport: null
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     eso_version:
+#       label: "ESO Version"
+#       description: "External Secrets Operator container image tag"
+#       type: "string"
+#       default: "v0.9.13"
+#     eso_replicas:
+#       label: "Replicas"
+#       description: "Number of ESO controller replicas"
+#       type: "integer"
+#       default: "1"
+#     eso_cpu_requests:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "100m"
+#     eso_cpu_limits:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "200m"
+#     eso_memory_requests:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "128Mi"
+#     eso_memory_limits:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "256Mi"
+#     eso_concurrent:
+#       label: "Concurrent Workers"
+#       description: "Number of concurrent reconciliation workers"
+#       type: "integer"
+#       default: "1"
+#     app_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace for ESO"
+#       type: "string"
+#       default: "external-secrets"
+
+- name: Deploy External Secrets Operator
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: external-secrets
+    app_namespace: "external-secrets"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/external-secrets-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    eso_version: "v0.9.13"
+    crds_url: "https://raw.githubusercontent.com/external-secrets/external-secrets/{{ eso_version }}/deploy/crds/bundle.yaml"
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+  tasks:
+    # ========== 1. VERIFY PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    # ========== 2. CLEAN UP OLD HELM-MANAGED ESO ==========
+    - name: Check if ESO was installed via Helm
+      ansible.builtin.shell: |
+        which helm >/dev/null 2>&1 && helm status external-secrets -n {{ app_namespace }} 2>/dev/null && echo "HELM_MANAGED" || echo "NOT_HELM"
+      register: helm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Remove Helm release metadata (migrate to static manifests)
+      when: "'HELM_MANAGED' in helm_check.stdout"
+      block:
+        - name: Uninstall Helm release (resources will be re-applied as static manifests)
+          ansible.builtin.shell: |
+            helm uninstall external-secrets -n {{ app_namespace }} --wait 2>/dev/null || true
+          changed_when: true
+
+        - name: Remove Helm labels from any surviving resources
+          ansible.builtin.shell: |
+            for resource in deployment/external-secrets deployment/external-secrets-webhook \
+              sa/external-secrets sa/external-secrets-webhook \
+              service/external-secrets-webhook secret/external-secrets-webhook; do
+              kubectl label "$resource" -n {{ app_namespace }} \
+                app.kubernetes.io/managed-by- helm.sh/chart- \
+                --ignore-not-found 2>/dev/null || true
+            done
+            for resource in clusterrole/external-secrets-controller \
+              clusterrole/external-secrets-cert-controller \
+              clusterrolebinding/external-secrets-controller \
+              clusterrolebinding/external-secrets-cert-controller; do
+              kubectl label "$resource" \
+                app.kubernetes.io/managed-by- helm.sh/chart- \
+                --ignore-not-found 2>/dev/null || true
+            done
+            echo "Helm labels removed"
+          changed_when: true
+
+    # ========== 3. INSTALL CRDs ==========
+    - name: Download ESO CRD bundle
+      ansible.builtin.get_url:
+        url: "{{ crds_url }}"
+        dest: "/tmp/eso-crds.yaml"
+        mode: '0644'
+
+    - name: Apply ESO CRDs
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/eso-crds.yaml --server-side --force-conflicts
+      register: crds_apply
+      changed_when: "'created' in crds_apply.stdout or 'configured' in crds_apply.stdout"
+
+    - name: Wait for ESO CRDs to be established
+      ansible.builtin.command: >-
+        kubectl wait --for=condition=established
+        crd/externalsecrets.external-secrets.io
+        crd/secretstores.external-secrets.io
+        crd/clustersecretstores.external-secrets.io
+        --timeout=60s
+      changed_when: false
+
+    # ========== 4. CREATE NAMESPACE ==========
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name=external-secrets
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 5. RENDER J2 TEMPLATES ==========
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render controller ServiceAccount
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/controller-serviceaccount.yaml.j2"
+        dest: "{{ render_dir }}/controller-serviceaccount.yaml"
+        mode: '0644'
+
+    - name: Render webhook ServiceAccount
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/webhook-serviceaccount.yaml.j2"
+        dest: "{{ render_dir }}/webhook-serviceaccount.yaml"
+        mode: '0644'
+
+    - name: Render cert-controller ServiceAccount
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/cert-controller-serviceaccount.yaml.j2"
+        dest: "{{ render_dir }}/cert-controller-serviceaccount.yaml"
+        mode: '0644'
+
+    - name: Render controller RBAC
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/controller-rbac.yaml.j2"
+        dest: "{{ render_dir }}/controller-rbac.yaml"
+        mode: '0644'
+
+    - name: Render cert-controller RBAC
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/cert-controller-rbac.yaml.j2"
+        dest: "{{ render_dir }}/cert-controller-rbac.yaml"
+        mode: '0644'
+
+    - name: Render webhook Secret (empty skeleton for cert-controller)
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/webhook-secret.yaml.j2"
+        dest: "{{ render_dir }}/webhook-secret.yaml"
+        mode: '0644'
+
+    - name: Render webhook Service
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/webhook-service.yaml.j2"
+        dest: "{{ render_dir }}/webhook-service.yaml"
+        mode: '0644'
+
+    - name: Render ValidatingWebhookConfigurations
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/validatingwebhooks.yaml.j2"
+        dest: "{{ render_dir }}/validatingwebhooks.yaml"
+        mode: '0644'
+
+    - name: Render controller Deployment
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/controller-deployment.yaml.j2"
+        dest: "{{ render_dir }}/controller-deployment.yaml"
+        mode: '0644'
+
+    - name: Render webhook Deployment
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/webhook-deployment.yaml.j2"
+        dest: "{{ render_dir }}/webhook-deployment.yaml"
+        mode: '0644'
+
+    - name: Render cert-controller Deployment
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/cert-controller-deployment.yaml.j2"
+        dest: "{{ render_dir }}/cert-controller-deployment.yaml"
+        mode: '0644'
+
+    # ========== 6. APPLY RENDERED MANIFESTS ==========
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg:
+          - "Protected: {{ protected_apply.stdout_lines | default([]) }}"
+          - "Workloads: {{ workload_apply.stdout_lines | default([]) }}"
+
+    # ========== 7. WAIT FOR CERT-CONTROLLER ==========
+    - name: Wait for cert-controller pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name=external-secrets-cert-controller
+        --timeout={{ app_start_timeout_seconds }}s
+      register: certctrl_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: certctrl_wait.rc == 0
+
+    - name: Wait for cert-controller to populate webhook Secret
+      ansible.builtin.shell: |
+        for i in $(seq 1 30); do
+          KEYS=$(kubectl get secret external-secrets-webhook \
+            -n {{ app_namespace }} \
+            -o jsonpath='{.data}' 2>/dev/null)
+          if echo "$KEYS" | grep -q "tls.crt"; then
+            echo "Webhook TLS cert populated"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Timeout waiting for webhook TLS cert"
+        exit 1
+      register: cert_wait
+      changed_when: false
+
+    # ========== 8. WAIT FOR ESO PODS ==========
+    - name: Wait for ESO controller pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name=external-secrets
+        --timeout={{ app_start_timeout_seconds }}s
+      register: controller_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: controller_wait.rc == 0
+
+    - name: Wait for ESO webhook pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name=external-secrets-webhook
+        --timeout={{ app_start_timeout_seconds }}s
+      register: webhook_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: webhook_wait.rc == 0
+
+    # ========== 9. VERIFY CRDs ==========
+    - name: Wait for all ESO CRDs to be established
+      ansible.builtin.shell: |
+        CRD_NAME="clustersecretstores.external-secrets.io"
+        for i in $(seq 1 60); do
+          if kubectl get crd "$CRD_NAME" >/dev/null 2>&1; then
+            STATUS=$(kubectl get crd "$CRD_NAME" \
+              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')
+            if echo "$STATUS" | grep -q True; then
+              echo "ESO CRDs ready"
+              exit 0
+            fi
+          fi
+          sleep 2
+        done
+        echo "Timeout waiting for ESO CRDs"
+        exit 1
+      changed_when: false
+
+    # ========== 10. DISPLAY STATUS ==========
+    - name: Get ESO pods
+      ansible.builtin.command:
+        cmd: kubectl -n {{ app_namespace }} get pods
+      register: eso_pods
+      changed_when: false
+
+    - name: Display ESO deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "External Secrets Operator Deployed"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: ghcr.io/external-secrets/external-secrets:{{ eso_version }}"
+          - "Install method: Static manifests (J2 templates)"
+          - "Components: controller, webhook, cert-controller"
+          - ""
+          - "ESO Pods:"
+          - "{{ eso_pods.stdout_lines }}"
+          - ""
+          - "Next: Phase 4 will configure Vault integration"
+          - "=========================================="
+
+    # ========== 11. CLEANUP ==========
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent
+
+    - name: Clean up CRDs download
+      ansible.builtin.file:
+        path: "/tmp/eso-crds.yaml"
+        state: absent

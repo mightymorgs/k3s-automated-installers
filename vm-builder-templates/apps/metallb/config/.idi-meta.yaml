@@ -1,0 +1,14 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  05-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to MetalLB controller deployment and
+      speaker daemonset. Both expose metrics on port 7472 at /metrics. This playbook
+      adds pod-level annotations so Prometheus auto-discovers and scrapes both endpoints
+      via its kubernetes-pods scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- prometheus

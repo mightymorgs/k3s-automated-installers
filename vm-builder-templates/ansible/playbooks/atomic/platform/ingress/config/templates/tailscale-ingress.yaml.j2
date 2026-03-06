@@ -1,0 +1,34 @@
+# ansible/playbooks/atomic/platform/ingress/config/templates/tailscale-ingress.yaml.j2
+# Standard K8s Ingress with ingressClassName: tailscale
+# The Tailscale K8s operator creates a proxy pod per Ingress, each
+# getting its own tailnet device, MagicDNS name, and Let's Encrypt cert.
+#
+# Variables:
+#   - app_name: Application name (REQUIRED)
+#   - subdomain: Subdomain / tailnet hostname for the app (REQUIRED)
+#   - service_name: K8s service name (REQUIRED)
+#   - service_port: K8s service port (REQUIRED)
+#   - app_namespace: K8s namespace (REQUIRED)
+#
+# Result: app accessible at https://{{ subdomain }}.{{ tailnet }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ app_name }}-ts-ingress
+  namespace: {{ app_namespace }}
+  labels:
+    app: {{ app_name }}
+    managed-by: ansible
+  annotations:
+    tailscale.com/http-redirect: "true"
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: {{ service_name }}
+      port:
+        number: {{ service_port }}
+  tls:
+    - hosts:
+        - {{ subdomain }}

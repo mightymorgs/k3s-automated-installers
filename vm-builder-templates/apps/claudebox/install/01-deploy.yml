@@ -1,0 +1,451 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/claudebox/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/claudebox/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "claudebox"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "claudebox"
+#       supported_versions: ["latest"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       vault: ">=1.15.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - claudebox: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-23"
+#         notes: "Created for golden path AI/LLM stack"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_server_installed", "vault_deployed", "eso_deployed"]
+#   provides: ["claudebox_deployed"]
+#   tags: ["claudebox", "ai", "sandbox", "claude-code", "llm-ops"]
+#   estimated_duration: 180
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Deploy Claudebox isolated sandbox environment for AI-assisted operations.
+#     Provides secure Claude Code CLI with MCP server access. Accessible via
+#     Tailscale on NodePort 30800.
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What this playbook reads from BWS
+#     reads:
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for ExternalSecret backend"
+#       - path: "_state.apps.vault_mcp.url"
+#         purpose: "Vault MCP server for Claude access"
+#       - path: "_state.apps.awx_mcp.url"
+#         purpose: "AWX MCP server for Claude access"
+#       - path: "_state.apps.k8s_rag_mcp.url"
+#         purpose: "K8s RAG MCP server for Claude access"
+#
+#     # What this playbook writes to BWS
+#     writes:
+#       - path: "_state.apps.claudebox.status"
+#         example: "ready"
+#       - path: "_state.apps.claudebox.url"
+#         example: "http://claudebox.ai-tools.svc:8080"
+#       - path: "_state.apps.claudebox.api_key"
+#         example: "generated-access-token"
+#       - path: "_state.apps.claudebox.nodeport"
+#         example: 30800
+#       - path: "_state.apps.claudebox.ingress_url"
+#         example: "https://claudebox.demo.com"
+#       - path: "_state.apps.claudebox.mcp_servers"
+#         example: ["vault-mcp", "awx-mcp", "k8s-rag-mcp"]
+#
+#   # ========== WIRING CONFIGURATION (v3.2 NEW) ==========
+#   wiring:
+#     # Claudebox connects to MCP servers (config playbook would handle this)
+#     can_wire_to: []
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "claudebox"
+#     service_name: "claudebox"
+#     service_port: 8080
+#     namespace: "ai-tools"
+#
+#     # Ingress mode from inventory
+#     mode_from_inventory: "ingress.mode"
+#
+#     # Cloudflare Tunnel mode
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#
+#       # Origin certificate (Cloudflare → Traefik HTTPS)
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#
+#     # Tailscale MagicDNS mode
+#     tailscale:
+#       in_cluster: true
+#
+#       # Tailscale certificate
+#       cert:
+#         method: "tailscale-cert"
+#
+#     # Path routing
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#
+#     # OAuth configuration
+#     oauth:
+#       client_id_format: "claudebox-{client}"
+#
+#       # Redirect URIs (mode-dependent)
+#       redirect_uri_template:
+#         cloudflare: "https://{subdomain}.{domain}/oauth/callback"
+#         tailscale: "https://{subdomain}.{vm_hostname}.{tailnet}/oauth/callback"
+#
+#       scopes: ["openid", "profile", "email"]
+#
+#     # ForwardAuth middleware configuration
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#
+#     # Bypass SSO for these paths
+#     bypass_paths:
+#       - "/health"
+#       - "/metrics"
+#
+#     # OAuth credentials written here
+#     credentials_path: "_state.apps.claudebox.oauth"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Claudebox"
+#     icon: "terminal"
+#     category: "AI Operations"
+#     description: "AI-assisted operations sandbox"
+#     docs_url: "https://github.com/anthropics/claude-code"
+#     port: 8080
+#     nodeport: 30800
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     app_name:
+#       label: "App Name"
+#       description: "Kubernetes resource name"
+#       type: "string"
+#       default: "claudebox"
+#     app_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace"
+#       type: "string"
+#       default: "ai-tools"
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for Claudebox"
+#       type: "string"
+#       default: "node:20-slim"
+#     image_pull_policy:
+#       label: "Image Pull Policy"
+#       description: "Kubernetes image pull policy"
+#       type: "choice"
+#       default: "IfNotPresent"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of Claudebox replicas"
+#       type: "integer"
+#       default: 1
+#     container_port:
+#       label: "Container Port"
+#       description: "Claudebox HTTP port"
+#       type: "integer"
+#       default: 8080
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "choice"
+#       default: "NodePort"
+#       options: ["NodePort", "ClusterIP", "LoadBalancer"]
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "integer"
+#       default: 30800
+#     service_account_name:
+#       label: "Service Account"
+#       description: "Kubernetes service account name"
+#       type: "string"
+#       default: "claudebox"
+#     mcp_servers:
+#       label: "MCP Servers"
+#       description: "Comma-separated list of MCP server names"
+#       type: "string"
+#       default: "vault-mcp,awx-mcp,k8s-rag-mcp"
+#     workspace_mount_path:
+#       label: "Workspace Mount Path"
+#       description: "Container path for workspace volume"
+#       type: "string"
+#       default: "/workspace"
+#     pvc_name:
+#       label: "PVC Name"
+#       description: "Name of the PersistentVolumeClaim for workspace"
+#       type: "string"
+#       default: "claudebox-workspace"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "500m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "1Gi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "2000m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "4Gi"
+#     run_as_user:
+#       label: "Run As User"
+#       description: "User ID for pod security context"
+#       type: "integer"
+#       default: 1000
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     storage_size:
+#       label: "Workspace Storage"
+#       description: "Persistent volume size for workspace data"
+#       type: "string"
+#       default: "20Gi"
+
+- name: Deploy Claudebox
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: claudebox
+    app_namespace: "ai-tools"
+    claudebox_image: "node:20-slim"
+    storage_size: "20Gi"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/claudebox-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+
+  tasks:
+    # ========== 1. VERIFY PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: nodes_check.rc == 0
+
+    # ========== 2. CREATE NAMESPACE ==========
+    - name: Ensure ai-tools namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 3. CREATE SERVICEACCOUNT & RBAC ==========
+    - name: Create Claudebox ServiceAccount
+      ansible.builtin.shell: |
+        kubectl apply -f - <<'EOF'
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: claudebox
+          namespace: {{ app_namespace }}
+        EOF
+      changed_when: false
+
+    - name: Create Claudebox ClusterRole
+      ansible.builtin.shell: |
+        kubectl apply -f - <<'EOF'
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: claudebox-reader
+        rules:
+          - apiGroups: [""]
+            resources: ["pods", "services", "configmaps", "secrets"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["apps"]
+            resources: ["deployments", "statefulsets"]
+            verbs: ["get", "list", "watch"]
+        EOF
+      changed_when: false
+
+    - name: Create Claudebox ClusterRoleBinding
+      ansible.builtin.shell: |
+        kubectl apply -f - <<'EOF'
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: claudebox-reader
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: claudebox-reader
+        subjects:
+          - kind: ServiceAccount
+            name: claudebox
+            namespace: {{ app_namespace }}
+        EOF
+      changed_when: false
+
+    # ========== 4. RENDER J2 TEMPLATES ==========
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render PVC template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/pvc.yaml.j2"
+        dest: "{{ render_dir }}/pvc.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Render Deployment template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/deployment.yaml.j2"
+        dest: "{{ render_dir }}/deployment.yaml"
+        mode: '0644'
+
+    # ========== 5. CLEAN UP OLD RESOURCES ==========
+    - name: Remove old claudebox-nodeport service if exists
+      ansible.builtin.command: >-
+        kubectl delete svc claudebox-nodeport -n {{ app_namespace }}
+      register: old_svc_delete
+      changed_when: "'deleted' in old_svc_delete.stdout"
+      failed_when: false
+
+    # ========== 6. APPLY RENDERED MANIFESTS ==========
+    # PVCs must always use 'apply' — replace --force triggers delete which
+    # blocks on pvc-protection finalizer while pods are mounted
+    - name: Apply PVC (never replace --force)
+      ansible.builtin.command: kubectl apply -f {{ render_dir }}/pvc.yaml
+      register: pvc_apply
+      changed_when: "'created' in pvc_apply.stdout or 'configured' in pvc_apply.stdout"
+
+    - name: Wait for PVC to be bound
+      ansible.builtin.command: >-
+        kubectl get pvc {{ pvc_name | default('claudebox-workspace') }}
+        -n {{ app_namespace }} -o jsonpath='{.status.phase}'
+      register: pvc_status
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: pvc_status.stdout == 'Bound'
+
+    - name: Apply Service
+      ansible.builtin.command: kubectl {{ kubectl_action }} -f {{ render_dir }}/service.yaml
+      register: svc_apply
+      changed_when: "'created' in svc_apply.stdout or 'configured' in svc_apply.stdout"
+
+    - name: Apply Deployment
+      ansible.builtin.command: kubectl {{ kubectl_action }} -f {{ render_dir }}/deployment.yaml
+      register: deploy_apply
+      changed_when: "'created' in deploy_apply.stdout or 'configured' in deploy_apply.stdout"
+
+    # ========== 7. WAIT FOR ROLLOUT ==========
+    - name: Wait for Claudebox deployment to be ready
+      ansible.builtin.command: >-
+        kubectl rollout status deployment/claudebox
+        -n {{ app_namespace }} --timeout=300s
+      register: rollout_status
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: rollout_status.rc == 0
+
+    # ========== 8. DISPLAY STATUS ==========
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Claudebox Deployment Complete"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ claudebox_image }}"
+          - "Service: NodePort (30800)"
+          - "PVC: claudebox-workspace ({{ storage_size }})"
+          - "=========================================="
+
+    # ========== 9. WRITE TO BWS._state ==========
+    - name: Write Claudebox state to BWS
+      ansible.builtin.debug:
+        msg: "TODO: Call generic BWS writeback playbook with Claudebox state"
+      # This will be implemented when generic writeback playbook exists
+      # vars:
+      #   app_name: "claudebox"
+      #   app_state:
+      #     status: "ready"
+      #     url: "http://claudebox.ai-tools.svc:8080"
+      #     nodeport: 30800
+      #     mcp_servers: ["vault-mcp", "awx-mcp", "k8s-rag-mcp"]
+
+    # ========== 10. CLEANUP ==========
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

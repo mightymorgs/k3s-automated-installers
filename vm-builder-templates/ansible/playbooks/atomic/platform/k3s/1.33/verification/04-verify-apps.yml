@@ -1,0 +1,236 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/verification/04-verify-apps"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/verification/04-verify-apps.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-13"
+#         notes: "Verifies StatefulSets, pods, services, and PVCs for media-stack apps"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["media_stack_apps_deployed"]
+#   provides: ["media_stack_verified"]
+#   tags: ["k3s", "media-stack", "verification", "health-check"]
+#   estimated_duration: 120
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify media stack applications are running and healthy
+- name: Verify Media Stack Applications
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    expected_apps:
+      - name: sonarr
+        port: 8989
+        path: /ping
+      - name: radarr
+        port: 7878
+        path: /ping
+      - name: prowlarr
+        port: 9696
+        path: /ping
+      - name: sabnzbd
+        port: 8080
+        path: /
+      - name: qbittorrent
+        port: 8080
+        path: /
+      - name: overseerr
+        port: 5055
+        path: /
+      - name: tautulli
+        port: 8181
+        path: /
+      - name: authentik-server
+        port: 9000
+        path: /-/health/live/
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display verification information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Verifying Media Stack Applications
+          - ==========================================
+          - 'Checking: StatefulSets, Pods, Services'
+          - 'Namespace: media-stack'
+          - ==========================================
+    - name: Check if media-stack namespace exists
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: namespace_check
+      failed_when: namespace_check.resources | length == 0
+    - name: Get all StatefulSets in media-stack namespace
+      kubernetes.core.k8s_info:
+        kind: StatefulSet
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: statefulsets
+    - name: Verify all expected StatefulSets exist
+      ansible.builtin.assert:
+        that:
+          - statefulsets.resources | length >= 8
+          - "'sonarr' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'radarr' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'prowlarr' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'sabnzbd' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'qbittorrent' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'overseerr' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'tautulli' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'authentik-server' in (statefulsets.resources | map(attribute='metadata.name')\
+            \ | list)"
+        fail_msg: Not all expected StatefulSets are present
+        success_msg: All expected StatefulSets are present
+    - name: Verify StatefulSets are ready
+      ansible.builtin.assert:
+        that:
+          - item.status.readyReplicas | default(0) >= 1
+          - item.status.replicas | default(0) >= 1
+        fail_msg: StatefulSet {{ item.metadata.name }} is not ready
+        success_msg: StatefulSet {{ item.metadata.name }} is ready
+      loop: '{{ statefulsets.resources }}'
+      loop_control:
+        label: '{{ item.metadata.name }}'
+    - name: Get all Pods in media-stack namespace
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: pods
+    - name: Verify all pods are running
+      ansible.builtin.assert:
+        that:
+          - item.status.phase == "Running"
+          - >-
+            item.status.conditions
+            | selectattr('type', 'equalto', 'Ready')
+            | selectattr('status', 'equalto', 'True')
+            | list | length > 0
+        fail_msg: Pod {{ item.metadata.name }} is not running or ready
+        success_msg: Pod {{ item.metadata.name }} is running and ready
+      loop: '{{ pods.resources }}'
+      loop_control:
+        label: '{{ item.metadata.name }}'
+    - name: Get all Services in media-stack namespace
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: services
+    - name: Verify all expected Services exist
+      ansible.builtin.assert:
+        that:
+          - services.resources | length >= 8
+          - "'sonarr' in (services.resources | map(attribute='metadata.name') |\
+            \ list)"
+          - "'radarr' in (services.resources | map(attribute='metadata.name') |\
+            \ list)"
+          - "'prowlarr' in (services.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'sabnzbd' in (services.resources | map(attribute='metadata.name') |\
+            \ list)"
+          - "'qbittorrent' in (services.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'overseerr' in (services.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'tautulli' in (services.resources | map(attribute='metadata.name')\
+            \ | list)"
+          - "'authentik' in (services.resources | map(attribute='metadata.name')\
+            \ | list)"
+        fail_msg: Not all expected Services are present
+        success_msg: All expected Services are present
+    - name: Verify NFS PVC exists and is bound
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        name: nfs-media-pvc
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: nfs_pvc
+      failed_when: >
+        nfs_pvc.resources | length == 0 or
+        nfs_pvc.resources[0].status.phase != 'Bound'
+    - name: Get volumeClaimTemplate PVCs
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: all_pvcs
+    - name: Verify config PVCs are bound
+      ansible.builtin.assert:
+        that: [item.status.phase == "Bound"]
+        fail_msg: PVC {{ item.metadata.name }} is not bound
+        success_msg: PVC {{ item.metadata.name }} is bound
+      loop: "{{ all_pvcs.resources | selectattr('metadata.name', 'match', '^config-.*') | list }}"
+      loop_control:
+        label: '{{ item.metadata.name }}'
+      when: all_pvcs.resources | selectattr('metadata.name', 'match', '^config-.*')
+        | list | length > 0
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Media Stack Verification Complete!
+          - ==========================================
+          - ''
+          - 'Namespace: ✓'
+          - 'StatefulSets: {{ statefulsets.resources | length }} (expected 8)'
+          - >-
+            Pods Running:
+            {{
+              pods.resources | selectattr('status.phase', 'equalto', 'Running')
+            | list | length
+            }}/{{ pods.resources | length }}
+          - 'Services: {{ services.resources | length }} (expected 8+)'
+          - >-
+            PVCs Bound:
+            {{
+              all_pvcs.resources | selectattr('status.phase', 'equalto', 'Bound')
+            | list | length
+            }}/{{ all_pvcs.resources | length }}
+          - ''
+          - 'Applications Status:'
+          - '{% for ss in statefulsets.resources %}'
+          - >-
+            {{ ss.metadata.name }}:
+            {{ ss.status.readyReplicas | default(0) }}/{{ ss.status.replicas | default(0)
+            }} ready
+          - '{% endfor %}'
+          - ==========================================
+          - All checks passed! ✓
+          - ==========================================

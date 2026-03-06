@@ -1,0 +1,94 @@
+---
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: awx
+  namespace: awx
+  labels:
+    app.kubernetes.io/name: awx
+    app.kubernetes.io/component: automation-platform
+    app.kubernetes.io/part-of: golden-master
+spec:
+  # Service configuration
+  service_type: ClusterIP  # Use ClusterIP and expose via Traefik IngressRoute
+
+  # Ingress configuration (disabled - using Traefik IngressRoute instead)
+  ingress_type: none
+
+  # PostgreSQL storage configuration
+  postgres_storage_class: longhorn
+  postgres_storage_requirements:
+    requests:
+      storage: 10Gi
+
+  # Projects persistence (for SCM/Git checkouts)
+  projects_persistence: true
+  projects_storage_class: longhorn
+  projects_storage_size: 10Gi
+  projects_existing_claim: ""  # Will be auto-created by operator
+
+  # Resource requirements for AWX pods
+  web_resource_requirements:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  task_resource_requirements:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  ee_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  redis_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Replicas
+  web_replicas: 1
+  task_replicas: 1
+
+  # Admin account configuration
+  # Password will be auto-generated and stored in Secret: awx-admin-password
+  admin_user: admin
+
+  # Auto-upgrade PostgreSQL when needed
+  postgres_data_volume_init: true
+
+  # Execution environment (container image for running Ansible)
+  # Default is quay.io/ansible/awx-ee:latest
+  # Can be customized for additional collections/dependencies
+
+  # Hostname for external access (when using Traefik)
+  # Note: This needs to match the IngressRoute host
+  hostname: awx.local.mightymorgs.com
+
+  # Security context
+  create_preload_data: true  # Create demo data on first install
+
+  # Node affinity (optional - for multi-node clusters)
+  # node_selector:
+  #   node-role.kubernetes.io/worker: "true"
+
+  # Tolerations (optional)
+  # tolerations:
+  #   - key: "dedicated"
+  #     operator: "Equal"
+  #     value: "awx"
+  #     effect: "NoSchedule"

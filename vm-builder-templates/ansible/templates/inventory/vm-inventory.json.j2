@@ -1,0 +1,147 @@
+{#
+  VM Inventory Template
+
+  Generates a full VM inventory JSON from minimal input + profile references.
+
+  Required variables:
+    - vm_name: Full 7-component VM name (e.g., homelab-k3s-master-prod-mediastack-libvirt-latest)
+    - size_profile: Size profile content (loaded from BWS profiles/size/*)
+    - platform_profile: Platform profile content (loaded from BWS profiles/platform/*)
+    - role_profile: Role profile content (loaded from BWS profiles/role/*)
+
+  Optional variables:
+    - static_ip: Static IP with CIDR (e.g., 192.168.0.50/24)
+    - ssh_public_key: SSH public key for VM access
+    - ssh_private_key_b64: Base64-encoded SSH private key
+    - overrides: Dict of any field overrides
+
+  VM Name Components (7):
+    1: client      - TF Cloud workspace
+    2: vmtype      - k3s, docker, vm
+    3: subtype     - master, worker, standalone
+    4: state       - prod, staging, dev, test
+    5: purpose     - mediastack, coreinfra, webapp
+    6: platform    - libvirt, gcp, aws, hetzner
+    7: version     - latest, v1.0.0
+#}
+{# Parse VM name into components #}
+{% set parts = vm_name.split('-') %}
+{% set client = parts[0] %}
+{% set vmtype = parts[1] %}
+{% set subtype = parts[2] %}
+{% set state = parts[3] %}
+{% set purpose = parts[4] %}
+{% set platform = parts[5] %}
+{% set version = parts[6] %}
+
+{# Get platform-specific hardware from size profile #}
+{% set hw = size_profile.platforms[platform_profile.platform] %}
+
+{# Merge overrides if provided #}
+{% set ovr = overrides | default({}) %}
+
+{
+  "identity": {
+    "hostname": "{{ vm_name }}",
+    "client": "{{ client }}",
+    "vm_type": "{{ vmtype }}",
+    "vm_subtype": "{{ subtype }}",
+    "state": "{{ state }}",
+    "purpose": "{{ purpose }}",
+    "platform": "{{ platform }}",
+    "version": "{{ version }}",
+    "iac_version": "{{ version }}"
+  },
+  "profiles": {
+    "size": "{{ size_profile.name }}",
+    "platform": "{{ platform_profile.platform }}-{{ platform_profile.client }}",
+    "role": "{{ role_profile.role }}"
+  },
+  "hardware": {
+{% if platform_profile.platform == 'libvirt' %}
+    "vcpu": {{ ovr.vcpu | default(hw.vcpu) }},
+    "memory_mb": {{ ovr.memory_mb | default(hw.memory_mb) }},
+    "disk_size_gb": {{ ovr.disk_size_gb | default(hw.disk_size_gb) }},
+    "data_disk_size_gb": {{ ovr.data_disk_size_gb | default(hw.data_disk_size_gb) }}
+{% elif platform_profile.platform == 'gcp' %}
+    "machine_type": "{{ ovr.machine_type | default(hw.machine_type) }}",
+    "boot_disk_size_gb": {{ ovr.boot_disk_size_gb | default(hw.boot_disk_size_gb) }},
+    "boot_disk_type": "{{ ovr.boot_disk_type | default(hw.boot_disk_type) }}",
+    "data_disk_size_gb": {{ ovr.data_disk_size_gb | default(hw.data_disk_size_gb) }},
+    "data_disk_type": "{{ ovr.data_disk_type | default(hw.data_disk_type) }}"
+{% endif %}
+{% if hw.enable_gpu_passthrough | default(false) %}
+    ,"enable_gpu_passthrough": true
+{% endif %}
+{% if hw.guest_accelerator_type | default('') != '' %}
+    ,"guest_accelerator_type": "{{ hw.guest_accelerator_type }}",
+    "guest_accelerator_count": {{ hw.guest_accelerator_count | default(1) }}
+{% endif %}
+  },
+  "network": {
+{% if platform_profile.platform == 'libvirt' %}
+    "bridge": "{{ platform_profile.network.bridge }}",
+    "static_ipv4_cidr": "{{ static_ip | default('') }}",
+    "gateway": "{{ platform_profile.network.gateway }}",
+    "dns": {{ platform_profile.network.dns | to_json }}
+{% elif platform_profile.platform == 'gcp' %}
+    "network_name": "{{ platform_profile.network_name }}",
+    "subnet_name": "{{ platform_profile.subnet_name }}",
+    "enable_external_ip": {{ platform_profile.enable_external_ip | default(true) | lower }},
+    "enable_static_ip": {{ platform_profile.enable_static_ip | default(false) | lower }}
+{% endif %}
+  },
+  "ssh": {
+    "keypair": {
+{% if ssh_private_key_b64 is defined %}
+      "private_key_b64": "{{ ssh_private_key_b64 }}",
+{% else %}
+      "private_key_b64": "",
+{% endif %}
+{% if ssh_public_key is defined %}
+      "public_key": "{{ ssh_public_key }}"
+{% else %}
+      "public_key": ""
+{% endif %}
+    }
+  },
+  "tailscale": {
+    "oauth_client_id_key": "inventory/shared/secrets/tailscale/oauthclientid",
+    "tags": [
+      "tag:{{ client }}",
+      "tag:{{ state }}",
+{% if vmtype == 'k3s' and subtype == 'master' %}
+      "tag:k8s-master",
+      "tag:service-cluster",
+      "tag:service-ssh"
+{% elif vmtype == 'k3s' and subtype == 'worker' %}
+      "tag:k8s-worker",
+      "tag:service-cluster",
+      "tag:service-ssh"
+{% else %}
+      "tag:service-ssh"
+{% endif %}
+    ]
+  },
+  "k3s": {
+    "role": "{{ role_profile.k3s.role }}",
+    "cluster_token": ""
+  },
+  "layers": {
+    "os": "ubuntu-24-04",
+{% if platform_profile.platform == 'libvirt' %}
+    "hypervisor": "libvirt-{{ client }}"
+{% elif platform_profile.platform == 'gcp' %}
+    "cloud": "gcp-{{ platform_profile.project_id }}"
+{% else %}
+    "cloud": "{{ platform }}-{{ client }}"
+{% endif %}
+  },
+  "apps": {
+    "selected_apps": []
+  },
+  "bootstrap": {
+    "created": "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}",
+    "created_by": "vm-inventory-template-j2"
+  }
+}

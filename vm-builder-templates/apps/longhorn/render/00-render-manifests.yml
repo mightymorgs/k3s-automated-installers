@@ -1,0 +1,135 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/00-render-manifests"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/render/00-render-manifests.yml"
+#     category: "platform"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["v1.6.x", "v1.7.x"]
+#       version_range: ">=v1.6.0"
+#
+#     requires:
+#       bws: ">=0.5.0"
+#       jinja2: ">=3.0.0"
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - longhorn: "v1.6.0"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-23"
+#         notes: "Renders Longhorn K8s manifests from J2 templates with BWS inventory"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_template_render_phase22"
+#   dependencies: ["bws_access_configured", "k3s_server_installed"]
+#   provides: ["longhorn_manifests_rendered"]
+#   tags: ["longhorn", "storage", "templates", "jinja2", "manifests", "golden-master"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Render Longhorn storage system manifests from J2 templates using BWS inventory variables
+
+- name: Render Longhorn manifests from J2 templates
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    inventory_key: "{{ inventory_key }}"
+    output_dir: "/tmp/longhorn"
+
+  tasks:
+    # ========================================
+    # VALIDATE INPUT
+    # ========================================
+    - name: Verify INVENTORY_KEY is provided
+      ansible.builtin.assert:
+        that:
+          - inventory_key | length > 0
+        fail_msg: "INVENTORY_KEY environment variable must be set"
+
+    - name: Verify BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+
+    # ========================================
+    # FETCH VM INVENTORY
+    # ========================================
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.command:
+        cmd: bws secret get {{ inventory_key }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_inventory
+      no_log: true
+      changed_when: false
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_inventory.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    # ========================================
+    # CREATE OUTPUT DIRECTORY
+    # ========================================
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+        mode: '0755'
+
+    # ========================================
+    # RENDER LONGHORN MANIFESTS
+    # ========================================
+    - name: Render Longhorn Deployment
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/longhorn/deployment.yaml.j2"
+        dest: "{{ output_dir }}/deployment.yaml"
+        mode: '0644'
+      vars:
+        longhorn_version: "{{ inventory.platform_versions.longhorn | default('v1.6.0') }}"
+        app_namespace: "{{ inventory.longhorn.namespace | default('longhorn-system') }}"
+
+    - name: Render Longhorn StorageClass
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/longhorn/storageclass.yaml.j2"
+        dest: "{{ output_dir }}/storageclass.yaml"
+        mode: '0644'
+      vars:
+        replicas: "{{ inventory.longhorn.replicas | default(3) }}"
+        is_default: "{{ inventory.longhorn.is_default | default(true) }}"
+        data_locality: "{{ inventory.longhorn.data_locality | default('best-effort') }}"
+        reclaim_policy: "{{ inventory.longhorn.reclaim_policy | default('Delete') }}"
+        storage_class_name: "{{ inventory.longhorn.storage_class_name | default('longhorn') }}"
+        disk_selector: "{{ inventory.longhorn.disk_selector | default(omit) }}"
+        node_selector: "{{ inventory.longhorn.node_selector | default(omit) }}"
+
+    # ========================================
+    # SUMMARY
+    # ========================================
+    - name: Display render summary
+      ansible.builtin.debug:
+        msg:
+          - "Longhorn manifests rendered successfully"
+          - "Output directory: {{ output_dir }}"
+          - "Files created:"
+          - "  - deployment.yaml (includes RBAC + ServiceAccount + Namespace)"
+          - "  - storageclass.yaml (default + fast + replicated + bulk)"
+          - ""
+          - "Longhorn version: {{ inventory.platform_versions.longhorn | default('v1.6.0') }}"
+          - "Namespace: {{ inventory.longhorn.namespace | default('longhorn-system') }}"
+          - "Default replicas: {{ inventory.longhorn.replicas | default(3) }}"

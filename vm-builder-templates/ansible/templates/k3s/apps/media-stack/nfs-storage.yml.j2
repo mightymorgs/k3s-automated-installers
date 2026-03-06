@@ -1,0 +1,56 @@
+{#
+  NFS Storage Template for Media Stack
+
+  Required Variables:
+    - nfs_server: NFS server IP/hostname
+    - nfs_path: NFS export path
+    - nfs_storage_capacity: Storage capacity (default: 10Ti)
+
+  Generated Resources:
+    - PersistentVolume: nfs-media-pv
+    - PersistentVolumeClaim: nfs-media-pvc
+
+  Usage:
+    ansible-playbook atomic/k3s/1.33/apps/01-deploy-media-stack.yml
+#}
+---
+# NFS PersistentVolume for shared media storage
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-media-pv
+  labels:
+    type: nfs
+    app.kubernetes.io/part-of: media-automation
+spec:
+  capacity:
+    storage: {{ nfs_storage_capacity | default('10Ti') }}
+  accessModes:
+    - ReadWriteMany  # Multiple pods can mount simultaneously
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs-media
+  mountOptions:
+    - nfsvers=4.1
+    - hard
+    - intr
+  nfs:
+    server: {{ nfs_server }}
+    path: {{ nfs_path }}
+
+---
+# PersistentVolumeClaim for media storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-media-pvc
+  namespace: media-stack
+  labels:
+    app.kubernetes.io/part-of: media-automation
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-media
+  resources:
+    requests:
+      storage: {{ nfs_storage_capacity | default('10Ti') }}
+  volumeName: nfs-media-pv

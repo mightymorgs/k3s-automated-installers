@@ -1,0 +1,27 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-wire-vault.yml:
+    summary: Wire External Secrets Operator to HashiCorp Vault by creating a ClusterSecretStore
+      backed by Vault's KV v2 engine using token auth. Creates a K8s Secret holding
+      the Vault token, then applies the ClusterSecretStore CRD pointing at Vault's
+      internal DNS address. Any namespace can then create ExternalSecret resources
+      referencing this store to pull secrets from Vault.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - vault
+    references_services:
+    - vault
+  05-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to the external-secrets controller
+      deployment. External Secrets Operator natively exposes metrics on port 8080
+      at /metrics. This playbook adds pod-level annotations so Prometheus auto-discovers
+      and scrapes the metrics endpoint via its kubernetes-pods scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- prometheus
+- vault

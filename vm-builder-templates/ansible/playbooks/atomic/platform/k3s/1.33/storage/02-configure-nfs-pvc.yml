@@ -1,0 +1,159 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/storage/02-configure-nfs-pvc"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/storage/02-configure-nfs-pvc.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "storage"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "nfs-csi-driver"
+#       folder_version: "1.33"
+#       supported_versions: ["4.x"]
+#       version_range: ">=4.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - nfs_server: "192.168.0.103"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "NFS PVC configured for Synology NAS"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed"]
+#   provides: ["nfs_pvc_configured", "nfs_storage_available"]
+#   tags: ["k3s", "nfs", "storage", "pvc"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure NFS PVC for shared storage access
+- name: Configure NFS Persistent Volume and Claim
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    nfs_server: "{{ nfs_server_ip | default('192.168.0.103') }}"
+    nfs_path: "{{ nfs_export_path | default('/volume2/NAS') }}"
+    nfs_namespace: "{{ nfs_pvc_namespace | default('default') }}"
+    nfs_pv_name: nfs-pv
+    nfs_pvc_name: nfs-pvc
+    nfs_storage_capacity: "{{ nfs_capacity | default('1Ti') }}"
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display NFS configuration
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Configuring NFS Storage
+          - ==========================================
+          - 'NFS Server: {{ nfs_server }}'
+          - 'NFS Path: {{ nfs_path }}'
+          - 'Namespace: {{ nfs_namespace }}'
+          - 'Storage Capacity: {{ nfs_storage_capacity }}'
+          - ==========================================
+    - name: Ensure target namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: '{{ nfs_namespace }}'
+        state: present
+        kubeconfig: '{{ kubeconfig_path }}'
+    - name: Create NFS Persistent Volume
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: '{{ kubeconfig_path }}'
+        definition:
+          apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            name: '{{ nfs_pv_name }}'
+            labels:
+              type: nfs
+              storage: shared
+          spec:
+            capacity:
+              storage: '{{ nfs_storage_capacity }}'
+            accessModes: [ReadWriteMany]
+            persistentVolumeReclaimPolicy: Retain
+            storageClassName: nfs
+            mountOptions: [hard, nfsvers=4.1, noatime, nodiratime]
+            nfs:
+              server: '{{ nfs_server }}'
+              path: '{{ nfs_path }}'
+    - name: Create NFS Persistent Volume Claim
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: '{{ kubeconfig_path }}'
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: '{{ nfs_pvc_name }}'
+            namespace: '{{ nfs_namespace }}'
+            labels:
+              storage: nfs
+          spec:
+            accessModes: [ReadWriteMany]
+            storageClassName: nfs
+            resources:
+              requests:
+                storage: '{{ nfs_storage_capacity }}'
+            volumeName: '{{ nfs_pv_name }}'
+    - name: Wait for PVC to be bound
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        name: '{{ nfs_pvc_name }}'
+        namespace: '{{ nfs_namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: pvc_status
+      retries: 30
+      delay: 5
+      until:
+        - pvc_status.resources is defined
+        - pvc_status.resources | length > 0
+        - pvc_status.resources[0].status.phase == "Bound"
+      changed_when: false
+    - name: Get PV status
+      kubernetes.core.k8s_info:
+        kind: PersistentVolume
+        name: '{{ nfs_pv_name }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: pv_status
+      changed_when: false
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - NFS Storage Configured Successfully!
+          - ==========================================
+          - ''
+          - 'Persistent Volume:'
+          - '  Name: {{ nfs_pv_name }}'
+          - '  Status: {{ pv_status.resources[0].status.phase }}'
+          - '  Capacity: {{ nfs_storage_capacity }}'
+          - ''
+          - 'Persistent Volume Claim:'
+          - '  Name: {{ nfs_pvc_name }}'
+          - '  Namespace: {{ nfs_namespace }}'
+          - '  Status: {{ pvc_status.resources[0].status.phase }}'
+          - ''
+          - 'Usage in Pods:'
+          - '  volumes:'
+          - '    - name: nfs-storage'
+          - '      persistentVolumeClaim:'
+          - '        claimName: {{ nfs_pvc_name }}'
+          - ==========================================

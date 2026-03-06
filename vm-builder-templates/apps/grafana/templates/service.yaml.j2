@@ -1,0 +1,24 @@
+---
+# Grafana Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('grafana') }}
+  namespace: {{ app_namespace | default('grafana') }}
+  labels:
+    app: {{ app_name | default('grafana') }}
+    app.kubernetes.io/name: {{ app_name | default('grafana') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('grafana') }}
+    app.kubernetes.io/name: {{ app_name | default('grafana') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(3000) }}
+      targetPort: http
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30030) }}
+{% endif %}
+      protocol: TCP

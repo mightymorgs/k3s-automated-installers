@@ -1,0 +1,39 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  awx-mcp-deployment.yaml.j2:
+    summary: 'Jinja2 template: awx-mcp-deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  awx-mcp-service.yaml.j2:
+    summary: 'Jinja2 template: awx-mcp-service.yaml.j2'
+    source: inferred
+    confidence: medium
+  k8s-rag-mcp-deployment.yaml.j2:
+    summary: 'Jinja2 template: k8s-rag-mcp-deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  k8s-rag-mcp-service.yaml.j2:
+    summary: 'Jinja2 template: k8s-rag-mcp-service.yaml.j2'
+    source: inferred
+    confidence: medium
+  namespace.yaml.j2:
+    summary: 'Jinja2 template: namespace.yaml.j2'
+    source: inferred
+    confidence: medium
+  teleport-mcp-deployment.yaml.j2:
+    summary: 'Jinja2 template: teleport-mcp-deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  teleport-mcp-service.yaml.j2:
+    summary: 'Jinja2 template: teleport-mcp-service.yaml.j2'
+    source: inferred
+    confidence: medium
+  vault-mcp-deployment.yaml.j2:
+    summary: 'Jinja2 template: vault-mcp-deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  vault-mcp-service.yaml.j2:
+    summary: 'Jinja2 template: vault-mcp-service.yaml.j2'
+    source: inferred
+    confidence: medium

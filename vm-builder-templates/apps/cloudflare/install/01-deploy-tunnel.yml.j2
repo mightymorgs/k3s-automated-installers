@@ -1,0 +1,220 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# Infrastructure:                                                #}
+{#   vm_hostname           - VM name (REQUIRED, no default)       #}
+{#   kubeconfig_path       - Path to kubeconfig                   #}
+{#                           (default: /etc/rancher/k3s/k3s.yaml) #}
+{#   registry_path_default - Relative fallback for REGISTRY_PATH  #}
+{#                           (default: playbook_dir/../../../registry.json) #}
+{#                                                                #}
+{# Service:                                                       #}
+{#   cloudflare_namespace  - Namespace for cloudflared deployment  #}
+{#                           (default: cloudflare-system)         #}
+{#   cloudflared_template_path - Path to cloudflared deployment    #}
+{#                           template relative to playbook_dir     #}
+{#                           (default: ../../../../../../apps/cloudflare/templates/cloudflared-deployment.yaml.j2) #}
+{#                                                                #}
+{# State:                                                         #}
+{#   bws_cache_path        - Path to BWS secrets cache            #}
+{#                           (default: /tmp/bws_secrets.json)     #}
+{#   bws_inventory_prefix  - BWS key prefix for inventory         #}
+{#                           (default: inventory)                 #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   target_hosts          - Ansible host pattern                 #}
+{#                           (default: k3s_servers)               #}
+{# ============================================================== #}
+---
+- name: Deploy Cloudflare Tunnel
+  hosts: "{{ '{{ ' }} target_hosts | default('{{ target_hosts | default('k3s_servers') }}') {{ ' }}' }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    registry_path: "{{ '{{ ' }} lookup('env', 'REGISTRY_PATH') | default(playbook_dir ~ '/{{ registry_path_default | default('../../../registry.json') }}') {{ ' }}' }}"
+    cloudflare_namespace: "{{ cloudflare_namespace | default('cloudflare-system') }}"
+
+  tasks:
+    # === BWS cache reads ===
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ '{{ ' }} inventory_raw.stdout | from_json {{ ' }}' }}"
+
+    - name: Extract ingress config
+      ansible.builtin.set_fact:
+        ingress_domain: "{{ '{{ ' }} _inventory.ingress.domain {{ ' }}' }}"
+        tunnel_name: "{{ '{{ ' }} _inventory.identity.client {{ ' }}' }}-tunnel"
+
+    # === Resolve Cloudflare credentials from pointer keys ===
+    - name: Resolve Cloudflare API token
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ '{{ ' }} _inventory.cloudflare.api_token_key {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_api_token_raw
+      changed_when: false
+      no_log: true
+
+    - name: Resolve Cloudflare Account ID
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ '{{ ' }} _inventory.cloudflare.account_id_key {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_account_id_raw
+      changed_when: false
+
+    - name: Set Cloudflare credentials
+      ansible.builtin.set_fact:
+        cf_api_token: "{{ '{{ ' }} cf_api_token_raw.stdout | trim {{ ' }}' }}"
+        cf_account_id: "{{ '{{ ' }} cf_account_id_raw.stdout | trim {{ ' }}' }}"
+      no_log: true
+
+    # === Check if tunnel exists ===
+    - name: List existing tunnels
+      ansible.builtin.shell: |
+        set -eu
+        curl -s \
+          -H "Authorization: Bearer $CF_TOKEN" \
+          "https://api.cloudflare.com/client/v4/accounts/{{ '{{ ' }} cf_account_id {{ ' }}' }}/cfd_tunnel?name={{ '{{ ' }} tunnel_name {{ ' }}' }}&is_deleted=false"
+      environment:
+        CF_TOKEN: "{{ '{{ ' }} cf_api_token {{ ' }}' }}"
+      register: tunnel_list_raw
+      changed_when: false
+
+    - name: Parse tunnel list response
+      ansible.builtin.set_fact:
+        tunnel_list_json: "{{ '{{ ' }} tunnel_list_raw.stdout | from_json {{ ' }}' }}"
+
+    - name: Fail if tunnel list API failed
+      ansible.builtin.fail:
+        msg: "Cloudflare API error: {{ '{{ ' }} tunnel_list_json.errors | default([]) {{ ' }}' }}"
+      when: not (tunnel_list_json.success | default(false))
+
+    - name: Set tunnel existence fact
+      ansible.builtin.set_fact:
+        tunnel_exists: "{{ '{{ ' }} tunnel_list_json.result | length > 0 {{ ' }}' }}"
+        tunnel_id: "{{ '{{ ' }} tunnel_list_json.result[0].id if tunnel_list_json.result | length > 0 else '' {{ ' }}' }}"
+
+    # === Create tunnel if not exists ===
+    - name: Create Cloudflare Tunnel
+      ansible.builtin.shell: |
+        set -eu
+        RESPONSE=$(curl -sf \
+          -X POST \
+          -H "Authorization: Bearer $CF_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"name": "{{ '{{ ' }} tunnel_name {{ ' }}' }}", "config_src": "cloudflare"}' \
+          "https://api.cloudflare.com/client/v4/accounts/{{ '{{ ' }} cf_account_id {{ ' }}' }}/cfd_tunnel")
+        echo "$RESPONSE"
+      environment:
+        CF_TOKEN: "{{ '{{ ' }} cf_api_token {{ ' }}' }}"
+      register: tunnel_create_raw
+      changed_when: true
+      no_log: true
+      when: not tunnel_exists
+
+    - name: Set tunnel ID from creation
+      ansible.builtin.set_fact:
+        tunnel_id: "{{ '{{ ' }} (tunnel_create_raw.stdout | from_json).result.id {{ ' }}' }}"
+      when: not tunnel_exists
+
+    - name: Display tunnel info
+      ansible.builtin.debug:
+        msg: "Tunnel '{{ '{{ ' }} tunnel_name {{ ' }}' }}' ID: {{ '{{ ' }} tunnel_id {{ ' }}' }} ({{ '{{ ' }} 'existing' if tunnel_exists else 'created' {{ ' }}' }})"
+
+    # === Get tunnel token ===
+    - name: Get tunnel run token
+      ansible.builtin.shell: |
+        set -eu
+        RESPONSE=$(curl -sf \
+          -H "Authorization: Bearer $CF_TOKEN" \
+          "https://api.cloudflare.com/client/v4/accounts/{{ '{{ ' }} cf_account_id {{ ' }}' }}/cfd_tunnel/{{ '{{ ' }} tunnel_id {{ ' }}' }}/token")
+        echo "$RESPONSE"
+      environment:
+        CF_TOKEN: "{{ '{{ ' }} cf_api_token {{ ' }}' }}"
+      register: tunnel_token_raw
+      changed_when: false
+      no_log: true
+
+    - name: Set tunnel token
+      ansible.builtin.set_fact:
+        tunnel_run_token: "{{ '{{ ' }} (tunnel_token_raw.stdout | from_json).result {{ ' }}' }}"
+      no_log: true
+
+    # === Deploy to K8s ===
+    - name: Create namespace
+      ansible.builtin.shell: |
+        kubectl create namespace {{ '{{ ' }} cloudflare_namespace {{ ' }}' }} --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+    - name: Create K8s secret with tunnel token
+      ansible.builtin.shell: |
+        kubectl create secret generic cloudflare-tunnel \
+          --namespace {{ '{{ ' }} cloudflare_namespace {{ ' }}' }} \
+          --from-literal=tunnel_run_token="{{ '{{ ' }} tunnel_run_token {{ ' }}' }}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+      no_log: true
+      changed_when: true
+
+    - name: Render cloudflared deployment template
+      ansible.builtin.template:
+        src: "{{ '{{ ' }} playbook_dir {{ ' }}' }}/{{ cloudflared_template_path | default('../../../../../../apps/cloudflare/templates/cloudflared-deployment.yaml.j2') }}"
+        dest: "/tmp/cloudflared-deployment.yaml"
+      vars:
+        namespace: "{{ '{{ ' }} cloudflare_namespace {{ ' }}' }}"
+
+    - name: Apply cloudflared deployment
+      ansible.builtin.shell: |
+        kubectl apply -f /tmp/cloudflared-deployment.yaml
+
+    - name: Wait for cloudflared rollout
+      ansible.builtin.shell: |
+        kubectl -n {{ '{{ ' }} cloudflare_namespace {{ ' }}' }} rollout status deployment/cloudflared --timeout=120s
+
+    - name: Clean up rendered manifest
+      ansible.builtin.file:
+        path: /tmp/cloudflared-deployment.yaml
+        state: absent
+
+    # === Write state to BWS ===
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Write tunnel state to BWS
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ '{{ ' }} _inv_id_raw.stdout | trim {{ ' }}' }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        updated=$(printf '%s' "$inv" | jq \
+          --arg tid "{{ '{{ ' }} tunnel_id {{ ' }}' }}" \
+          --arg tname "{{ '{{ ' }} tunnel_name {{ ' }}' }}" \
+          '._state.cloudflare.tunnel_id = $tid |
+           ._state.cloudflare.tunnel_name = $tname')
+
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ '{{ ' }} lookup('env', 'BWS_ACCESS_TOKEN') {{ ' }}' }}"
+      changed_when: true
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "Cloudflare Tunnel deployed successfully"
+          - "  Tunnel: {{ '{{ ' }} tunnel_name {{ ' }}' }} ({{ '{{ ' }} tunnel_id {{ ' }}' }})"
+          - "  Namespace: {{ '{{ ' }} cloudflare_namespace {{ ' }}' }}"
+          - "  Replicas: 2"

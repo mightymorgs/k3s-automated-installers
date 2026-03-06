@@ -1,0 +1,109 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  vault-auth-kubernetes-enable.yml:
+    summary: Enable and configure Kubernetes authentication method in Vault. This
+      operation is idempotent - if the kubernetes auth method is already enabled,
+      only the configuration will be updated. Automatically retrieves K8s CA cert
+      and service account JWT for configuration.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_base }}{{ endpoint_auth }}'
+    - '{{ vault_api_base }}{{ endpoint_auth }}/{{ auth_path }}'
+    - '{{ vault_api_base }}{{ endpoint_k8s_config }}'
+    wiring:
+      reads_from:
+      - app: vault
+        field: root_token
+      - app: vault
+        field: status
+      writes_to:
+      - app: vault
+        field: auth_methods
+      - app: vault
+        field: auth_methods
+      - app: vault
+        field: auth_methods
+  vault-policy-create.yml:
+    summary: Create or update an ACL policy in Vault. Policies define what paths a
+      token can access and what operations it can perform. This operation is idempotent
+      - if the policy exists, it will be updated with the new rules.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_base }}{{ endpoint_policies }}/{{ policy_name }}'
+    - '{{ vault_api_base }}{{ endpoint_policies }}/{{ policy_name }}'
+    - '{{ vault_api_base }}{{ endpoint_policies }}/{{ policy_name }}'
+    wiring:
+      reads_from:
+      - app: vault
+        field: root_token
+      writes_to:
+      - app: vault
+        field: policies
+      - app: vault
+        field: policies
+  vault-secrets-kv-create.yml:
+    summary: Create a KV (Key-Value) secrets engine in Vault. Supports both KV v1
+      and KV v2. This operation is idempotent - if the secrets engine already exists
+      at the specified path, it will be skipped. Default is KV v2 for versioned secrets.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_base }}{{ endpoint_mounts }}'
+    - '{{ vault_api_base }}{{ endpoint_mounts }}/{{ mount_path }}'
+    wiring:
+      reads_from:
+      - app: vault
+        field: root_token
+      writes_to:
+      - app: vault
+        field: secrets_engines
+      - app: vault
+        field: secrets_engines
+      - app: vault
+        field: secrets_engines
+  vault-sys-init.yml:
+    summary: Initialize Vault cluster. This operation is idempotent - if Vault is
+      already initialized, it will be skipped. Stores root token and unseal keys in
+      BWS _state for secure retrieval by subsequent operations.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_base }}{{ endpoint }}'
+    - '{{ vault_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from: []
+      writes_to:
+      - app: vault
+        field: initialized
+      - app: vault
+        field: root_token
+      - app: vault
+        field: unseal_keys
+      - app: vault
+        field: init_timestamp
+  vault-sys-unseal.yml:
+    summary: Unseal Vault using unseal keys stored in BWS _state. This operation is
+      idempotent - if Vault is already unsealed, it will be skipped. Automatically
+      reads unseal keys from BWS and applies them until threshold is met.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_base }}{{ endpoint_seal_status }}'
+    - '{{ vault_api_base }}{{ endpoint_unseal }}'
+    - '{{ vault_api_base }}{{ endpoint_seal_status }}'
+    wiring:
+      reads_from:
+      - app: vault
+        field: unseal_keys
+      - app: vault
+        field: initialized
+      writes_to:
+      - app: vault
+        field: sealed
+      - app: vault
+        field: unseal_timestamp
+      - app: vault
+        field: status

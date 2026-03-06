@@ -1,0 +1,97 @@
+{#
+  External Secrets Operator — Webhook Deployment
+
+  Generated from helm template external-secrets v0.9.13, parameterized.
+  The webhook validates ExternalSecret and SecretStore resources.
+  TLS cert is provided by the cert-controller via the webhook Secret.
+
+  Variables:
+    - eso_version: ESO container image tag (default: "v0.9.13")
+    - app_namespace: Kubernetes namespace (default: "external-secrets")
+    - webhook_port: Webhook container port (default: 10250)
+    - eso_webhook_cpu_requests: CPU request (default: "50m")
+    - eso_webhook_cpu_limits: CPU limit (default: "100m")
+    - eso_webhook_memory_requests: Memory request (default: "64Mi")
+    - eso_webhook_memory_limits: Memory limit (default: "128Mi")
+#}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-secrets-webhook
+  namespace: {{ app_namespace | default('external-secrets') }}
+  labels:
+    app.kubernetes.io/name: external-secrets-webhook
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets-webhook
+      app.kubernetes.io/instance: external-secrets
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: external-secrets-webhook
+        app.kubernetes.io/instance: external-secrets
+        app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+        app.kubernetes.io/component: webhook
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      hostNetwork: false
+      serviceAccountName: external-secrets-webhook
+      automountServiceAccountToken: true
+      containers:
+      - name: webhook
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        image: ghcr.io/external-secrets/external-secrets:{{ eso_version | default('v0.9.13') }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - webhook
+        - --port={{ webhook_port | default(10250) }}
+        - --dns-name=external-secrets-webhook.{{ app_namespace | default('external-secrets') }}.svc
+        - --cert-dir=/tmp/certs
+        - --check-interval=5m
+        - --metrics-addr=:8080
+        - --healthz-addr=:8081
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+          name: metrics
+        - containerPort: {{ webhook_port | default(10250) }}
+          protocol: TCP
+          name: webhook
+        readinessProbe:
+          httpGet:
+            port: 8081
+            path: /readyz
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: {{ eso_webhook_cpu_requests | default('50m') | quote }}
+            memory: {{ eso_webhook_memory_requests | default('64Mi') | quote }}
+          limits:
+            cpu: {{ eso_webhook_cpu_limits | default('100m') | quote }}
+            memory: {{ eso_webhook_memory_limits | default('128Mi') | quote }}
+        volumeMounts:
+        - name: certs
+          mountPath: /tmp/certs
+          readOnly: true
+      volumes:
+      - name: certs
+        secret:
+          secretName: external-secrets-webhook

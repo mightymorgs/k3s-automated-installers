@@ -1,0 +1,489 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/external-secrets/verify/eso-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "eso_configured"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/external-secrets/verify/01-verify-eso-config.yml"
+#     category: "platform"
+#     subsystem: "external-secrets"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "external-secrets-operator"
+#       supported_versions: ["v0.9.x", "v0.10.x"]
+#       version_range: ">=v0.9.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - eso: "v0.9.13"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies ESO SecretStore, ClusterSecretStore, and ExternalSecret configuration"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_external_secrets_verify"
+#   dependencies: ["eso_deployed"]
+#   provides: ["eso_config_verified"]
+#   tags: ["external-secrets", "eso", "verification", "phase3"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify External Secrets Operator configuration is complete and functioning:
+#     - SecretStore/ClusterSecretStore is ready and can connect to backend
+#     - ExternalSecret is syncing successfully
+#     - Target Kubernetes Secrets are created with expected keys
+#     - Optional: Test secret value retrieval (without exposing values)
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.external_secrets"
+#         purpose: "Expected ESO configuration for verification"
+#
+#     writes: []  # Read-only verification playbook
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     optional:
+#       - name: store_name
+#         description: "Specific SecretStore/ClusterSecretStore to verify"
+#       - name: store_kind
+#         description: "SecretStore or ClusterSecretStore"
+#       - name: store_namespace
+#         description: "Namespace for SecretStore (not needed for ClusterSecretStore)"
+#       - name: externalsecret_name
+#         description: "Specific ExternalSecret to verify"
+#       - name: externalsecret_namespace
+#         description: "Namespace for ExternalSecret"
+#       - name: verify_all
+#         description: "Verify all stores and secrets in cluster"
+#       - name: expected_secret_keys
+#         description: "List of expected keys in target Secret"
+
+- name: Verify - External Secrets Operator Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  connection: local
+
+  vars:
+    # Optional specific resource verification
+    store_name: "{{ store_name | default(omit) }}"
+    store_kind: "ClusterSecretStore"
+    store_namespace: "{{ store_namespace | default(omit) }}"
+    externalsecret_name: "{{ externalsecret_name | default(omit) }}"
+    externalsecret_namespace: "{{ externalsecret_namespace | default(omit) }}"
+    verify_all: "{{ verify_all | default(true) }}"
+    expected_secret_keys: "{{ expected_secret_keys | default([]) }}"
+
+    # Kubeconfig
+    k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig | default(k3s_kubeconfig) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying External Secrets Configuration"
+          - "=========================================="
+          - "Store Name: {{ store_name | default('All') }}"
+          - "Store Kind: {{ store_kind }}"
+          - "ExternalSecret: {{ externalsecret_name | default('All') }}"
+          - "Namespace: {{ externalsecret_namespace | default('All namespaces') }}"
+          - "=========================================="
+
+    # ========== 1. VERIFY ESO CONTROLLER IS RUNNING ==========
+    - name: Check ESO controller deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: Deployment
+        namespace: external-secrets
+        label_selectors:
+          - app.kubernetes.io/name=external-secrets
+      register: eso_deployment
+      failed_when: false
+
+    - name: Check ESO webhook deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: Deployment
+        namespace: external-secrets
+        label_selectors:
+          - app.kubernetes.io/name=external-secrets-webhook
+      register: eso_webhook
+      failed_when: false
+
+    - name: Check ESO cert-controller deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: Deployment
+        namespace: external-secrets
+        label_selectors:
+          - app.kubernetes.io/name=external-secrets-cert-controller
+      register: eso_cert_controller
+      failed_when: false
+
+    - name: Evaluate ESO controller status
+      ansible.builtin.set_fact:
+        eso_controller_ready: >-
+          {{
+            eso_deployment.resources | default([]) | length > 0 and
+            eso_deployment.resources[0].status.readyReplicas | default(0) > 0
+          }}
+        eso_webhook_ready: >-
+          {{
+            eso_webhook.resources | default([]) | length > 0 and
+            eso_webhook.resources[0].status.readyReplicas | default(0) > 0
+          }}
+        eso_cert_ready: >-
+          {{
+            eso_cert_controller.resources | default([]) | length > 0 and
+            eso_cert_controller.resources[0].status.readyReplicas | default(0) > 0
+          }}
+
+    - name: Assert ESO controller is running
+      ansible.builtin.assert:
+        that:
+          - eso_controller_ready | bool
+        fail_msg: |
+          ESO controller is not running. Check deployment:
+            kubectl get deployment -n external-secrets
+            kubectl describe deployment -n external-secrets -l app.kubernetes.io/name=external-secrets
+        success_msg: "ESO controller is running"
+
+    # ========== 2. VERIFY CLUSTERSECRETSTORES ==========
+    - name: List all ClusterSecretStores
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ClusterSecretStore
+      register: all_css
+      when: verify_all | bool and (store_kind == 'ClusterSecretStore' or store_name is not defined or store_name == omit)
+
+    - name: Get specific ClusterSecretStore
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ClusterSecretStore
+        name: "{{ store_name }}"
+      register: specific_css
+      when: store_name is defined and store_name != omit and store_kind == 'ClusterSecretStore'
+
+    - name: Evaluate ClusterSecretStore status
+      ansible.builtin.set_fact:
+        css_results: >-
+          {{
+            (all_css.resources | default([]) if verify_all | bool else []) +
+            (specific_css.resources | default([]))
+          }}
+
+    - name: Check each ClusterSecretStore readiness
+      ansible.builtin.set_fact:
+        css_status: >-
+          {{
+            css_status | default([]) + [{
+              'name': item.metadata.name,
+              'ready': (item.status.conditions | default([]) |
+                        selectattr('type', 'equalto', 'Ready') |
+                        selectattr('status', 'equalto', 'True') | list | length > 0),
+              'message': (item.status.conditions | default([]) |
+                          selectattr('type', 'equalto', 'Ready') | list | first).message
+                         | default('No status'),
+              'provider': item.spec.provider | default({}) | list | first | default('unknown')
+            }]
+          }}
+      loop: "{{ css_results | default([]) }}"
+      when: css_results | default([]) | length > 0
+
+    - name: Display ClusterSecretStore status
+      ansible.builtin.debug:
+        msg: "ClusterSecretStore '{{ item.name }}': {{ 'Ready' if item.ready else 'Not Ready' }} - {{ item.message }}"
+      loop: "{{ css_status | default([]) }}"
+      when: css_status is defined
+
+    # ========== 3. VERIFY SECRETSTORES ==========
+    - name: List all SecretStores (all namespaces)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: external-secrets.io/v1beta1
+        kind: SecretStore
+      register: all_ss
+      when: verify_all | bool and (store_kind == 'SecretStore' or store_name is not defined or store_name == omit)
+
+    - name: Get specific SecretStore
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: external-secrets.io/v1beta1
+        kind: SecretStore
+        name: "{{ store_name }}"
+        namespace: "{{ store_namespace }}"
+      register: specific_ss
+      when: >-
+        store_name is defined and store_name != omit and
+        store_kind == 'SecretStore' and
+        store_namespace is defined and store_namespace != omit
+
+    - name: Evaluate SecretStore status
+      ansible.builtin.set_fact:
+        ss_results: >-
+          {{
+            (all_ss.resources | default([]) if verify_all | bool else []) +
+            (specific_ss.resources | default([]))
+          }}
+
+    - name: Check each SecretStore readiness
+      ansible.builtin.set_fact:
+        ss_status: >-
+          {{
+            ss_status | default([]) + [{
+              'name': item.metadata.name,
+              'namespace': item.metadata.namespace,
+              'ready': (item.status.conditions | default([]) |
+                        selectattr('type', 'equalto', 'Ready') |
+                        selectattr('status', 'equalto', 'True') | list | length > 0),
+              'message': (item.status.conditions | default([]) |
+                          selectattr('type', 'equalto', 'Ready') | list | first).message
+                         | default('No status'),
+              'provider': item.spec.provider | default({}) | list | first | default('unknown')
+            }]
+          }}
+      loop: "{{ ss_results | default([]) }}"
+      when: ss_results | default([]) | length > 0
+
+    - name: Display SecretStore status
+      ansible.builtin.debug:
+        msg: >-
+          SecretStore '{{ item.namespace }}/{{ item.name }}':
+          {{ 'Ready' if item.ready else 'Not Ready' }} - {{ item.message }}
+      loop: "{{ ss_status | default([]) }}"
+      when: ss_status is defined
+
+    # ========== 4. VERIFY EXTERNALSECRETS ==========
+    - name: List all ExternalSecrets (all namespaces)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+      register: all_es
+      when: verify_all | bool and externalsecret_name is not defined
+
+    - name: Get specific ExternalSecret
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+        name: "{{ externalsecret_name }}"
+        namespace: "{{ externalsecret_namespace }}"
+      register: specific_es
+      when: >-
+        externalsecret_name is defined and externalsecret_name != omit and
+        externalsecret_namespace is defined and externalsecret_namespace != omit
+
+    - name: Evaluate ExternalSecret list
+      ansible.builtin.set_fact:
+        es_results: >-
+          {{
+            (all_es.resources | default([]) if verify_all | bool else []) +
+            (specific_es.resources | default([]))
+          }}
+
+    - name: Check each ExternalSecret sync status
+      ansible.builtin.set_fact:
+        es_status: >-
+          {{
+            es_status | default([]) + [{
+              'name': item.metadata.name,
+              'namespace': item.metadata.namespace,
+              'synced': (item.status.conditions | default([]) |
+                         selectattr('type', 'equalto', 'Ready') |
+                         selectattr('status', 'equalto', 'True') | list | length > 0),
+              'message': (item.status.conditions | default([]) |
+                          selectattr('type', 'equalto', 'Ready') | list | first).message
+                         | default('No status'),
+              'refresh_time': item.status.refreshTime | default('Never'),
+              'store_ref': item.spec.secretStoreRef.name | default('unknown'),
+              'store_kind': item.spec.secretStoreRef.kind | default('SecretStore'),
+              'target_name': item.spec.target.name | default(item.metadata.name)
+            }]
+          }}
+      loop: "{{ es_results | default([]) }}"
+      when: es_results | default([]) | length > 0
+
+    - name: Display ExternalSecret status
+      ansible.builtin.debug:
+        msg: >-
+          ExternalSecret '{{ item.namespace }}/{{ item.name }}':
+          {{ 'Synced' if item.synced else 'Not Synced' }} - {{ item.message }}
+          (Store: {{ item.store_ref }}, Last Refresh: {{ item.refresh_time }})
+      loop: "{{ es_status | default([]) }}"
+      when: es_status is defined
+
+    # ========== 5. VERIFY TARGET SECRETS CREATED ==========
+    - name: Check target Secrets for each ExternalSecret
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: v1
+        kind: Secret
+        name: "{{ item.target_name }}"
+        namespace: "{{ item.namespace }}"
+      register: target_secrets
+      loop: "{{ es_status | default([]) }}"
+      when: es_status is defined and item.synced
+      failed_when: false
+
+    - name: Evaluate target Secret status
+      ansible.builtin.set_fact:
+        target_status: >-
+          {{
+            target_status | default([]) + [{
+              'externalsecret': item.item.name,
+              'namespace': item.item.namespace,
+              'secret_name': item.item.target_name,
+              'exists': item.resources | default([]) | length > 0,
+              'keys': (item.resources[0].data | default({}) | list)
+                      if item.resources | default([]) | length > 0 else [],
+              'type': item.resources[0].type | default('Unknown')
+                      if item.resources | default([]) | length > 0 else 'N/A'
+            }]
+          }}
+      loop: "{{ target_secrets.results | default([]) }}"
+      when: target_secrets is defined and item.resources is defined
+
+    - name: Display target Secret status
+      ansible.builtin.debug:
+        msg: >-
+          Target Secret '{{ item.namespace }}/{{ item.secret_name }}':
+          {{ 'Exists' if item.exists else 'Missing' }}
+          (Type: {{ item.type }}, Keys: {{ item.keys | join(', ') }})
+      loop: "{{ target_status | default([]) }}"
+      when: target_status is defined
+
+    # ========== 6. VERIFY EXPECTED SECRET KEYS ==========
+    - name: Verify expected keys in target Secret
+      ansible.builtin.assert:
+        that:
+          - target_status | default([]) | length > 0
+          - target_status[0].exists
+          - (expected_secret_keys | difference(target_status[0].keys)) | length == 0
+        fail_msg: |
+          Expected keys not found in target Secret.
+          Expected: {{ expected_secret_keys | join(', ') }}
+          Found: {{ target_status[0].keys | default([]) | join(', ') }}
+          Missing: {{ expected_secret_keys | difference(target_status[0].keys | default([])) | join(', ') }}
+        success_msg: "All expected keys present in target Secret"
+      when: expected_secret_keys | length > 0 and target_status is defined
+
+    # ========== 7. VERIFICATION SUMMARY ==========
+    - name: Calculate verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          eso_controller:
+            controller_ready: "{{ eso_controller_ready }}"
+            webhook_ready: "{{ eso_webhook_ready }}"
+            cert_controller_ready: "{{ eso_cert_ready }}"
+          cluster_secret_stores:
+            total: "{{ css_status | default([]) | length }}"
+            ready: "{{ css_status | default([]) | selectattr('ready', 'equalto', true) | list | length }}"
+            not_ready: "{{ css_status | default([]) | rejectattr('ready', 'equalto', true) | list | length }}"
+          secret_stores:
+            total: "{{ ss_status | default([]) | length }}"
+            ready: "{{ ss_status | default([]) | selectattr('ready', 'equalto', true) | list | length }}"
+            not_ready: "{{ ss_status | default([]) | rejectattr('ready', 'equalto', true) | list | length }}"
+          external_secrets:
+            total: "{{ es_status | default([]) | length }}"
+            synced: "{{ es_status | default([]) | selectattr('synced', 'equalto', true) | list | length }}"
+            not_synced: "{{ es_status | default([]) | rejectattr('synced', 'equalto', true) | list | length }}"
+          target_secrets:
+            total: "{{ target_status | default([]) | length }}"
+            exists: "{{ target_status | default([]) | selectattr('exists', 'equalto', true) | list | length }}"
+            missing: "{{ target_status | default([]) | rejectattr('exists', 'equalto', true) | list | length }}"
+
+    - name: Calculate overall status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            eso_controller_ready | bool and
+            (css_status | default([]) | rejectattr('ready', 'equalto', true) | list | length == 0) and
+            (ss_status | default([]) | rejectattr('ready', 'equalto', true) | list | length == 0) and
+            (es_status | default([]) | rejectattr('synced', 'equalto', true) | list | length == 0) and
+            (target_status | default([]) | rejectattr('exists', 'equalto', true) | list | length == 0)
+          }}
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "External Secrets Verification Summary"
+          - "=========================================="
+          - ""
+          - "ESO Controller:"
+          - "  Controller: {{ 'Ready' if eso_controller_ready else 'Not Ready' }}"
+          - "  Webhook: {{ 'Ready' if eso_webhook_ready else 'Not Ready' }}"
+          - "  Cert Controller: {{ 'Ready' if eso_cert_ready else 'Not Ready' }}"
+          - ""
+          - "ClusterSecretStores: {{ verification_results.cluster_secret_stores.ready }}/{{ verification_results.cluster_secret_stores.total }} ready"
+          - "SecretStores: {{ verification_results.secret_stores.ready }}/{{ verification_results.secret_stores.total }} ready"
+          - "ExternalSecrets: {{ verification_results.external_secrets.synced }}/{{ verification_results.external_secrets.total }} synced"
+          - "Target Secrets: {{ verification_results.target_secrets.exists }}/{{ verification_results.target_secrets.total }} exist"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    # ========== 8. DETAILED FAILURE REPORT ==========
+    - name: Report not-ready ClusterSecretStores
+      ansible.builtin.debug:
+        msg: "FAILED - ClusterSecretStore '{{ item.name }}': {{ item.message }}"
+      loop: "{{ css_status | default([]) | rejectattr('ready', 'equalto', true) | list }}"
+      when: css_status is defined
+
+    - name: Report not-ready SecretStores
+      ansible.builtin.debug:
+        msg: "FAILED - SecretStore '{{ item.namespace }}/{{ item.name }}': {{ item.message }}"
+      loop: "{{ ss_status | default([]) | rejectattr('ready', 'equalto', true) | list }}"
+      when: ss_status is defined
+
+    - name: Report not-synced ExternalSecrets
+      ansible.builtin.debug:
+        msg: "FAILED - ExternalSecret '{{ item.namespace }}/{{ item.name }}': {{ item.message }}"
+      loop: "{{ es_status | default([]) | rejectattr('synced', 'equalto', true) | list }}"
+      when: es_status is defined
+
+    - name: Report missing target Secrets
+      ansible.builtin.debug:
+        msg: "FAILED - Target Secret '{{ item.namespace }}/{{ item.secret_name }}' does not exist"
+      loop: "{{ target_status | default([]) | rejectattr('exists', 'equalto', true) | list }}"
+      when: target_status is defined
+
+    - name: Fail if any checks did not pass
+      ansible.builtin.fail:
+        msg: |
+          External Secrets verification failed. See summary above for details.
+
+          Troubleshooting commands:
+            kubectl describe clustersecretstore -A
+            kubectl describe secretstore -A
+            kubectl describe externalsecret -A
+            kubectl get events -A --field-selector reason=SecretSynced
+      when: not all_checks_passed
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "External Secrets Operator configuration is complete - verification passed"
+      when: all_checks_passed

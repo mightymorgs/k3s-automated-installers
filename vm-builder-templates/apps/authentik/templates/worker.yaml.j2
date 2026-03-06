@@ -1,0 +1,84 @@
+---
+# Authentik Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ app_name | default('authentik') }}-worker
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app: {{ app_name | default('authentik') }}
+    app.kubernetes.io/name: {{ app_name | default('authentik') }}
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  replicas: {{ worker_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('authentik') }}
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('authentik') }}
+        component: worker
+        app.kubernetes.io/name: {{ app_name | default('authentik') }}
+        app.kubernetes.io/component: worker
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ busybox_image | default('busybox:1.36') }}
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ postgres_host | default('authentik-postgres') }} {{ postgres_port | default(5432) }}; do
+                echo "Waiting for Postgres..."
+                sleep 2
+              done
+              echo "Postgres is ready"
+        - name: wait-for-redis
+          image: {{ busybox_image | default('busybox:1.36') }}
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ redis_host | default('authentik-redis') }} {{ redis_port | default(6379) }}; do
+                echo "Waiting for Redis..."
+                sleep 2
+              done
+              echo "Redis is ready"
+      containers:
+        - name: {{ app_name | default('authentik') }}
+          image: {{ authentik_image | default('ghcr.io/goauthentik/server:latest') }}
+          imagePullPolicy: {{ image_pull_policy | default('Always') }}
+          args: ["worker"]
+          env:
+            - name: AUTHENTIK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: secret-key
+            - name: AUTHENTIK_POSTGRESQL__HOST
+              value: {{ postgres_host | default('authentik-postgres') }}
+            - name: AUTHENTIK_POSTGRESQL__NAME
+              value: {{ postgres_db | default('authentik') }}
+            - name: AUTHENTIK_POSTGRESQL__USER
+              value: {{ postgres_user | default('authentik') }}
+            - name: AUTHENTIK_POSTGRESQL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: postgres-password
+            - name: AUTHENTIK_REDIS__HOST
+              value: {{ redis_host | default('authentik-redis') }}
+            - name: AUTHENTIK_ERROR_REPORTING__ENABLED
+              value: "{{ error_reporting_enabled | default('false') }}"
+            - name: AUTHENTIK_LOG_LEVEL
+              value: "{{ log_level | default('info') }}"
+          resources:
+            requests:
+              cpu: {{ worker_cpu_request | default('100m') }}
+              memory: {{ worker_memory_request | default('256Mi') }}
+            limits:
+              cpu: {{ worker_cpu_limit | default('500m') }}
+              memory: {{ worker_memory_limit | default('512Mi') }}

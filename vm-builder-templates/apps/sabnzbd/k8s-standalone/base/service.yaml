@@ -1,0 +1,22 @@
+---
+# SABnzbd Service
+# NodePort for Tailscale access
+apiVersion: v1
+kind: Service
+metadata:
+  name: sabnzbd
+  namespace: media-stack
+  labels:
+    app: sabnzbd
+    app.kubernetes.io/name: sabnzbd
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: NodePort
+  selector:
+    app: sabnzbd
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30870
+      protocol: TCP

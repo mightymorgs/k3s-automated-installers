@@ -1,0 +1,16 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-vault-init.yml:
+    summary: Comprehensive verification of Vault operational status. Validates that
+      Vault is initialized, unsealed, auth methods are configured, and secrets engines
+      are enabled. Returns detailed status report for each check.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_base }}/sys/init'
+    - '{{ vault_api_base }}/sys/seal-status'
+    - '{{ vault_api_base }}/sys/health'
+    - '{{ vault_api_base }}/sys/auth'
+    - '{{ vault_api_base }}/sys/mounts'
+    - '{{ vault_api_base }}/sys/policies/acl?list=true'

@@ -1,0 +1,119 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/cluster/02-join-worker"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/cluster/02-join-worker.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "cluster"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         kernel: "6.8.0-85"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Tested on homelab k3s cluster"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_token"]
+#   provides: ["k3s_worker_joined"]
+#   tags: ["k3s", "cluster", "worker", "agent"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Join K3s worker node to master cluster
+- name: Join K3s worker node to master cluster
+  hosts: k3s_workers
+  gather_facts: true
+  become: true
+  vars:
+    k3s_install_script_path: /tmp/k3s-install.sh
+    k3s_master_url: "{{ hostvars['localhost']['k3s_master_url'] }}"
+    k3s_master_token: "{{ hostvars['localhost']['k3s_master_token'] }}"
+  tasks:
+    - name: Display join configuration
+      ansible.builtin.debug:
+        msg:
+          - Joining worker to K3s cluster
+          - 'Master URL: {{ k3s_master_url }}'
+          - 'Worker IP: {{ ansible_default_ipv4.address }}'
+          - 'Hostname: {{ ansible_hostname }}'
+    - name: Check if K3s is already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary_check
+    - name: Stop K3s service if running as server
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+      when: k3s_binary_check.stat.exists
+      failed_when: false
+    - name: Uninstall K3s if already installed as server
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      when: k3s_binary_check.stat.exists
+      failed_when: false
+      changed_when: true
+    - name: Reboot worker after K3s uninstall (restores networking)
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        connect_timeout: 10
+        post_reboot_delay: 15
+      when: k3s_binary_check.stat.exists
+    - name: Wait for worker VM to be fully accessible
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+        delay: 5
+      when: k3s_binary_check.stat.exists
+    - name: Download K3s installation script
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: '{{ k3s_install_script_path }}'
+        mode: '0755'
+    - name: Join K3s cluster as agent/worker
+      ansible.builtin.command: '{{ k3s_install_script_path }}'
+      environment:
+        K3S_URL: '{{ k3s_master_url }}'
+        K3S_TOKEN: '{{ k3s_master_token }}'
+        INSTALL_K3S_CHANNEL: stable
+      changed_when: true
+    - name: Wait for K3s agent service to become active
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: started
+        enabled: true
+    - name: Wait for node to register with cluster
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: Waiting for node to register with K3s cluster...
+    - name: Display join completion message
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Worker node joined K3s cluster!
+          - ==========================================
+          - 'Hostname: {{ ansible_hostname }}'
+          - 'IP: {{ ansible_default_ipv4.address }}'
+          - 'Master: {{ k3s_master_url }}'
+          - ==========================================
+          - 'Verify on master: Check nodes are Ready'
+          - ==========================================

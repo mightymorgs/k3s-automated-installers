@@ -1,0 +1,40 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy-server.yml:
+    summary: Deploy HashiCorp Vault server to K3s cluster (Phase 4 handles init/unseal)
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_url }}/v1/sys/seal-status'
+    uses_files:
+    - '{{ templates_dir }}/serviceaccount.yaml.j2'
+    - '{{ templates_dir }}/config.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+    - '{{ templates_dir }}/statefulset.yaml.j2'
+    references_services:
+    - vault-api
+    wiring:
+      writes_to:
+      - app: vault
+        field: url
+        target: '_state.apps.vault.url'
+      - app: vault
+        field: nodeport
+        target: '_state.apps.vault.nodeport'
+      - app: vault
+        field: status
+        target: '_state.apps.vault.status'
+      - app: vault
+        field: installed_at
+        target: '_state.apps.vault.installed_at'
+  02-verify.yml:
+    summary: Verify Vault deployment is healthy
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_url }}/v1/sys/seal-status'
+    references_services:
+    - vault-api
+depends_on_apps:
+- vault-api

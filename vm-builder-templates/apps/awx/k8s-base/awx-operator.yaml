@@ -1,0 +1,42 @@
+---
+# AWX Operator - Kustomization Reference
+# Version: 2.19.1
+# Installation via: github.com/ansible/awx-operator/config/default?ref=2.19.1
+#
+# This file is a placeholder for the AWX operator installation.
+# The actual operator is deployed via kustomize from the official repository.
+#
+# For Ansible automation, the playbook will use:
+# - kubernetes.core.k8s with kustomize parameter
+# - Reference: github.com/ansible/awx-operator/config/default?ref=2.19.1
+#
+# Components installed:
+# 1. CustomResourceDefinition: awxs.awx.ansible.com
+# 2. ServiceAccount: awx-operator-controller-manager
+# 3. Role: awx-operator-awx-manager-role
+# 4. RoleBinding: awx-operator-awx-manager-rolebinding
+# 5. Deployment: awx-operator-controller-manager
+#
+# The operator deployment will:
+# - Run in the 'awx' namespace
+# - Watch for AWX custom resources
+# - Manage AWX instance lifecycle
+# - Handle PostgreSQL, Redis, and web/task deployments
+#
+# Note: This approach is preferred over vendoring the full operator manifests
+# because it ensures we always get the complete, tested operator configuration
+# from the official source.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: awx-operator-install-info
+  namespace: awx
+  labels:
+    app.kubernetes.io/name: awx-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: golden-master
+data:
+  version: "2.19.1"
+  install_method: "kustomize"
+  install_url: "github.com/ansible/awx-operator/config/default?ref=2.19.1"
+  awx_version: "24.6.1"

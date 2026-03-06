@@ -1,0 +1,223 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/operations/folder-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "grafana.folders.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/operations/folder-create.yml"
+#     category: "platform"
+#     subsystem: "grafana"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "grafana"
+#       supported_versions: ["10.x", "11.x"]
+#       version_range: ">=10.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - grafana: "11.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Grafana API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_grafana_operations"
+#   dependencies: ["grafana_deployed", "grafana_admin_token_available"]
+#   provides: ["grafana_folder_created"]
+#   tags: ["grafana", "folders", "observability", "phase4"]
+#   estimated_duration: 15
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a folder in Grafana for organizing dashboards. This operation
+#     is idempotent - if a folder with the same UID or title exists, it
+#     will be skipped. Folders help organize dashboards by application,
+#     team, or environment.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_token"
+#         purpose: "Grafana API admin token for authentication"
+#       - path: "_state.apps.grafana.url"
+#         purpose: "Grafana base URL"
+#
+#     writes:
+#       - path: "_state.apps.grafana.folders.{folder_title}.id"
+#         example: 1
+#       - path: "_state.apps.grafana.folders.{folder_title}.uid"
+#         example: "platform-dashboards"
+#       - path: "_state.apps.grafana.folders.{folder_title}.url"
+#         example: "/dashboards/f/platform-dashboards"
+
+- name: Grafana - Create Folder
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    grafana_base_url: "{{ grafana_url }}"
+    grafana_api_base: "{{ grafana_base_url }}/api"
+    endpoint: "/folders"
+
+    # Required fields (must be provided by caller)
+    # title: Folder title (required)
+
+    # Optional fields with sensible defaults
+    uid: "{{ uid_input | default(omit) }}"
+    description: "{{ description_input | default(omit) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - title is defined and title | length > 0
+        fail_msg: "Required input missing: title"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Grafana admin token
+      ansible.builtin.set_fact:
+        grafana_admin_token: >-
+          {{
+            inventory._state.apps.grafana.admin_token | default(grafana_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        grafana_base_url: "{{ inventory._state.apps.grafana.url }}"
+        grafana_api_base: "{{ inventory._state.apps.grafana.url }}/api"
+      when: inventory._state.apps.grafana.url is defined
+
+    # ===== STEP 3: Generate UID if not provided =====
+    - name: Generate folder UID from title if not provided
+      ansible.builtin.set_fact:
+        folder_uid: "{{ uid | default(title | lower | regex_replace('[^a-z0-9-]', '-')) }}"
+      no_log: false
+
+    # ===== STEP 4: Check for Existing Folder (Idempotency) =====
+    - name: Check if folder already exists by UID
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/folders/{{ folder_uid }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_folder
+      no_log: false
+
+    - name: Set existing folder fact
+      ansible.builtin.set_fact:
+        folder_exists: "{{ existing_folder.status == 200 }}"
+        existing_folder_data: "{{ existing_folder.json if existing_folder.status == 200 else {} }}"
+
+    - name: Skip creation if folder exists
+      ansible.builtin.debug:
+        msg: "Folder '{{ title }}' already exists with UID {{ folder_uid }}"
+      when: folder_exists
+
+    # ===== STEP 5: Build Folder Payload =====
+    - name: Build folder creation payload
+      ansible.builtin.set_fact:
+        folder_payload:
+          title: "{{ title }}"
+          uid: "{{ folder_uid }}"
+          description: "{{ description | default(omit) }}"
+      when: not folder_exists
+      no_log: false
+
+    # ===== STEP 6: Create Folder =====
+    - name: Create folder in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ folder_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not folder_exists
+
+    - name: Set folder result from creation or existing
+      ansible.builtin.set_fact:
+        result_folder_id: >-
+          {{ existing_folder_data.id if folder_exists else create_result.json.id }}
+        result_folder_uid: >-
+          {{ existing_folder_data.uid if folder_exists else create_result.json.uid }}
+        result_folder_url: >-
+          {{ existing_folder_data.url if folder_exists else create_result.json.url }}
+      no_log: false
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Derive folder key name for BWS writeback
+      ansible.builtin.set_fact:
+        folder_key: "{{ title | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with folder info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge folder info into _state.apps.grafana.folders
+        UPDATED=$(echo "$CURRENT" | jq --arg fld "{{ folder_key }}" \
+          --argjson fld_id {{ result_folder_id }} \
+          --arg fld_uid "{{ result_folder_uid }}" \
+          --arg fld_url "{{ result_folder_url }}" \
+          '
+          if ._state.apps.grafana == null then ._state.apps.grafana = {} else . end |
+          if ._state.apps.grafana.folders == null then ._state.apps.grafana.folders = {} else . end |
+          if ._state.apps.grafana.folders[$fld] == null then ._state.apps.grafana.folders[$fld] = {} else . end |
+          ._state.apps.grafana.folders[$fld].id = $fld_id |
+          ._state.apps.grafana.folders[$fld].uid = $fld_uid |
+          ._state.apps.grafana.folders[$fld].url = $fld_url
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not folder_exists
+
+    # ===== STEP 8: Output Result =====
+    - name: Display folder creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if folder_exists else 'created' }}"
+          folder_id: "{{ result_folder_id }}"
+          folder_uid: "{{ result_folder_uid }}"
+          title: "{{ title }}"
+          url: "{{ result_folder_url }}"

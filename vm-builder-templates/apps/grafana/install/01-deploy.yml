@@ -1,0 +1,494 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "grafana"
+#       supported_versions: ["latest", "10.x", "11.x"]
+#       version_range: ">=10.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       vault: ">=1.15.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - grafana: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-23"
+#         notes: "Created for golden path observability stack"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_server_installed", "vault_deployed", "eso_deployed"]
+#   provides: ["grafana_deployed"]
+#   tags: ["grafana", "observability", "dashboards", "visualization"]
+#   estimated_duration: 180
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Deploy Grafana visualization and dashboards to K3s cluster. Provides unified
+#     observability UI for metrics and logs. Accessible via Tailscale on NodePort 30300.
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   credentials:
+#     secret_name: "grafana-secrets"
+#     fields:
+#       GF_SECURITY_ADMIN_PASSWORD:
+#         bws_field: "admin_password"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What this playbook reads from BWS
+#     reads:
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for ExternalSecret backend"
+#
+#     # What this playbook writes to BWS
+#     writes:
+#       - path: "_state.apps.grafana.status"
+#         example: "ready"
+#       - path: "_state.apps.grafana.url"
+#         example: "http://grafana.observability.svc:3000"
+#       - path: "_state.apps.grafana.api_key"
+#         example: "eyJrIjoiQ..."
+#       - path: "_state.apps.grafana.admin_password"
+#         example: "generated-password"
+#       - path: "_state.apps.grafana.nodeport"
+#         example: 30300
+#       - path: "_state.apps.grafana.ingress_url"
+#         example: "https://grafana.demo.com"
+#
+#   # ========== WIRING CONFIGURATION (v3.2 NEW) ==========
+#   wiring:
+#     # Apps this can wire to (actual wiring done in config playbook)
+#     can_wire_to:
+#       - app: "loki"
+#         required: false
+#         connection_method: "api"
+#         api_endpoint: "/api/datasources"
+#         http_method: "POST"
+#         requires_auth: true
+#         auth_type: "header"
+#         check_installed_at: "_state.apps.installed"
+#
+#       - app: "prometheus"
+#         required: false
+#         connection_method: "api"
+#         api_endpoint: "/api/datasources"
+#         http_method: "POST"
+#         requires_auth: true
+#         auth_type: "header"
+#         check_installed_at: "_state.apps.installed"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "grafana"
+#     service_name: "grafana"
+#     service_port: 3000
+#     namespace: "observability"
+#
+#     # Ingress mode from inventory
+#     mode_from_inventory: "ingress.mode"
+#
+#     # Cloudflare Tunnel mode
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#
+#       # Origin certificate (Cloudflare → Traefik HTTPS)
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#
+#     # Tailscale MagicDNS mode
+#     tailscale:
+#       in_cluster: true
+#
+#       # Tailscale certificate
+#       cert:
+#         method: "tailscale-cert"
+#
+#     # Path routing
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#
+#     # OAuth configuration
+#     oauth:
+#       client_id_format: "grafana-{client}"
+#
+#       # Redirect URIs (mode-dependent)
+#       redirect_uri_template:
+#         cloudflare: "https://{subdomain}.{domain}/login/generic_oauth"
+#         tailscale: "https://{subdomain}.{vm_hostname}.{tailnet}/login/generic_oauth"
+#
+#       scopes: ["openid", "profile", "email"]
+#
+#     # ForwardAuth middleware configuration
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#
+#     # Bypass SSO for these paths
+#     bypass_paths:
+#       - "/api/health"
+#       - "/metrics"
+#       - "/api/live/ws"  # WebSocket for live updates
+#
+#     # OAuth credentials written here
+#     credentials_path: "_state.apps.grafana.oauth"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Grafana"
+#     icon: "chart-line"
+#     category: "Observability"
+#     description: "Metrics visualization and dashboards"
+#     docs_url: "https://grafana.com/docs/grafana/latest/"
+#     port: 3000
+#     nodeport: 30030
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     app_name:
+#       label: "App Name"
+#       description: "Kubernetes resource name"
+#       type: "string"
+#       default: "grafana"
+#     app_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace"
+#       type: "string"
+#       default: "grafana"
+#     app_component:
+#       label: "App Component"
+#       description: "Kubernetes app component label"
+#       type: "string"
+#       default: "server"
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for Grafana"
+#       type: "string"
+#       default: "grafana/grafana:latest"
+#     image_pull_policy:
+#       label: "Image Pull Policy"
+#       description: "Kubernetes image pull policy"
+#       type: "choice"
+#       default: "IfNotPresent"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of Grafana replicas"
+#       type: "integer"
+#       default: 1
+#     container_port:
+#       label: "Container Port"
+#       description: "Grafana HTTP port"
+#       type: "integer"
+#       default: 3000
+#     configmap_name:
+#       label: "ConfigMap Name"
+#       description: "Name of the Kubernetes ConfigMap for Grafana env vars"
+#       type: "string"
+#       default: "grafana-config"
+#     secret_name:
+#       label: "Secret Name"
+#       description: "Name of the Kubernetes Secret for Grafana credentials"
+#       type: "string"
+#       default: "grafana-secrets"
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "choice"
+#       default: "NodePort"
+#       options: ["NodePort", "ClusterIP", "LoadBalancer"]
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "integer"
+#       default: 30030
+#     data_mount_path:
+#       label: "Data Mount Path"
+#       description: "Container path for Grafana data volume"
+#       type: "string"
+#       default: "/data"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "100m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "256Mi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "2000m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "2Gi"
+#     health_path:
+#       label: "Health Check Path"
+#       description: "HTTP path for liveness and readiness probes"
+#       type: "string"
+#       default: "/api/health"
+#     liveness_initial_delay:
+#       label: "Liveness Initial Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "integer"
+#       default: 60
+#     readiness_initial_delay:
+#       label: "Readiness Initial Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "integer"
+#       default: 30
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     data_storage_size:
+#       label: "Data Storage"
+#       description: "Persistent volume size for Grafana data"
+#       type: "string"
+#       default: "10Gi"
+#     admin_user:
+#       label: "Admin Username"
+#       description: "Grafana admin account username"
+#       type: "string"
+#       default: "admin"
+#     admin_password:
+#       label: "Admin Password"
+#       description: "Grafana admin account password (auto-generated if not set)"
+#       type: "string"
+#       default: "auto-generated"
+
+- name: Deploy Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: grafana
+    app_namespace: "grafana"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/grafana-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    container_port: 3000
+    health_path: "/api/health"
+    admin_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+  tasks:
+    # ========== 1. VERIFY PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    # ========== 2. CREATE NAMESPACE ==========
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name=grafana
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 3. RENDER J2 TEMPLATES ==========
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render configmap template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/configmap.yaml.j2"
+        dest: "{{ render_dir }}/configmap.yaml"
+        mode: '0644'
+
+    - name: Check if grafana secrets already exist
+      ansible.builtin.command: >-
+        kubectl get secret {{ secret_name | default('grafana-secrets') }}
+        -n {{ app_namespace }} -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}'
+      register: existing_secret
+      changed_when: false
+      failed_when: false
+
+    - name: Preserve existing admin password
+      ansible.builtin.set_fact:
+        admin_password: "{{ existing_secret.stdout | b64decode }}"
+      when: existing_secret.rc == 0 and existing_secret.stdout != '' and (existing_secret.stdout | b64decode | length) > 0
+      no_log: true
+
+    - name: Guard against empty admin password
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to deploy — admin_password is empty.
+          Neither preservation from existing K8s Secret nor generation produced a value.
+      when: admin_password | default('') | length == 0
+
+    - name: Render secrets template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/secrets.yaml.j2"
+        dest: "{{ render_dir }}/secrets.yaml"
+        mode: '0644'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/statefulset.yaml.j2"
+        dest: "{{ render_dir }}/statefulset.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Render PushSecret template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/pushsecret.yaml.j2"
+        dest: "{{ render_dir }}/pushsecret.yaml"
+        mode: '0644'
+
+    # ========== 4. APPLY RENDERED MANIFESTS ==========
+    # Secrets must always use 'apply' — never 'replace --force' — to avoid
+    # rotating credentials while Grafana still has the old password from its PVC.
+    - name: Apply secrets (never replace --force)
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ render_dir }}/secrets.yaml
+      register: secrets_apply
+      changed_when: "'created' in secrets_apply.stdout or 'configured' in secrets_apply.stdout"
+
+    - name: Apply PushSecret (always idempotent)
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ render_dir }}/pushsecret.yaml
+      register: pushsecret_apply
+      changed_when: "'created' in pushsecret_apply.stdout or 'configured' in pushsecret_apply.stdout"
+
+    - name: Apply workload manifests
+      ansible.builtin.command:
+        cmd: >-
+          kubectl {{ kubectl_action }}
+          -f {{ render_dir }}/configmap.yaml
+          -f {{ render_dir }}/statefulset.yaml
+          -f {{ render_dir }}/service.yaml
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg: "{{ workload_apply.stdout_lines }}"
+
+    # ========== 5. WAIT FOR POD READY ==========
+    - name: Wait for StatefulSet to create pod
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pod -l app={{ app_name }} --no-headers
+      register: pod_exists
+      changed_when: false
+      retries: "{{ (app_start_timeout_seconds / retry_interval_seconds) | int }}"
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_exists.rc == 0 and pod_exists.stdout | length > 0
+
+    - name: Wait for Grafana pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app={{ app_name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_wait.rc == 0
+
+    # ========== 6. HEALTH CHECK ==========
+    # API key creation moved to Phase 4 config playbook.
+    # Install only verifies Grafana is responsive.
+    - name: Wait for Grafana to be responsive
+      ansible.builtin.uri:
+        url: "http://localhost:{{ nodeport | default(30030) }}/api/health"
+        method: GET
+        status_code: 200
+      register: grafana_health
+      retries: 30
+      delay: "{{ retry_interval_seconds }}"
+      until: grafana_health.status == 200
+
+    # ========== 7. DISPLAY STATUS ==========
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ image | default('grafana/grafana:latest') }}"
+          - "Access URL: http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30030) }}"
+          - "=========================================="
+
+    # ========== 8. BWS STATE ==========
+    # Credentials (admin_password) are extracted from K8s secret grafana-secrets
+    # and written to BWS by the Phase 3 workflow's generic writeback step.
+    # No manual writeback needed here.
+
+    # ========== 9. CLEANUP ==========
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

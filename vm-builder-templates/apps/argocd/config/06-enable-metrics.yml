@@ -1,0 +1,130 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/06-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/config/06-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "argocd"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["argocd_deployed"]
+#   provides: ["argocd_metrics_enabled"]
+#   tags: ["argocd", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus scrape annotations to ArgoCD application-controller
+#     and argocd-server deployments. Both already expose metrics natively
+#     (controller on port 8082, server on port 8083). This playbook adds
+#     pod-level annotations so Prometheus auto-discovers and scrapes both
+#     endpoints via its kubernetes-pods scrape config.
+#   requires_apps: ["argocd", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for ArgoCD
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    argocd_namespace: "argocd"
+    app_namespace: "{{ argocd_namespace }}"
+  tasks:
+    # ========== CHECK IF ARGOCD IS DEPLOYED ==========
+    - name: Check if ArgoCD server pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=argocd-server --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: argocd_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if ArgoCD not deployed
+      ansible.builtin.debug:
+        msg: "ArgoCD not deployed - skipping metrics configuration"
+      when: argocd_pod_check.rc != 0 or argocd_pod_check.stdout | length == 0
+
+    - name: End play if ArgoCD not available
+      ansible.builtin.meta: end_play
+      when: argocd_pod_check.rc != 0 or argocd_pod_check.stdout | length == 0
+
+    # ========== APPLICATION CONTROLLER ANNOTATIONS ==========
+    - name: Check if prometheus annotations already present on application-controller
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment argocd-application-controller -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: controller_scrape
+      changed_when: false
+      failed_when: false
+
+    - name: Add Prometheus scrape annotations to argocd-application-controller
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment argocd-application-controller -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"8082","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: controller_patch
+      changed_when: "'patched' in controller_patch.stdout"
+      when: controller_scrape.stdout != "true"
+
+    # ========== SERVER ANNOTATIONS ==========
+    - name: Check if prometheus annotations already present on argocd-server
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment argocd-server -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: server_scrape
+      changed_when: false
+      failed_when: false
+
+    - name: Add Prometheus scrape annotations to argocd-server
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment argocd-server -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"8083","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: server_patch
+      changed_when: "'patched' in server_patch.stdout"
+      when: server_scrape.stdout != "true"
+
+    # ========== WAIT FOR ROLLOUTS ==========
+    - name: Wait for application-controller rollout
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/argocd-application-controller -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: controller_scrape.stdout != "true"
+
+    - name: Wait for argocd-server rollout
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/argocd-server -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: server_scrape.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD Prometheus Metrics Enabled"
+          - "=========================================="
+          - "application-controller: port 8082 {{ '(annotations added)' if controller_scrape.stdout != 'true' else '(already configured)' }}"
+          - "argocd-server: port 8083 {{ '(annotations added)' if server_scrape.stdout != 'true' else '(already configured)' }}"
+          - "Namespace: {{ app_namespace }}"
+          - "Metrics Path: /metrics"
+          - "=========================================="

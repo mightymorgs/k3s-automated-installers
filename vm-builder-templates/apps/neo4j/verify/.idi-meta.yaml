@@ -1,0 +1,19 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-neo4j-config.yml:
+    summary: Verify that Neo4j is properly configured. Checks cluster health, database
+      status, user existence, role configuration, index states, and constraint validity.
+      Provides a comprehensive health report for Neo4j graph database setup.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ neo4j_url }}'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/neo4j/tx/commit'
+    - '{{ neo4j_url }}/db/neo4j/tx/commit'

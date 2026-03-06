@@ -1,0 +1,48 @@
+# apps/cloudflare/templates/cloudflared-deployment.yaml.j2
+# Variables:
+#   - app_namespace: K8s namespace (REQUIRED)
+#   - tunnel_secret_name: Name of the K8s Secret containing tunnel token (default: cloudflare-tunnel)
+#   - replicas: Number of replicas (default: 2)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: {{ app_namespace }}
+  labels:
+    app: cloudflared
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/component: tunnel
+    managed-by: ansible
+spec:
+  replicas: {{ replicas | default(2) }}
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest
+          args:
+            - tunnel
+            - --no-autoupdate
+            - run
+            - --token
+            - $(TUNNEL_TOKEN)
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ tunnel_secret_name | default('cloudflare-tunnel') }}
+                  key: tunnel_run_token
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

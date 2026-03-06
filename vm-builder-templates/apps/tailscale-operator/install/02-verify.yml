@@ -1,0 +1,55 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/tailscale-operator/02-verify"
+#   type: "atomic"
+#   dependencies: ["tailscale_operator_deployed"]
+#   tags: ["tailscale", "operator", "verification"]
+#   estimated_duration: 30
+#   idempotent: true
+#   description: Verify Tailscale Kubernetes operator deployment
+
+- name: Verify Tailscale Operator
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: tailscale-operator
+    app_namespace: tailscale
+
+    # Global timeout constants
+    retry_interval_seconds: 10
+
+  tasks:
+    - name: Check operator deployment exists
+      ansible.builtin.command: >-
+        kubectl get deployment operator -n {{ app_namespace }} -o name
+      register: deploy_check
+      changed_when: false
+      failed_when: deploy_check.stdout == ""
+
+    - name: Check operator pod is running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} rollout status
+        deployment/operator --timeout=30s
+      register: pod_phase
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_phase.rc == 0
+
+    - name: Check Connector CRD exists
+      ansible.builtin.command: >-
+        kubectl get crd connectors.tailscale.com
+      register: crd_check
+      changed_when: false
+      failed_when: crd_check.rc != 0
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Tailscale Operator: OK"
+          - "Pod Status: {{ pod_phase.stdout }}"
+          - "CRDs: Installed"
+          - "=========================================="

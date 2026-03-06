@@ -1,0 +1,22 @@
+---
+# qBittorrent Service
+# NodePort for Tailscale access
+apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent
+  namespace: media-stack
+  labels:
+    app: qbittorrent
+    app.kubernetes.io/name: qbittorrent
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: NodePort
+  selector:
+    app: qbittorrent
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+      nodePort: 30081
+      protocol: TCP

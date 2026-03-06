@@ -1,0 +1,14 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy-tunnel.yml:
+    summary: Create Cloudflare Tunnel via API (or reuse existing), deploy cloudflared
+      K8s Deployment with tunnel token, and write tunnel state to BWS.
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ playbook_dir }}/../../../../../../apps/cloudflare/templates/cloudflared-deployment.yaml.j2'
+  01-deploy-tunnel.yml.j2:
+    summary: 'Jinja2 template: 01-deploy-tunnel.yml.j2'
+    source: inferred
+    confidence: medium

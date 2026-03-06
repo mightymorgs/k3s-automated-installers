@@ -1,0 +1,449 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/operations/cluster-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "argocd.clusters.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/operations/cluster-create.yml"
+#     category: "platform"
+#     subsystem: "argocd"
+#     role: "operations"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "argocd"
+#       supported_versions: ["2.10.x", "2.11.x", "2.12.x", "2.13.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - argocd: "2.13.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from ArgoCD API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_argocd_operations"
+#   dependencies: ["argocd_deployed", "argocd_admin_token_available"]
+#   provides: ["argocd_cluster_registered"]
+#   tags: ["argocd", "clusters", "gitops", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Register a Kubernetes cluster with ArgoCD. Supports bearer token auth,
+#     TLS client certificates, AWS EKS auth, and exec-based authentication.
+#     The in-cluster (https://kubernetes.default.svc) is registered by default.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.argocd.admin_token"
+#         purpose: "ArgoCD API token for authentication"
+#       - path: "_state.apps.argocd.url"
+#         purpose: "ArgoCD server URL"
+#
+#     writes:
+#       - path: "_state.apps.argocd.clusters.{cluster_name}.server"
+#         example: "https://kubernetes.default.svc"
+#       - path: "_state.apps.argocd.clusters.{cluster_name}.connection_state"
+#         example: "Successful"
+#       - path: "_state.apps.argocd.clusters.{cluster_name}.server_version"
+#         example: "v1.33.0"
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     required:
+#       - name: cluster_server
+#         description: "Kubernetes API server URL"
+#     optional:
+#       - name: cluster_name
+#         description: "Cluster name (derived from server if not specified)"
+#       - name: bearer_token
+#         description: "Bearer token for authentication"
+#       - name: tls_insecure
+#         description: "Skip TLS certificate verification (default: false)"
+#       - name: tls_server_name
+#         description: "Server name for SNI"
+#       - name: tls_ca_data
+#         description: "CA certificate (base64 encoded)"
+#       - name: tls_cert_data
+#         description: "Client certificate (base64 encoded)"
+#       - name: tls_key_data
+#         description: "Client key (base64 encoded)"
+#       - name: namespaces
+#         description: "Namespace restrictions (empty = all)"
+#       - name: cluster_resources
+#         description: "Allow cluster-scoped resources (default: true)"
+#       - name: project
+#         description: "Project scope for this cluster"
+#       - name: upsert
+#         description: "Update existing cluster (default: false)"
+
+- name: ArgoCD - Register Cluster
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    argocd_namespace: "argocd"
+    argocd_base_url: "{{ argocd_url }}"
+    argocd_api_base: "{{ argocd_base_url }}/api/v1"
+    endpoint: "/clusters"
+
+    # Required fields
+    # cluster_server: Kubernetes API server URL (required)
+
+    # Optional fields with sensible defaults
+    cluster_name: "{{ cluster_name_input | default('') }}"
+    bearer_token: "{{ bearer_token_input | default(omit) }}"
+    tls_insecure: "{{ tls_insecure_input | default(false) }}"
+    tls_server_name: "{{ tls_server_name_input | default(omit) }}"
+    tls_ca_data: "{{ tls_ca_data_input | default(omit) }}"
+    tls_cert_data: "{{ tls_cert_data_input | default(omit) }}"
+    tls_key_data: "{{ tls_key_data_input | default(omit) }}"
+    namespaces: "{{ namespaces_input | default([]) }}"
+    cluster_resources: "{{ cluster_resources_input | default(true) }}"
+    project: "{{ project_input | default(omit) }}"
+    labels: "{{ labels_input | default({}) }}"
+    annotations: "{{ annotations_input | default({}) }}"
+    shard: "{{ shard_input | default(omit) }}"
+    aws_cluster_name: "{{ aws_cluster_name_input | default(omit) }}"
+    aws_role_arn: "{{ aws_role_arn_input | default(omit) }}"
+    exec_provider_config: "{{ exec_provider_config_input | default(omit) }}"
+    upsert: "{{ upsert_input | default(false) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - cluster_server is defined and cluster_server | length > 0
+        fail_msg: "Required input missing: cluster_server"
+        success_msg: "All required inputs validated"
+
+    - name: Derive cluster name from server URL if not provided
+      ansible.builtin.set_fact:
+        effective_cluster_name: >-
+          {{
+            cluster_name if cluster_name | length > 0
+            else (cluster_server | regex_replace('^https?://', '') | regex_replace('[:/]', '-') | regex_replace('-+$', ''))
+          }}
+
+    - name: Display playbook information
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD - Register Cluster"
+          - "=========================================="
+          - "Cluster Server: {{ cluster_server }}"
+          - "Cluster Name: {{ effective_cluster_name }}"
+          - "TLS Insecure: {{ tls_insecure }}"
+          - "Cluster Resources: {{ cluster_resources }}"
+          - "Namespaces: {{ namespaces | length }} restrictions"
+          - "Upsert Mode: {{ upsert }}"
+          - "=========================================="
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract ArgoCD admin token
+      ansible.builtin.set_fact:
+        argocd_admin_token: >-
+          {{
+            inventory._state.apps.argocd.admin_token | default(argocd_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        argocd_base_url: "{{ inventory._state.apps.argocd.url }}"
+        argocd_api_base: "{{ inventory._state.apps.argocd.url }}/api/v1"
+      when: inventory._state.apps.argocd.url is defined
+
+    # ===== STEP 3: Check for Existing Cluster (Idempotency) =====
+    - name: Check if cluster already exists
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/clusters/{{ cluster_server | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_cluster
+      no_log: false
+
+    - name: Set existing cluster fact
+      ansible.builtin.set_fact:
+        cluster_exists: "{{ existing_cluster.status == 200 }}"
+        existing_cluster_data: "{{ existing_cluster.json if existing_cluster.status == 200 else {} }}"
+
+    - name: Skip creation if cluster exists and upsert is false
+      ansible.builtin.debug:
+        msg: "Cluster '{{ cluster_server }}' already exists - skipping (upsert={{ upsert }})"
+      when: cluster_exists and not upsert | bool
+
+    # ===== STEP 4: Build Cluster Payload =====
+    - name: Build base cluster payload
+      ansible.builtin.set_fact:
+        cluster_payload:
+          server: "{{ cluster_server }}"
+          name: "{{ effective_cluster_name }}"
+          clusterResources: "{{ cluster_resources }}"
+          config:
+            tlsClientConfig:
+              insecure: "{{ tls_insecure }}"
+      when: not cluster_exists or upsert | bool
+      no_log: true
+
+    - name: Add bearer token to config
+      ansible.builtin.set_fact:
+        cluster_payload: >-
+          {{
+            cluster_payload | combine({
+              'config': cluster_payload.config | combine({'bearerToken': bearer_token})
+            }, recursive=True)
+          }}
+      when:
+        - not cluster_exists or upsert | bool
+        - bearer_token is defined and bearer_token != omit
+      no_log: true
+
+    - name: Add TLS server name to config
+      ansible.builtin.set_fact:
+        cluster_payload: >-
+          {{
+            cluster_payload | combine({
+              'config': cluster_payload.config | combine({
+                'tlsClientConfig': cluster_payload.config.tlsClientConfig | combine({'serverName': tls_server_name})
+              }, recursive=True)
+            }, recursive=True)
+          }}
+      when:
+        - not cluster_exists or upsert | bool
+        - tls_server_name is defined and tls_server_name != omit
+
+    - name: Add TLS CA data to config
+      ansible.builtin.set_fact:
+        cluster_payload: >-
+          {{
+            cluster_payload | combine({
+              'config': cluster_payload.config | combine({
+                'tlsClientConfig': cluster_payload.config.tlsClientConfig | combine({'caData': tls_ca_data})
+              }, recursive=True)
+            }, recursive=True)
+          }}
+      when:
+        - not cluster_exists or upsert | bool
+        - tls_ca_data is defined and tls_ca_data != omit
+      no_log: true
+
+    - name: Add TLS client cert to config
+      ansible.builtin.set_fact:
+        cluster_payload: >-
+          {{
+            cluster_payload | combine({
+              'config': cluster_payload.config | combine({
+                'tlsClientConfig': cluster_payload.config.tlsClientConfig | combine({
+                  'certData': tls_cert_data,
+                  'keyData': tls_key_data
+                })
+              }, recursive=True)
+            }, recursive=True)
+          }}
+      when:
+        - not cluster_exists or upsert | bool
+        - tls_cert_data is defined and tls_cert_data != omit
+        - tls_key_data is defined and tls_key_data != omit
+      no_log: true
+
+    - name: Add AWS auth config
+      ansible.builtin.set_fact:
+        cluster_payload: >-
+          {{
+            cluster_payload | combine({
+              'config': cluster_payload.config | combine({
+                'awsAuthConfig': {
+                  'clusterName': aws_cluster_name,
+                  'roleARN': aws_role_arn
+                }
+              }, recursive=True)
+            }, recursive=True)
+          }}
+      when:
+        - not cluster_exists or upsert | bool
+        - aws_cluster_name is defined and aws_cluster_name != omit
+        - aws_role_arn is defined and aws_role_arn != omit
+      no_log: true
+
+    - name: Add exec provider config
+      ansible.builtin.set_fact:
+        cluster_payload: >-
+          {{
+            cluster_payload | combine({
+              'config': cluster_payload.config | combine({
+                'execProviderConfig': exec_provider_config
+              }, recursive=True)
+            }, recursive=True)
+          }}
+      when:
+        - not cluster_exists or upsert | bool
+        - exec_provider_config is defined and exec_provider_config != omit
+
+    - name: Add namespaces restrictions
+      ansible.builtin.set_fact:
+        cluster_payload: "{{ cluster_payload | combine({'namespaces': namespaces}) }}"
+      when:
+        - not cluster_exists or upsert | bool
+        - namespaces | length > 0
+
+    - name: Add project scope
+      ansible.builtin.set_fact:
+        cluster_payload: "{{ cluster_payload | combine({'project': project}) }}"
+      when:
+        - not cluster_exists or upsert | bool
+        - project is defined and project != omit
+
+    - name: Add shard
+      ansible.builtin.set_fact:
+        cluster_payload: "{{ cluster_payload | combine({'shard': shard | int}) }}"
+      when:
+        - not cluster_exists or upsert | bool
+        - shard is defined and shard != omit
+
+    - name: Add labels
+      ansible.builtin.set_fact:
+        cluster_payload: "{{ cluster_payload | combine({'labels': labels}) }}"
+      when:
+        - not cluster_exists or upsert | bool
+        - labels | length > 0
+
+    - name: Add annotations
+      ansible.builtin.set_fact:
+        cluster_payload: "{{ cluster_payload | combine({'annotations': annotations}) }}"
+      when:
+        - not cluster_exists or upsert | bool
+        - annotations | length > 0
+
+    # ===== STEP 5: Create Cluster =====
+    - name: Create cluster in ArgoCD
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif %}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ cluster_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not cluster_exists or upsert | bool
+
+    - name: Set cluster result
+      ansible.builtin.set_fact:
+        cluster_action: "{{ 'skipped' if cluster_exists and not upsert | bool else ('updated' if cluster_exists else 'created') }}"
+
+    # ===== STEP 6: Verify Cluster Connection =====
+    - name: Verify cluster connection
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/clusters/{{ cluster_server | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: cluster_verify
+      when: cluster_action != 'skipped'
+      no_log: false
+
+    - name: Extract cluster info
+      ansible.builtin.set_fact:
+        connection_state: "{{ cluster_verify.json.connectionState.status | default('Unknown') }}"
+        server_version: "{{ cluster_verify.json.serverVersion | default('Unknown') }}"
+      when: cluster_action != 'skipped' and cluster_verify.json is defined
+
+    - name: Set default values for skipped clusters
+      ansible.builtin.set_fact:
+        connection_state: "{{ existing_cluster_data.connectionState.status | default('Unknown') }}"
+        server_version: "{{ existing_cluster_data.serverVersion | default('Unknown') }}"
+      when: cluster_action == 'skipped'
+
+    - name: Warn if cluster connection failed
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Cluster connection state is {{ connection_state }}.
+          Please verify:
+          - Kubernetes API server is accessible from ArgoCD
+          - Bearer token or credentials are valid
+          - TLS certificates are correct
+      when: connection_state != 'Successful'
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Derive cluster key name for BWS writeback
+      ansible.builtin.set_fact:
+        cluster_key: "{{ effective_cluster_name | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with cluster info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge cluster info into _state.apps.argocd.clusters
+        UPDATED=$(echo "$CURRENT" | jq --arg cluster "{{ cluster_key }}" \
+          --arg server "{{ cluster_server }}" \
+          --arg conn_state "{{ connection_state }}" \
+          --arg server_ver "{{ server_version }}" \
+          '
+          if ._state.apps.argocd == null then ._state.apps.argocd = {} else . end |
+          if ._state.apps.argocd.clusters == null then ._state.apps.argocd.clusters = {} else . end |
+          if ._state.apps.argocd.clusters[$cluster] == null then ._state.apps.argocd.clusters[$cluster] = {} else . end |
+          ._state.apps.argocd.clusters[$cluster].server = $server |
+          ._state.apps.argocd.clusters[$cluster].connection_state = $conn_state |
+          ._state.apps.argocd.clusters[$cluster].server_version = $server_ver
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: cluster_action != 'skipped'
+
+    # ===== STEP 8: Output Result =====
+    - name: Display cluster creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ cluster_action }}"
+          cluster_server: "{{ cluster_server }}"
+          cluster_name: "{{ effective_cluster_name }}"
+          connection_state: "{{ connection_state }}"
+          server_version: "{{ server_version }}"

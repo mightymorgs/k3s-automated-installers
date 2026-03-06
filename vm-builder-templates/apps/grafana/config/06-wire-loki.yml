@@ -1,0 +1,119 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/06-wire-loki"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/06-wire-loki.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "loki_deployed"]
+#   provides: ["grafana_loki_wired"]
+#   tags: ["grafana", "loki", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Loki as a datasource in Grafana via the HTTP API.
+#     Uses Grafana basic auth (admin user) and internal K8s DNS for the
+#     Loki URL. Idempotent: checks for existing datasource before creating.
+#   requires_apps: ["grafana", "loki"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Wire Loki into Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    # loki_url: from BWS _state via Phase 4 extra-vars
+    loki_internal_url: "{{ loki_url }}"
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== VERIFY GRAFANA API ==========
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== CHECK IF DATASOURCE ALREADY EXISTS ==========
+    - name: Get existing datasources
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: existing_datasources
+      changed_when: false
+
+    - name: Check if Loki datasource already exists
+      ansible.builtin.set_fact:
+        loki_ds_exists: >-
+          {{ (existing_datasources.json | selectattr('type', 'equalto', 'loki') | list | length) > 0 }}
+
+    # ========== ADD LOKI DATASOURCE ==========
+    - name: Add Loki as datasource in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Loki"
+          type: "loki"
+          url: "{{ loki_internal_url }}"
+          access: "proxy"
+          isDefault: false
+          jsonData:
+            maxLines: 1000
+        status_code: [200, 409]
+      register: add_loki
+      changed_when: add_loki.status == 200
+      when: not loki_ds_exists
+
+    - name: Loki datasource already configured
+      ansible.builtin.debug:
+        msg: "Loki datasource already exists in Grafana - skipping"
+      when: loki_ds_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana <-> Loki Wiring Complete"
+          - "=========================================="
+          - "Datasource: Loki ({{ 'Added' if not loki_ds_exists else 'Already configured' }})"
+          - "Internal URL: {{ loki_internal_url }}"
+          - "Access Mode: proxy (server-side)"
+          - "=========================================="

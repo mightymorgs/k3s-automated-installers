@@ -1,0 +1,100 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  alertrule-create.yml:
+    summary: Create an alert rule in Grafana using the Alerting Provisioning API.
+      This operation is idempotent - if an alert rule with the same title in the same
+      folder/group exists, it will be skipped. Supports all alert rule types including
+      Prometheus-style queries.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_api_base }}{{ endpoint }}'
+    - '{{ grafana_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: grafana
+        field: admin_token
+      - app: grafana
+        field: url
+      - app: grafana
+        field: folders
+      - app: grafana
+        field: datasources
+      writes_to:
+      - app: grafana
+        field: alertrules
+      - app: grafana
+        field: alertrules
+      - app: grafana
+        field: alertrules
+  dashboard-import.yml:
+    summary: Import a dashboard into Grafana. This operation is idempotent - if overwrite
+      is false and dashboard exists, it will be skipped. Supports importing from JSON
+      file, inline JSON, or Grafana.com ID.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - https://grafana.com/api/dashboards/{{ grafana_com_id }}
+    - '{{ grafana_api_base }}/dashboards/uid/{{ dashboard_uid }}'
+    - '{{ grafana_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: grafana
+        field: admin_token
+      - app: grafana
+        field: url
+      - app: grafana
+        field: folders
+      writes_to:
+      - app: grafana
+        field: dashboards
+      - app: grafana
+        field: dashboards
+      - app: grafana
+        field: dashboards
+  datasource-create.yml:
+    summary: Create a datasource in Grafana. This operation is idempotent - if a datasource
+      with the same name exists, it will be skipped. Supports all datasource types
+      (prometheus, loki, elasticsearch, etc.).
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_api_base }}/datasources/name/{{ name | urlencode }}'
+    - '{{ grafana_api_base }}{{ endpoint }}'
+    - '{{ grafana_api_base }}/datasources/uid/{{ datasource_uid }}/health'
+    wiring:
+      reads_from:
+      - app: grafana
+        field: admin_token
+      - app: grafana
+        field: url
+      writes_to:
+      - app: grafana
+        field: datasources
+      - app: grafana
+        field: datasources
+      - app: grafana
+        field: datasources
+  folder-create.yml:
+    summary: Create a folder in Grafana for organizing dashboards. This operation
+      is idempotent - if a folder with the same UID or title exists, it will be skipped.
+      Folders help organize dashboards by application, team, or environment.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_api_base }}/folders/{{ folder_uid }}'
+    - '{{ grafana_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: grafana
+        field: admin_token
+      - app: grafana
+        field: url
+      writes_to:
+      - app: grafana
+        field: folders
+      - app: grafana
+        field: folders
+      - app: grafana
+        field: folders

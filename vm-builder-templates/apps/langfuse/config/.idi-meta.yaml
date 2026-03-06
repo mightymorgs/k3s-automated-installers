@@ -1,0 +1,35 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure Langfuse for Tailscale Ingress mode. Sets NextAuth.js environment
+      variables so Langfuse trusts the Tailscale proxy headers, listens on all interfaces,
+      and keeps password auth as a fallback. NEXTAUTH_URL is pointed at the Tailscale
+      IP on NodePort 30901.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ langfuse_url }}/api/health'
+  05-create-external-secret.yml:
+    summary: Create an ExternalSecret CRD in the ai-tools namespace that pulls Langfuse
+      secrets from Vault via the ClusterSecretStore vault-backend. Creates a K8s Secret
+      'langfuse-secrets' with keys 'nextauth-secret' and 'salt' from separate Vault
+      paths.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - external-secrets
+    - vault
+  06-wire-vault-secrets.yml:
+    summary: Replace hardcoded Langfuse secrets with an ExternalSecret CRD that pulls
+      nextauth_secret and salt from Vault path apps/data/langfuse/. Requires a working
+      ClusterSecretStore (vault-backend) from the external-secrets/04-wire-vault playbook.
+      Creates the ExternalSecret in the ai-tools namespace.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - external-secrets
+    - vault
+depends_on_apps:
+- external-secrets
+- vault

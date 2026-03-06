@@ -1,0 +1,18 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Neo4j graph database to K3s cluster via J2 templates. Provides
+      graph storage with APOC and vector search for GraphRAG. Accessible via NodePort
+      30474.
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ templates_dir }}/secrets.yaml.j2'
+    - '{{ templates_dir }}/statefulset.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+    - '{{ templates_dir }}/configmap-schemas.yaml.j2'
+  02-verify.yml:
+    summary: Verify Neo4j deployment is healthy
+    source: inferred
+    confidence: medium

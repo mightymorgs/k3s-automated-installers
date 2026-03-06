@@ -1,0 +1,765 @@
+---
+name: Phase 5 - Deploy Ingress and SSO
+# Purpose: Auto-configure ingress controller, SSO provider, and wire all apps with UI
+# Runs on: Self-hosted runner on the target VM (after Phase 4 configuration)
+#
+# This workflow orchestrates the deployment of Traefik ingress controller,
+# Authentik SSO provider, and auto-generates IngressRoutes and OAuth apps
+# for all installed applications with UI.
+#
+# Key Features:
+# - Dual ingress modes: Cloudflare Tunnel (public) or Tailscale MagicDNS (private)
+# - Auto-generates IngressRoutes from app registry metadata
+# - Auto-creates Authentik OAuth applications
+# - Wires ForwardAuth middleware for SSO protection
+# - Mode-dependent TLS certificate provisioning
+#
+# Architecture:
+# - Cloudflare mode: Internet -> Cloudflare Edge -> Tunnel -> Traefik IngressRoute (origin cert) -> Apps
+# - Tailscale mode: Tailnet -> Tailscale Operator Ingress (auto MagicDNS + LE cert per app) -> Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_hostname:
+        description: VM hostname (must match runner label)
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-gcp-latest)
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      vm_hostname:
+        description: VM hostname
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key
+        required: true
+        type: string
+
+jobs:
+  # Read VM inventory from BWS and prepare metadata for matrix strategies
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ingress_mode: ${{ steps.parse.outputs.ingress_mode }}
+      ingress_domain: ${{ steps.parse.outputs.ingress_domain }}
+      tailnet: ${{ steps.parse.outputs.tailnet }}
+      apps_with_ingress: ${{ steps.parse.outputs.apps_with_ingress }}
+      apps_with_sso: ${{ steps.parse.outputs.apps_with_sso }}
+      has_cloudflare_apps: ${{ steps.parse.outputs.has_cloudflare_apps }}
+      has_tailscale_apps: ${{ steps.parse.outputs.has_tailscale_apps }}
+      app_overrides: ${{ steps.parse.outputs.app_overrides }}
+      sso_overrides: ${{ steps.parse.outputs.sso_overrides }}
+      installed_apps: ${{ steps.parse.outputs.installed_apps }}
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install vm-builder for registry generation
+        run: pip install -e ".[dev]"
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Regenerate registry.json
+        run: |
+          python3 -c "
+          from pathlib import Path
+          from vm_builder.core.registry_generator import generate_registry, write_registry
+          templates_dir = Path('vm-builder/vm-builder-templates')
+          registry = generate_registry(templates_dir, path_prefix='vm-builder-templates')
+          write_registry(registry, templates_dir / 'registry.json')
+          print(f'Generated registry with {len(registry[\"apps\"])} apps')
+          "
+
+      - name: Read VM inventory and parse ingress configuration
+        id: parse
+        run: |
+          set -euo pipefail
+          BWS_CACHE=/tmp/bws_secrets.json
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          echo "Reading inventory from BWS cache..."
+          INVENTORY=$(jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .value' "$BWS_CACHE")
+
+          if [ -z "$INVENTORY" ] || [ "$INVENTORY" = "null" ]; then
+            echo "ERROR: Inventory not found at key: $INVENTORY_KEY"
+            echo "Available keys:"
+            jq -r '.[].key' "$BWS_CACHE" | grep "^inventory/" | head -20
+            exit 1
+          fi
+
+          # Extract ingress configuration
+          INGRESS_MODE=$(echo "$INVENTORY" | jq -r '.ingress.mode // "tailscale"')
+          INGRESS_DOMAIN=$(echo "$INVENTORY" | jq -r '.ingress.domain // ""')
+          # Resolve tailnet from pointer key
+          TAILNET_KEY=$(echo "$INVENTORY" | jq -r '.tailscale.tailnet_key // ""')
+          if [ -n "$TAILNET_KEY" ]; then
+            TAILNET=$(jq -r --arg k "$TAILNET_KEY" '.[] | select(.key==$k) | .value' "$BWS_CACHE")
+          else
+            TAILNET=""
+          fi
+
+          echo "Ingress mode: $INGRESS_MODE"
+          echo "Ingress domain: $INGRESS_DOMAIN"
+          echo "Tailnet: $TAILNET"
+
+          # Extract installed apps from _state
+          INSTALLED=$(echo "$INVENTORY" | jq -c '._state.apps.installed // []')
+          echo "Installed apps: $INSTALLED"
+
+          # Load registry to filter apps with ingress/sso
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          # Filter apps with ingress enabled
+          APPS_WITH_INGRESS=$(echo "$INSTALLED" | jq -c --argjson reg "$REGISTRY" '
+            [.[] | select(. as $app | $reg.apps[$app].ingress.enabled == true)]
+          ')
+
+          # Filter apps with SSO enabled
+          APPS_WITH_SSO=$(echo "$INSTALLED" | jq -c --argjson reg "$REGISTRY" '
+            [.[] | select(. as $app | $reg.apps[$app].sso.enabled == true)]
+          ')
+
+          echo "Apps with ingress: $APPS_WITH_INGRESS"
+          echo "Apps with SSO: $APPS_WITH_SSO"
+
+          # Extract per-app overrides
+          APP_OVERRIDES=$(echo "$INVENTORY" | jq -c '.ingress.app_overrides // {}')
+          SSO_OVERRIDES=$(echo "$INVENTORY" | jq -c '.ingress.sso_overrides // {}')
+
+          # Compute effective mode per app to determine which infrastructure is needed
+          HAS_CLOUDFLARE="false"
+          HAS_TAILSCALE="false"
+
+          for app in $(echo "$APPS_WITH_INGRESS" | jq -r '.[]'); do
+            EFFECTIVE_MODE=$(echo "$APP_OVERRIDES" | jq -r --arg app "$app" '.[$app] // ""')
+            if [ -z "$EFFECTIVE_MODE" ] || [ "$EFFECTIVE_MODE" = "null" ]; then
+              EFFECTIVE_MODE="$INGRESS_MODE"
+            fi
+            if [ "$EFFECTIVE_MODE" = "cloudflare" ]; then
+              HAS_CLOUDFLARE="true"
+            elif [ "$EFFECTIVE_MODE" = "tailscale" ]; then
+              HAS_TAILSCALE="true"
+            fi
+          done
+
+          echo "Has Cloudflare apps: $HAS_CLOUDFLARE"
+          echo "Has Tailscale apps: $HAS_TAILSCALE"
+
+          # Set outputs
+          {
+            echo "ingress_mode=$INGRESS_MODE"
+            echo "ingress_domain=$INGRESS_DOMAIN"
+            echo "tailnet=$TAILNET"
+            echo "apps_with_ingress=$APPS_WITH_INGRESS"
+            echo "apps_with_sso=$APPS_WITH_SSO"
+            echo "has_cloudflare_apps=$HAS_CLOUDFLARE"
+            echo "has_tailscale_apps=$HAS_TAILSCALE"
+            echo "app_overrides=$APP_OVERRIDES"
+            echo "sso_overrides=$SSO_OVERRIDES"
+            echo "installed_apps=$INSTALLED"
+          } >> "$GITHUB_OUTPUT"
+
+  # Verify Traefik was installed in Phase 3 (no longer deploys — Phase 3 handles install)
+  verify-traefik:
+    needs: prepare
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Verify Traefik installed in Phase 3
+        run: |
+          set -euo pipefail
+          BWS_CACHE=/tmp/bws_secrets.json
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          INVENTORY=$(jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .value' "$BWS_CACHE")
+          TRAEFIK_STATUS=$(echo "$INVENTORY" | jq -r '._state.apps.traefik.status // "missing"')
+
+          if [ "$TRAEFIK_STATUS" != "installed" ]; then
+            echo "ERROR: Traefik was not installed in Phase 3."
+            echo "  _state.apps.traefik.status = $TRAEFIK_STATUS"
+            echo "  Ensure 'traefik' is in selected_apps and Phase 3 completed successfully."
+            exit 1
+          fi
+
+          echo "BWS state confirms traefik is installed"
+
+      - name: Verify Traefik pods are ready
+        run: |
+          echo "Waiting for Traefik pods..."
+          kubectl -n traefik wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=traefik --timeout=180s
+
+          echo "Traefik deployment verified"
+          kubectl -n traefik get pods
+
+      - name: Verify websecure_port in BWS state
+        run: |
+          set -euo pipefail
+          BWS_CACHE=/tmp/bws_secrets.json
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          INVENTORY=$(jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .value' "$BWS_CACHE")
+          WEBSECURE_PORT=$(echo "$INVENTORY" | jq -r '._state.apps.traefik.websecure_port // "missing"')
+
+          if [ "$WEBSECURE_PORT" = "missing" ] || [ "$WEBSECURE_PORT" = "null" ]; then
+            echo "WARNING: websecure_port not found in BWS state — discovering from K8s"
+            WEBSECURE_PORT=$(kubectl get svc traefik -n traefik \
+              -o jsonpath='{.spec.ports[?(@.name=="websecure")].port}' 2>/dev/null || echo "")
+            if [ -n "$WEBSECURE_PORT" ]; then
+              echo "Discovered websecure_port=$WEBSECURE_PORT (not in BWS — Phase 3 writeback may need update)"
+            else
+              echo "WARNING: Could not discover websecure_port from K8s service"
+            fi
+          else
+            echo "websecure_port=$WEBSECURE_PORT (from BWS state)"
+          fi
+
+  # Deploy Cloudflare Tunnel (conditional on cloudflare mode)
+  deploy-cloudflare-tunnel:
+    needs: [prepare, verify-traefik]
+    if: needs.prepare.outputs.has_cloudflare_apps == 'true'
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Deploy Cloudflare Tunnel
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/cloudflare/install/01-deploy-tunnel.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Configure tunnel ingress and DNS
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/cloudflare/config/02-configure-tunnel-and-dns.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          REGISTRY_PATH: ${{ github.workspace }}/vm-builder/vm-builder-templates/registry.json
+
+      - name: Verify tunnel deployment
+        run: |
+          echo "Verifying cloudflared pods..."
+          kubectl -n cloudflare-system wait --for=condition=ready pod \
+            -l app=cloudflared --timeout=120s
+          echo "Cloudflare Tunnel verified"
+          kubectl -n cloudflare-system get pods
+
+  # Deploy Tailscale operator (conditional on tailscale mode)
+  deploy-tailscale-operator:
+    needs: [prepare, verify-traefik]
+    if: needs.prepare.outputs.has_tailscale_apps == 'true'
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Deploy Tailscale Operator
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/apps/tailscale-operator/install/01-deploy.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Verify Tailscale Operator
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/apps/tailscale-operator/install/02-verify.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+  # Verify Authentik was installed in Phase 3 (no longer deploys — Phase 3 handles install)
+  verify-authentik:
+    needs: [prepare, verify-traefik]
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Verify Authentik installed in Phase 3
+        run: |
+          set -euo pipefail
+          BWS_CACHE=/tmp/bws_secrets.json
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          INVENTORY=$(jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .value' "$BWS_CACHE")
+          AUTHENTIK_STATUS=$(echo "$INVENTORY" | jq -r '._state.apps.authentik.status // "missing"')
+
+          if [ "$AUTHENTIK_STATUS" != "installed" ]; then
+            echo "ERROR: Authentik was not installed in Phase 3."
+            echo "  _state.apps.authentik.status = $AUTHENTIK_STATUS"
+            echo "  Ensure 'authentik' is in selected_apps and Phase 3 completed successfully."
+            exit 1
+          fi
+
+          echo "BWS state confirms authentik is installed"
+
+      - name: Verify Authentik pods are ready
+        run: |
+          echo "Waiting for Authentik pods..."
+          kubectl -n authentik wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=authentik --timeout=300s
+
+          echo "Authentik deployment verified"
+          kubectl -n authentik get pods
+
+  # Create Cloudflare origin certificates (conditional on cloudflare mode)
+  create-origin-certs:
+    needs: [prepare, verify-traefik, deploy-cloudflare-tunnel]
+    if: |
+      always() &&
+      needs.prepare.outputs.has_cloudflare_apps == 'true' &&
+      needs.verify-traefik.result == 'success' &&
+      (needs.deploy-cloudflare-tunnel.result == 'success' || needs.deploy-cloudflare-tunnel.result == 'skipped')
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Create origin certificates
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/cloudflare/config/01-create-origin-certs.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          REGISTRY_PATH: ${{ github.workspace }}/vm-builder/vm-builder-templates/registry.json
+
+  # NOTE: Tailscale certificates are NOT provisioned as a separate step.
+  # The Tailscale K8s operator automatically handles MagicDNS device creation
+  # and Let's Encrypt cert provisioning when a K8s Ingress with
+  # ingressClassName=tailscale is applied. See create-ingressroutes job below.
+
+  # Auto-generate ingress resources for all apps
+  # Cloudflare mode: Traefik IngressRoute CRDs (origin cert TLS)
+  # Tailscale mode: K8s Ingress with ingressClassName=tailscale (operator auto-certs)
+  create-ingressroutes:
+    needs: [prepare, verify-traefik, deploy-tailscale-operator, create-origin-certs]
+    if: |
+      always() &&
+      needs.verify-traefik.result == 'success' &&
+      (needs.deploy-tailscale-operator.result == 'success' || needs.deploy-tailscale-operator.result == 'skipped') &&
+      (needs.create-origin-certs.result == 'success' || needs.create-origin-certs.result == 'skipped')
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Create IngressRoutes
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/platform/ingress/config/01-create-ingressroutes.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          REGISTRY_PATH: ${{ github.workspace }}/vm-builder/vm-builder-templates/registry.json
+
+  # Create admin user from BWS console credentials
+  create-admin-user:
+    needs: [prepare, verify-authentik]
+    if: |
+      always() &&
+      needs.verify-authentik.result == 'success'
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Create admin user
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/authentik/config/00-create-admin-user.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+  # Auto-generate Authentik OAuth applications
+  create-oauth-apps:
+    needs: [prepare, verify-authentik, create-admin-user]
+    if: |
+      always() &&
+      needs.verify-authentik.result == 'success' &&
+      (needs.create-admin-user.result == 'success' || needs.create-admin-user.result == 'skipped')
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Create OAuth applications
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/authentik/config/01-create-oauth-apps.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          REGISTRY_PATH: ${{ github.workspace }}/vm-builder/vm-builder-templates/registry.json
+
+  # Create proxy providers for Cloudflare-mode SSO apps
+  create-proxy-providers:
+    needs: [prepare, verify-authentik, create-admin-user]
+    if: |
+      always() &&
+      needs.prepare.outputs.has_cloudflare_apps == 'true' &&
+      needs.verify-authentik.result == 'success' &&
+      (needs.create-admin-user.result == 'success' || needs.create-admin-user.result == 'skipped')
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Create proxy providers
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/authentik/config/03-create-proxy-providers.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          REGISTRY_PATH: ${{ github.workspace }}/vm-builder/vm-builder-templates/registry.json
+
+  # Wire ForwardAuth middleware to IngressRoutes
+  wire-forwardauth:
+    needs: [prepare, create-ingressroutes, create-oauth-apps, create-proxy-providers]
+    if: |
+      always() &&
+      (needs.create-ingressroutes.result == 'success' || needs.create-ingressroutes.result == 'skipped') &&
+      (needs.create-oauth-apps.result == 'success' || needs.create-oauth-apps.result == 'skipped') &&
+      (needs.create-proxy-providers.result == 'success' || needs.create-proxy-providers.result == 'skipped')
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Create ForwardAuth Middleware
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/authentik/config/02-wire-forwardauth.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          REGISTRY_PATH: ${{ github.workspace }}/vm-builder/vm-builder-templates/registry.json
+
+  # Verify SSO login works for each app
+  verify-sso:
+    needs: [prepare, wire-forwardauth]
+    if: |
+      always() &&
+      (needs.wire-forwardauth.result == 'success' || needs.wire-forwardauth.result == 'skipped')
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify SSO configuration
+        run: |
+          echo "=========================================="
+          echo "Verifying SSO Configuration"
+          echo "=========================================="
+
+          APPS_WITH_SSO='${{ needs.prepare.outputs.apps_with_sso }}'
+          APPS_WITH_INGRESS='${{ needs.prepare.outputs.apps_with_ingress }}'
+          INGRESS_MODE='${{ needs.prepare.outputs.ingress_mode }}'
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          PASS=0
+          FAIL=0
+
+          # Check ingress resources exist (type depends on per-app effective mode)
+          APP_OVERRIDES='${{ needs.prepare.outputs.app_overrides }}'
+
+          for app in $(echo "$APPS_WITH_INGRESS" | jq -r '.[]'); do
+            NS=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].ingress.namespace // "default"')
+            EFFECTIVE_MODE=$(echo "$APP_OVERRIDES" | jq -r --arg app "$app" '.[$app] // ""')
+            if [ -z "$EFFECTIVE_MODE" ] || [ "$EFFECTIVE_MODE" = "null" ]; then
+              EFFECTIVE_MODE="$INGRESS_MODE"
+            fi
+
+            if [ "$EFFECTIVE_MODE" = "tailscale" ]; then
+              if kubectl get ingress -n "$NS" "${app}-ts-ingress" >/dev/null 2>&1; then
+                echo "  Ingress ${app}-ts-ingress (tailscale): OK"
+                PASS=$((PASS+1))
+              else
+                echo "  Ingress ${app}-ts-ingress (tailscale): MISSING"
+                FAIL=$((FAIL+1))
+              fi
+            elif [ "$EFFECTIVE_MODE" = "cloudflare" ]; then
+              if kubectl get ingressroute -n "$NS" "${app}-ingressroute" >/dev/null 2>&1; then
+                echo "  IngressRoute ${app}-ingressroute (cloudflare): OK"
+                PASS=$((PASS+1))
+              else
+                echo "  IngressRoute ${app}-ingressroute (cloudflare): MISSING"
+                FAIL=$((FAIL+1))
+              fi
+            fi
+          done
+
+          # Check ForwardAuth middleware
+          if [ "$(echo "$APPS_WITH_SSO" | jq 'length')" -gt 0 ]; then
+            if kubectl get middleware -n authentik authentik-forwardauth >/dev/null 2>&1; then
+              echo "  ForwardAuth Middleware: OK"
+              PASS=$((PASS+1))
+            else
+              echo "  ForwardAuth Middleware: MISSING"
+              FAIL=$((FAIL+1))
+            fi
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "Results: $PASS passed, $FAIL failed"
+          echo "=========================================="
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo "::warning::Some SSO verification checks failed"
+          fi
+
+  # Write Phase 5 completion state to BWS
+  write-phase5-state:
+    needs:
+      - prepare
+      - verify-traefik
+      - deploy-cloudflare-tunnel
+      - verify-authentik
+      - create-admin-user
+      - create-origin-certs
+      - create-ingressroutes
+      - create-oauth-apps
+      - create-proxy-providers
+      - wire-forwardauth
+      - verify-sso
+    if: always()
+    runs-on: [self-hosted, tailscale, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup BWS
+        uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Write Phase 5 completion to BWS
+        run: |
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          echo "Writing Phase 5 completion state to BWS..."
+
+          # Get BWS secret ID
+          SECRET_ID=$(bws secret list --output json | jq -r --arg k "$INVENTORY_KEY" \
+            '.[] | select(.key==$k) | .id')
+
+          # Get current inventory
+          CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Update with Phase 5 completion info
+          UPDATED=$(echo "$CURRENT" | jq \
+            --arg mode "${{ needs.prepare.outputs.ingress_mode }}" \
+            --argjson apps_ingress '${{ needs.prepare.outputs.apps_with_ingress }}' \
+            --argjson apps_sso '${{ needs.prepare.outputs.apps_with_sso }}' '
+            .bootstrap.phase_completed = "5" |
+            .bootstrap.ingress_sso_completed_at = (now | strftime("%Y-%m-%dT%H:%M:%SZ")) |
+            ._state.ingress.mode = $mode |
+            ._state.ingress.apps_configured = $apps_ingress |
+            ._state.sso.apps_configured = $apps_sso
+          ')
+
+          # Write back to BWS
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+
+          echo "✓ Phase 5 completion written to BWS"
+
+      - name: Display Phase 5 summary
+        run: |
+          INGRESS_MODE='${{ needs.prepare.outputs.ingress_mode }}'
+          INGRESS_DOMAIN='${{ needs.prepare.outputs.ingress_domain }}'
+          TAILNET='${{ needs.prepare.outputs.tailnet }}'
+          APPS_WITH_INGRESS='${{ needs.prepare.outputs.apps_with_ingress }}'
+          APPS_WITH_SSO='${{ needs.prepare.outputs.apps_with_sso }}'
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          echo "=========================================="
+          echo "Phase 5 Complete - Ingress & SSO Ready"
+          echo "=========================================="
+          echo ""
+          echo "Ingress Configuration:"
+          echo "  Mode: $INGRESS_MODE"
+          if [ "$INGRESS_MODE" = "cloudflare" ]; then
+            echo "  Domain: $INGRESS_DOMAIN"
+            echo "  TLS: Cloudflare origin certificates"
+          else
+            echo "  Tailnet: $TAILNET"
+            echo "  TLS: Tailscale certificates"
+          fi
+          echo ""
+          echo "Verified Platform Components (installed in Phase 3):"
+          echo "  - Traefik ingress controller"
+          echo "  - Authentik SSO provider"
+          if [ "${{ needs.prepare.outputs.has_cloudflare_apps }}" = "true" ]; then
+            echo "  - Cloudflare Tunnel"
+          fi
+          if [ "${{ needs.prepare.outputs.has_tailscale_apps }}" = "true" ]; then
+            echo "  - Tailscale Operator"
+          fi
+          echo ""
+          echo "Apps with Ingress:"
+          APP_OVERRIDES='${{ needs.prepare.outputs.app_overrides }}'
+
+          for app in $(echo "$APPS_WITH_INGRESS" | jq -r '.[]'); do
+            DISPLAY_NAME=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].display_name')
+            SUBDOMAIN=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].ingress.subdomain')
+            EFFECTIVE_MODE=$(echo "$APP_OVERRIDES" | jq -r --arg app "$app" '.[$app] // ""')
+            if [ -z "$EFFECTIVE_MODE" ] || [ "$EFFECTIVE_MODE" = "null" ]; then
+              EFFECTIVE_MODE="$INGRESS_MODE"
+            fi
+
+            if [ "$EFFECTIVE_MODE" = "cloudflare" ]; then
+              URL="https://${SUBDOMAIN}.${INGRESS_DOMAIN}"
+            elif [ "$EFFECTIVE_MODE" = "tailscale" ]; then
+              URL="https://${SUBDOMAIN}.${TAILNET}"
+            else
+              URL="(nodeport)"
+            fi
+
+            printf "  - %-20s [%s] %s\n" "$DISPLAY_NAME:" "$EFFECTIVE_MODE" "$URL"
+          done
+          echo ""
+          echo "Apps with SSO:"
+          for app in $(echo "$APPS_WITH_SSO" | jq -r '.[]'); do
+            DISPLAY_NAME=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].display_name')
+            echo "  - $DISPLAY_NAME"
+          done
+          echo ""
+          echo "Access:"
+          echo "  1. Navigate to any app URL above"
+          echo "  2. You will be redirected to Authentik SSO"
+          echo "  3. Login once, access all apps"
+          echo ""
+          echo "=========================================="
+          echo "VM: ${{ inputs.vm_hostname }}"
+          echo "=========================================="

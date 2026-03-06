@@ -1,0 +1,111 @@
+---
+# Neo4j StatefulSet (J2 template)
+# Defaults match k8s-base/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('neo4j') }}
+  namespace: {{ app_namespace | default('neo4j') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+spec:
+  serviceName: {{ app_name | default('neo4j') }}
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: {{ app_name | default('neo4j') }}
+          image: {{ image | default('neo4j:5.26.1-community') }}
+          ports:
+            - name: http
+              containerPort: {{ http_port | default(7474) }}
+              protocol: TCP
+            - name: bolt
+              containerPort: {{ bolt_port | default(7687) }}
+              protocol: TCP
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secret_name | default('neo4j-auth') }}
+                  key: NEO4J_AUTH
+                  optional: true
+            - name: NEO4J_PLUGINS
+              value: {{ neo4j_plugins | default('["apoc"]') | quote }}
+            - name: NEO4J_dbms_memory_heap_initial__size
+              value: {{ heap_initial_size | default('512m') | quote }}
+            - name: NEO4J_dbms_memory_heap_max__size
+              value: {{ heap_max_size | default('2G') | quote }}
+            - name: NEO4J_dbms_memory_pagecache_size
+              value: {{ pagecache_size | default('1G') | quote }}
+          resources:
+            requests:
+              memory: {{ memory_request | default('1Gi') | quote }}
+              cpu: {{ cpu_request | default('500m') | quote }}
+            limits:
+              memory: {{ memory_limit | default('4Gi') | quote }}
+              cpu: {{ cpu_limit | default('2000m') | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: logs
+              mountPath: /logs
+            - name: schemas
+              mountPath: {{ schemas_mount_path | default('/opt/neo4j-schemas') }}
+              readOnly: true
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  NEO4J_PASS=$(echo "$NEO4J_AUTH" | cut -d/ -f2-)
+                  cypher-shell -u neo4j -p "${NEO4J_PASS:-neo4j}" "RETURN 1"
+            initialDelaySeconds: {{ liveness_initial_delay | default(60) }}
+            periodSeconds: {{ liveness_period | default(30) }}
+            timeoutSeconds: {{ liveness_timeout | default(10) }}
+            failureThreshold: {{ liveness_failure_threshold | default(5) }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  NEO4J_PASS=$(echo "$NEO4J_AUTH" | cut -d/ -f2-)
+                  cypher-shell -u neo4j -p "${NEO4J_PASS:-neo4j}" "RETURN 1"
+            initialDelaySeconds: {{ readiness_initial_delay | default(30) }}
+            periodSeconds: {{ readiness_period | default(10) }}
+            timeoutSeconds: {{ readiness_timeout | default(5) }}
+            failureThreshold: {{ readiness_failure_threshold | default(3) }}
+      volumes:
+        - name: schemas
+          configMap:
+            name: {{ schemas_configmap_name | default('neo4j-schemas') }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ data_storage_size | default('10Gi') }}
+    - metadata:
+        name: logs
+        labels:
+          app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ logs_storage_size | default('2Gi') }}

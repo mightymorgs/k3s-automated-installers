@@ -1,0 +1,278 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/templates/01-render-platform"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/templates/01-render-platform.yml"
+#     category: "tools"
+#     subsystem: "templates"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "platform-templates"
+#       supported_versions: ["3.1"]
+#       version_range: ">=3.0"
+#
+#     requires:
+#       bws: ">=0.5.0"
+#       jinja2: ">=3.0.0"
+#       ansible: ">=2.9.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - platform: "all"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-23"
+#         notes: "Renders all platform component manifests in one pass for Phase 3 deployment"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_template_render_phase22"
+#   dependencies: ["bws_access_configured"]
+#   provides:
+#     - "vault_manifests_rendered"
+#     - "eso_manifests_rendered"
+#     - "longhorn_manifests_rendered"
+#     - "platform_manifests_ready"
+#   tags: ["platform", "templates", "jinja2", "manifests", "golden-master", "orchestration"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >
+#     Render all platform component manifests (Vault, ESO, Longhorn) from J2 templates
+#     using BWS inventory in one pass for Phase 3 workflow
+
+- name: Render all platform manifests from J2 templates
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    inventory_key: "{{ lookup('env', 'INVENTORY_KEY') }}"
+    base_output_dir: "/tmp/rendered"
+
+  tasks:
+    # ========================================
+    # VALIDATE INPUT
+    # ========================================
+    - name: Verify INVENTORY_KEY is provided
+      ansible.builtin.assert:
+        that:
+          - inventory_key | length > 0
+        fail_msg: "INVENTORY_KEY environment variable must be set"
+
+    - name: Verify BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+
+    # ========================================
+    # FETCH VM INVENTORY
+    # ========================================
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.command:
+        cmd: bws secret get {{ inventory_key }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_inventory
+      no_log: true
+      changed_when: false
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_inventory.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    # ========================================
+    # CREATE OUTPUT DIRECTORIES
+    # ========================================
+    - name: Create base output directory
+      ansible.builtin.file:
+        path: "{{ base_output_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create platform component directories
+      ansible.builtin.file:
+        path: "{{ base_output_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - vault
+        - external-secrets
+        - longhorn
+
+    # ========================================
+    # RENDER VAULT MANIFESTS
+    # ========================================
+    - name: Render Vault StatefulSet
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/vault/statefulset.yaml.j2"
+        dest: "{{ base_output_dir }}/vault/statefulset.yaml"
+        mode: '0644'
+      vars:
+        vault_version: "{{ inventory.platform_versions.vault | default('1.18') }}"
+        vault_replicas: "{{ inventory.vault.replicas | default(1) }}"
+        vault_storage_size: "{{ inventory.vault.storage_size | default('10Gi') }}"
+        vault_storage_class: "{{ inventory.vault.storage_class | default('longhorn') }}"
+        app_namespace: "{{ inventory.vault.namespace | default('vault') }}"
+        vault_memory_requests: "{{ inventory.vault.memory_requests | default('256Mi') }}"
+        vault_memory_limits: "{{ inventory.vault.memory_limits | default('512Mi') }}"
+        vault_cpu_requests: "{{ inventory.vault.cpu_requests | default('250m') }}"
+        vault_cpu_limits: "{{ inventory.vault.cpu_limits | default('500m') }}"
+        vault_api_port: "{{ inventory.vault.api_port | default(8200) }}"
+        vault_cluster_port: "{{ inventory.vault.cluster_port | default(8201) }}"
+
+    - name: Render Vault Service
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/vault/service.yaml.j2"
+        dest: "{{ base_output_dir }}/vault/service.yaml"
+        mode: '0644'
+      vars:
+        app_namespace: "{{ inventory.vault.namespace | default('vault') }}"
+        vault_api_port: "{{ inventory.vault.api_port | default(8200) }}"
+        vault_cluster_port: "{{ inventory.vault.cluster_port | default(8201) }}"
+        vault_nodeport: "{{ inventory.vault.nodeport | default(30820) }}"
+        vault_enable_nodeport: "{{ inventory.vault.enable_nodeport | default(true) }}"
+
+    - name: Render Vault ConfigMap
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/vault/config.yaml.j2"
+        dest: "{{ base_output_dir }}/vault/config.yaml"
+        mode: '0644'
+      vars:
+        app_namespace: "{{ inventory.vault.namespace | default('vault') }}"
+        vault_ui_enabled: "{{ inventory.vault.ui_enabled | default(true) }}"
+        vault_api_port: "{{ inventory.vault.api_port | default(8200) }}"
+        vault_cluster_port: "{{ inventory.vault.cluster_port | default(8201) }}"
+        vault_storage_backend: "{{ inventory.vault.storage_backend | default('file') }}"
+        vault_storage_path: "{{ inventory.vault.storage_path | default('/vault/data') }}"
+        vault_tls_disable: "{{ inventory.vault.tls_disable | default(1) }}"
+        vault_listener_address: "{{ inventory.vault.listener_address | default('0.0.0.0:8200') }}"
+        vault_disable_mlock: "{{ inventory.vault.disable_mlock | default(true) }}"
+
+    # ========================================
+    # RENDER EXTERNAL SECRETS OPERATOR MANIFESTS
+    # ========================================
+    - name: Render ESO Deployment
+      ansible.builtin.template:
+        src: >-
+          {{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/deployment.yaml.j2
+        dest: "{{ base_output_dir }}/external-secrets/deployment.yaml"
+        mode: '0644'
+      vars:
+        eso_version: "{{ inventory.platform_versions.external_secrets | default('v0.9.13') }}"
+        eso_replicas: "{{ inventory.external_secrets.replicas | default(1) }}"
+        app_namespace: "{{ inventory.external_secrets.namespace | default('external-secrets') }}"
+        eso_concurrent: "{{ inventory.external_secrets.concurrent | default(1) }}"
+        eso_metrics_port: "{{ inventory.external_secrets.metrics_port | default(8080) }}"
+        eso_healthz_port: "{{ inventory.external_secrets.healthz_port | default(8081) }}"
+        eso_poller_interval: "{{ inventory.external_secrets.poller_interval | default(60000) }}"
+        eso_memory_requests: "{{ inventory.external_secrets.memory_requests | default('128Mi') }}"
+        eso_memory_limits: "{{ inventory.external_secrets.memory_limits | default('256Mi') }}"
+        eso_cpu_requests: "{{ inventory.external_secrets.cpu_requests | default('100m') }}"
+        eso_cpu_limits: "{{ inventory.external_secrets.cpu_limits | default('200m') }}"
+
+    - name: Render ESO Service
+      ansible.builtin.template:
+        src: >-
+          {{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/service.yaml.j2
+        dest: "{{ base_output_dir }}/external-secrets/service.yaml"
+        mode: '0644'
+      vars:
+        app_namespace: "{{ inventory.external_secrets.namespace | default('external-secrets') }}"
+        webhook_port: "{{ inventory.external_secrets.webhook_port | default(443) }}"
+        webhook_target_port: "{{ inventory.external_secrets.webhook_target_port | default(10250) }}"
+
+    - name: Render ESO ClusterSecretStore
+      ansible.builtin.template:
+        src: >-
+          {{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/secretstore.yaml.j2
+        dest: "{{ base_output_dir }}/external-secrets/secretstore.yaml"
+        mode: '0644'
+      vars:
+        vault_addr: >-
+          {{ inventory.external_secrets.vault_addr |
+          default('http://vault.vault.svc.cluster.local:8200') }}
+        vault_path: "{{ inventory.external_secrets.vault_path | default('secret') }}"
+        vault_version: "{{ inventory.external_secrets.vault_version | default('v2') }}"
+        vault_auth_method: "{{ inventory.external_secrets.vault_auth_method | default('kubernetes') }}"
+        vault_k8s_mount_path: "{{ inventory.external_secrets.vault_k8s_mount_path | default('kubernetes') }}"
+        vault_k8s_role: "{{ inventory.external_secrets.vault_k8s_role | default('external-secrets') }}"
+        vault_service_account: >-
+          {{ inventory.external_secrets.vault_service_account | default('external-secrets') }}
+        vault_namespace: "{{ inventory.external_secrets.namespace | default('external-secrets') }}"
+        secretstore_name: "{{ inventory.external_secrets.secretstore_name | default('vault-backend') }}"
+
+    # ========================================
+    # RENDER LONGHORN MANIFESTS
+    # ========================================
+    - name: Render Longhorn Deployment
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/longhorn/deployment.yaml.j2"
+        dest: "{{ base_output_dir }}/longhorn/deployment.yaml"
+        mode: '0644'
+      vars:
+        longhorn_version: "{{ inventory.platform_versions.longhorn | default('v1.6.0') }}"
+        app_namespace: "{{ inventory.longhorn.namespace | default('longhorn-system') }}"
+
+    - name: Render Longhorn StorageClass
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../../templates/k8s/platform/longhorn/storageclass.yaml.j2"
+        dest: "{{ base_output_dir }}/longhorn/storageclass.yaml"
+        mode: '0644'
+      vars:
+        replicas: "{{ inventory.longhorn.replicas | default(3) }}"
+        is_default: "{{ inventory.longhorn.is_default | default(true) }}"
+        data_locality: "{{ inventory.longhorn.data_locality | default('best-effort') }}"
+        reclaim_policy: "{{ inventory.longhorn.reclaim_policy | default('Delete') }}"
+        storage_class_name: "{{ inventory.longhorn.storage_class_name | default('longhorn') }}"
+        disk_selector: "{{ inventory.longhorn.disk_selector | default(omit) }}"
+        node_selector: "{{ inventory.longhorn.node_selector | default(omit) }}"
+
+    # ========================================
+    # VERIFY AND SUMMARY
+    # ========================================
+    - name: Count rendered files
+      ansible.builtin.find:
+        paths: "{{ base_output_dir }}"
+        recurse: true
+        file_type: file
+        patterns: "*.yaml"
+      register: rendered_files
+
+    - name: Display comprehensive render summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "PLATFORM MANIFESTS RENDERED SUCCESSFULLY"
+          - "=========================================="
+          - ""
+          - "Base output directory: {{ base_output_dir }}"
+          - "Total files rendered: {{ rendered_files.matched }}"
+          - ""
+          - "Vault ({{ inventory.platform_versions.vault | default('1.18') }}):"
+          - "  - {{ base_output_dir }}/vault/statefulset.yaml"
+          - "  - {{ base_output_dir }}/vault/service.yaml"
+          - "  - {{ base_output_dir }}/vault/config.yaml"
+          - "  Namespace: {{ inventory.vault.namespace | default('vault') }}"
+          - ""
+          - "External Secrets ({{ inventory.platform_versions.external_secrets | default('v0.9.13') }}):"
+          - "  - {{ base_output_dir }}/external-secrets/deployment.yaml"
+          - "  - {{ base_output_dir }}/external-secrets/service.yaml"
+          - "  - {{ base_output_dir }}/external-secrets/secretstore.yaml"
+          - "  Namespace: {{ inventory.external_secrets.namespace | default('external-secrets') }}"
+          - ""
+          - "Longhorn ({{ inventory.platform_versions.longhorn | default('v1.6.0') }}):"
+          - "  - {{ base_output_dir }}/longhorn/deployment.yaml"
+          - "  - {{ base_output_dir }}/longhorn/storageclass.yaml"
+          - "  Namespace: {{ inventory.longhorn.namespace | default('longhorn-system') }}"
+          - ""
+          - "=========================================="
+          - "READY FOR PHASE 3 DEPLOYMENT"
+          - "=========================================="

@@ -1,0 +1,22 @@
+---
+# Prowlarr Service
+# NodePort for Tailscale access
+apiVersion: v1
+kind: Service
+metadata:
+  name: prowlarr
+  namespace: media-stack
+  labels:
+    app: prowlarr
+    app.kubernetes.io/name: prowlarr
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: NodePort
+  selector:
+    app: prowlarr
+  ports:
+    - name: http
+      port: 9696
+      targetPort: 9696
+      nodePort: 30696
+      protocol: TCP

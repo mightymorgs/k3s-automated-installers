@@ -1,0 +1,259 @@
+---
+# playbook_metadata:
+#   id: "atomic/networking/cloudflare/verification/01-verify-tunnel"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/networking/cloudflare/verification/01-verify-tunnel.yml"
+#     category: "networking"
+#     subsystem: "cloudflare"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflare-tunnel-verification"
+#       folder_version: null
+#       supported_versions: ["latest"]
+#       version_range: ">=2024.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       cloudflared: "deployed"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - cloudflared: "latest"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "Verifies cloudflared deployment, pod status, and tunnel connectivity"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "cloudflared_deployed"]
+#   provides: ["cloudflare_tunnel_verified"]
+#   tags: ["cloudflare", "tunnel", "verification", "networking"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify Cloudflare Tunnel deployment and connectivity status
+- name: Verify Cloudflare Tunnel status
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    namespace: media-stack
+    tunnel_deployment: cloudflared
+    tunnel_app_label: cloudflared
+    min_ready_replicas: 1
+  tasks:
+    - name: Display verification information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Cloudflare Tunnel Verification
+          - ==========================================
+          - 'Namespace: {{ namespace }}'
+          - 'Deployment: {{ tunnel_deployment }}'
+          - ==========================================
+    - name: Get Cloudflare Tunnel deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: '{{ tunnel_deployment }}'
+        namespace: '{{ namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: deployment_info
+    - name: Verify deployment exists
+      ansible.builtin.assert:
+        that: [deployment_info.resources | length > 0]
+        fail_msg: Cloudflare Tunnel deployment '{{ tunnel_deployment }}' not found
+          in namespace '{{ namespace }}'
+        success_msg: Cloudflare Tunnel deployment found
+    - name: Extract deployment status
+      ansible.builtin.set_fact:
+        deployment: '{{ deployment_info.resources[0] }}'
+        desired_replicas: '{{ deployment_info.resources[0].spec.replicas | default(1) }}'
+        ready_replicas: '{{ deployment_info.resources[0].status.readyReplicas | default(0) }}'
+        available_replicas: '{{ deployment_info.resources[0].status.availableReplicas | default(0) }}'
+    - name: Verify deployment replicas are ready
+      ansible.builtin.assert:
+        that:
+          - ready_replicas | int >= min_ready_replicas
+          - available_replicas | int >= min_ready_replicas
+        fail_msg: >-
+          Insufficient ready replicas. Expected: >-
+            {{ min_ready_replicas }}, Ready: {{ ready_replicas }}, Available: {{ available_replicas }}
+        success_msg: Deployment has {{ ready_replicas }}/{{ desired_replicas }}
+          replicas ready
+    - name: Get Cloudflare Tunnel pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ namespace }}'
+        label_selectors: ['app={{ tunnel_app_label }}']
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: tunnel_pods
+    - name: Verify tunnel pods exist
+      ansible.builtin.assert:
+        that: [tunnel_pods.resources | length > 0]
+        fail_msg: No Cloudflare Tunnel pods found
+        success_msg: Found {{ tunnel_pods.resources | length }} tunnel pod(s)
+    - name: Check pod statuses
+      ansible.builtin.set_fact:
+        running_pods: "{{ tunnel_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list }}"
+        pending_pods: "{{ tunnel_pods.resources | selectattr('status.phase', 'equalto', 'Pending') | list }}"
+        failed_pods: "{{ tunnel_pods.resources | selectattr('status.phase', 'equalto', 'Failed') | list }}"
+    - name: Display pod status summary
+      ansible.builtin.debug:
+        msg:
+          - 'Pod Status Summary:'
+          - '  Running: {{ running_pods | length }}'
+          - '  Pending: {{ pending_pods | length }}'
+          - '  Failed: {{ failed_pods | length }}'
+    - name: Verify all pods are running
+      ansible.builtin.assert:
+        that: [running_pods | length > 0, failed_pods | length == 0]
+        fail_msg: 'Tunnel pods not healthy. Running: {{ running_pods | length }},
+          Failed: {{ failed_pods | length }}'
+        success_msg: All tunnel pods are running
+    - name: Get tunnel pod logs (last 50 lines)
+      kubernetes.core.k8s_exec:
+        namespace: '{{ namespace }}'
+        pod: '{{ running_pods[0].metadata.name }}'
+        command: cat /dev/null
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: pod_exec_test
+      failed_when: false
+    - name: Get pod logs using k8s_info
+      kubernetes.core.k8s_log:
+        api_version: v1
+        kind: Pod
+        name: '{{ running_pods[0].metadata.name }}'
+        namespace: '{{ namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+        tail_lines: 50
+      register: tunnel_logs
+      failed_when: false
+    - name: Check for tunnel connection messages in logs
+      ansible.builtin.set_fact:
+        has_connection_log: >-
+          {{
+            'registered tunnel connection' in tunnel_logs.log | lower
+            or 'connection' in tunnel_logs.log | lower
+            if tunnel_logs.log is defined else false
+          }}
+        has_error_log: >-
+          {{
+            'error' in tunnel_logs.log | lower or 'failed' in tunnel_logs.log |
+          lower
+            if tunnel_logs.log is defined else false
+          }}
+    - name: Display log analysis
+      ansible.builtin.debug:
+        msg:
+          - 'Tunnel Log Analysis:'
+          - '  Connection messages detected: {{ has_connection_log }}'
+          - '  Error messages detected: {{ has_error_log }}'
+    - name: Get tunnel secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: cloudflare-tunnel
+        namespace: '{{ namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: tunnel_secret
+      failed_when: false
+    - name: Verify tunnel secret exists
+      ansible.builtin.debug:
+        msg: "Tunnel secret status: {{ 'Present' if tunnel_secret.resources | length > 0 else 'Missing' }}"
+    - name: Save tunnel verification results
+      ansible.builtin.copy:
+        content: |
+          # Cloudflare Tunnel Verification Results
+          Generated: {{ ansible_date_time.iso8601 }}
+
+          ## Deployment Status
+          - Namespace: {{ namespace }}
+          - Deployment: {{ tunnel_deployment }}
+          - Desired Replicas: {{ desired_replicas }}
+          - Ready Replicas: {{ ready_replicas }}
+          - Available Replicas: {{ available_replicas }}
+          - Status: {{ 'HEALTHY' if ready_replicas | int >= min_ready_replicas else 'UNHEALTHY' }}
+
+          ## Pod Status
+          - Total Pods: {{ tunnel_pods.resources | length }}
+          - Running: {{ running_pods | length }}
+          - Pending: {{ pending_pods | length }}
+          - Failed: {{ failed_pods | length }}
+
+          ## Pod Details
+          {% for pod in tunnel_pods.resources %}
+          ### {{ pod.metadata.name }}
+          - Status: {{ pod.status.phase }}
+          - Node: {{ pod.spec.nodeName | default('N/A') }}
+          - Started: {{ pod.status.startTime | default('N/A') }}
+          - Restart Count: >-
+            {{ pod.status.containerStatuses[0].restartCount if pod.status.containerStatuses is defined else 'N/A' }}
+          {% if pod.status.phase != 'Running' %}- WARNING: Pod not in Running state{% endif %}
+          {% endfor %}
+
+          ## Connectivity Analysis
+          {% if tunnel_logs.log is defined %}
+          - Connection Messages: {{ 'Detected' if has_connection_log else 'Not Detected' }}
+          - Error Messages: {{ 'Detected' if has_error_log else 'Not Detected' }}
+          {% else %}
+          - Log Analysis: Unable to retrieve logs
+          {% endif %}
+
+          ## Secret Status
+          - Tunnel Secret: {{ 'Present' if tunnel_secret.resources | length > 0 else 'Missing' }}
+
+          ## Overall Status
+          {{
+            'PASSED - Tunnel is operational'
+            if (ready_replicas | int >= min_ready_replicas and failed_pods | length == 0)
+            else 'FAILED - Tunnel has issues'
+          }}
+        dest: /tmp/cloudflare-tunnel-verification.md
+        mode: '0644'
+      delegate_to: localhost
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Cloudflare Tunnel Verification Summary
+          - ==========================================
+          - 'Deployment: {{ tunnel_deployment }}'
+          - '  Replicas: {{ ready_replicas }}/{{ desired_replicas }} ready'
+          - ''
+          - 'Pods: {{ running_pods | length }}/{{ tunnel_pods.resources | length
+            }} running'
+          - '{% if failed_pods | length > 0 %}  ⚠️ {{ failed_pods | length }} failed
+            pod(s){% endif %}'
+          - ''
+          - "Secret: {{ 'Present' if tunnel_secret.resources | length > 0 else 'Missing' }}"
+          - ''
+          - >-
+            Status:
+            {{
+              'PASSED'
+              if (ready_replicas | int >= min_ready_replicas and failed_pods | length
+            == 0)
+              else 'FAILED'
+            }}
+          - ''
+          - 'Results saved to: /tmp/cloudflare-tunnel-verification.md'
+          - ==========================================
+    - name: Fail if tunnel is not healthy
+      ansible.builtin.fail:
+        msg: Cloudflare Tunnel verification failed. Check /tmp/cloudflare-tunnel-verification.md
+          for details.
+      when: (ready_replicas | int < min_ready_replicas) or (failed_pods | length
+        > 0)

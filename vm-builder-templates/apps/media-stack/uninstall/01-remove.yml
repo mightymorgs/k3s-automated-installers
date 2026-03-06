@@ -1,0 +1,46 @@
+---
+- name: Uninstall Media Stack (namespace-level)
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: media-stack
+    app_namespace: "media-stack"
+    delete_pvc: false
+
+  tasks:
+    - name: Check namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+      register: ns_check
+
+    - name: Skip if namespace does not exist
+      ansible.builtin.meta: end_play
+      when: ns_check.resources | length == 0
+
+    - name: Delete shared PVC media-shared-pvc
+      when: delete_pvc | bool
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: media-shared-pvc
+        namespace: "{{ app_namespace }}"
+        state: absent
+
+    - name: Delete media-stack services
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Service
+        name: "{{ item }}"
+        namespace: "{{ app_namespace }}"
+        state: absent
+      loop:
+        - sonarr
+        - radarr
+        - prowlarr
+        - sabnzbd
+        - qbittorrent
+      failed_when: false

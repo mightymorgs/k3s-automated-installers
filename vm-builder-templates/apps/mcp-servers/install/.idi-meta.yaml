@@ -1,0 +1,55 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-apply-kustomize.yml:
+    summary: Apply MCP Server Kustomize manifests for AI-augmented operations
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: vault
+        field: url
+      - app: awx
+        field: url
+      - app: teleport
+        field: url
+      writes_to:
+      - app: vault_mcp
+        field: status
+      - app: vault_mcp
+        field: url
+      - app: awx_mcp
+        field: status
+      - app: awx_mcp
+        field: url
+      - app: teleport_mcp
+        field: status
+      - app: teleport_mcp
+        field: url
+      - app: k8s_rag_mcp
+        field: status
+      - app: k8s_rag_mcp
+        field: url
+  02-verify.yml:
+    summary: Verify all MCP Servers are healthy and accessible
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: vault_mcp
+        field: url
+      - app: awx_mcp
+        field: url
+      - app: teleport_mcp
+        field: url
+      - app: k8s_rag_mcp
+        field: url
+      writes_to:
+      - app: vault_mcp
+        field: health_status
+      - app: awx_mcp
+        field: health_status
+      - app: teleport_mcp
+        field: health_status
+      - app: k8s_rag_mcp
+        field: health_status

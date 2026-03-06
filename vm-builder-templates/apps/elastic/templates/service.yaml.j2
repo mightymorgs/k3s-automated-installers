@@ -1,0 +1,24 @@
+---
+# Elastic Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('elastic') }}
+  namespace: {{ app_namespace | default('elastic') }}
+  labels:
+    app: {{ app_name | default('elastic') }}
+    app.kubernetes.io/name: {{ app_name | default('elastic') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('elastic') }}
+    app.kubernetes.io/name: {{ app_name | default('elastic') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(9200) }}
+      targetPort: http
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30920) }}
+{% endif %}
+      protocol: TCP

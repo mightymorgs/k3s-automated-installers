@@ -1,0 +1,137 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sonarr/10-import-plex-watchlist"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sonarr/config/10-import-plex-watchlist.yml"
+#     category: "apps"
+#     subsystem: "sonarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["sonarr_deployed", "plex_deployed"]
+#   provides: ["sonarr_plex_watchlist_configured"]
+#   tags: ["sonarr", "plex", "import-list", "watchlist", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Import Plex Watchlist into Sonarr as an automatic import list.
+#     When users add TV shows to their Plex Watchlist, Sonarr will
+#     automatically search for and download them. Uses the PlexImport
+#     implementation with the Plex authentication token.
+#   requires_apps: ["sonarr", "plex"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.sonarr.api_key"
+#       - path: "_state.apps.plex.api_key"
+
+- name: Import Plex Watchlist into Sonarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    sonarr_namespace: "media-stack"
+    app_namespace: "{{ sonarr_namespace }}"
+    # sonarr_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF PLEX NOT INSTALLED ==========
+    - name: Skip if plex is not installed on this VM
+      when: plex_api_key is not defined
+      block:
+        - name: "plex not installed — skipping sonarr <-> plex wiring"
+          ansible.builtin.debug:
+            msg: "plex is not installed on this VM (no plex_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if sonarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "sonarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sonarr_api_key is not defined or sonarr_api_key | length == 0
+
+    - name: Fail if plex_api_key not provided
+      ansible.builtin.fail:
+        msg: "plex_api_key must be provided via extra-vars (from BWS inventory)"
+      when: plex_api_key is not defined or plex_api_key | length == 0
+
+    # ========== VERIFY SONARR API ==========
+    - name: Verify Sonarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Sonarr API not accessible
+      ansible.builtin.fail:
+        msg: "Sonarr API not accessible at {{ sonarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== CHECK EXISTING IMPORT LISTS ==========
+    - name: Get existing import lists
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/importlist"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        status_code: [200]
+      register: existing_importlists
+
+    - name: Check if Plex Watchlist import list already exists
+      ansible.builtin.set_fact:
+        plex_watchlist_exists: "{{ (existing_importlists.json | selectattr('name', 'equalto', 'Plex Watchlist') | list | length) > 0 }}"
+
+    # ========== ADD PLEX WATCHLIST IMPORT LIST ==========
+    - name: Add Plex Watchlist as import list
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/importlist"
+        method: POST
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Plex Watchlist"
+          implementation: "PlexImport"
+          configContract: "PlexListSettings"
+          enableAutomaticAdd: true
+          shouldMonitor: "all"
+          qualityProfileId: 1
+          rootFolderPath: "/media/tv"
+          fields:
+            - name: "accessToken"
+              value: "{{ plex_api_key }}"
+            - name: "signIn"
+              value: "startOAuth"
+        status_code: [200, 201]
+        return_content: true
+      register: add_watchlist_result
+      when: not plex_watchlist_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display import list result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Sonarr <-> Plex Watchlist Import Complete"
+          - "=========================================="
+          - "Import List: Plex Watchlist ({{ 'added' if (not plex_watchlist_exists and add_watchlist_result is defined and add_watchlist_result.status | default(0) in [200, 201]) else ('exists' if plex_watchlist_exists else 'FAILED') }})"
+          - "Auto-Add: enabled"
+          - "Monitor: all episodes"
+          - "Root Folder: /media/tv"
+          - "Quality Profile: 1 (default)"
+          - "=========================================="

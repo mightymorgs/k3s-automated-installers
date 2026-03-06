@@ -1,0 +1,243 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/operations/vault-auth-kubernetes-enable"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "vault.sys.auth.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/operations/vault-auth-kubernetes-enable.yml"
+#     category: "platform"
+#     subsystem: "vault"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vault"
+#       supported_versions: ["1.15.x", "1.16.x", "1.17.x", "1.18.x"]
+#       version_range: ">=1.15.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - vault: "1.18.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Vault API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_vault_operations"
+#   dependencies: ["vault_unsealed", "vault_root_token_available"]
+#   provides: ["vault_kubernetes_auth_enabled", "vault_kubernetes_auth_configured"]
+#   tags: ["vault", "kubernetes", "auth", "secrets-management", "phase3"]
+#   estimated_duration: 45
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable and configure Kubernetes authentication method in Vault. This operation
+#     is idempotent - if the kubernetes auth method is already enabled, only the
+#     configuration will be updated. Automatically retrieves K8s CA cert and service
+#     account JWT for configuration.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.root_token"
+#         purpose: "Vault root token for API authentication"
+#       - path: "_state.apps.vault.status"
+#         purpose: "Check if Vault is unsealed"
+#
+#     writes:
+#       - path: "_state.apps.vault.auth_methods.kubernetes.enabled"
+#         example: true
+#       - path: "_state.apps.vault.auth_methods.kubernetes.path"
+#         example: "kubernetes"
+#       - path: "_state.apps.vault.auth_methods.kubernetes.configured_timestamp"
+#         example: "2026-01-27T12:10:00Z"
+
+- name: Vault - Enable Kubernetes Authentication
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    vault_base_url: "{{ vault_addr }}"
+    vault_api_base: "{{ vault_base_url }}/v1"
+    endpoint_auth: "/sys/auth"
+    endpoint_k8s_config: "/auth/kubernetes/config"
+
+    # Kubernetes configuration
+    kubernetes_host: "{{ kubernetes_host_input }}"
+    auth_path: "{{ auth_path_input | default('kubernetes') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 2: Read BWS Inventory and Vault Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Vault root token
+      ansible.builtin.set_fact:
+        vault_token: "{{ inventory._state.apps.vault.root_token }}"
+      no_log: true
+
+    - name: Validate Vault token is available
+      ansible.builtin.assert:
+        that:
+          - vault_token | length > 0
+        fail_msg: "Vault root token not found in BWS _state. Run vault-sys-init.yml first."
+        success_msg: "Vault root token retrieved from BWS _state"
+
+    # ===== STEP 3: Check if Kubernetes Auth is Already Enabled (Idempotency) =====
+    - name: List enabled auth methods
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint_auth }}"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: auth_methods
+      no_log: false
+
+    - name: Check if kubernetes auth is enabled
+      ansible.builtin.set_fact:
+        k8s_auth_enabled: "{{ (auth_path + '/') in (auth_methods.json | default({}) | dict2items | map(attribute='key') | list) }}"
+
+    - name: Display auth method status
+      ansible.builtin.debug:
+        msg: "Kubernetes auth method at '{{ auth_path }}': {{ 'Enabled' if k8s_auth_enabled else 'Not enabled' }}"
+
+    # ===== STEP 4: Enable Kubernetes Auth Method =====
+    - name: Enable Kubernetes auth method
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint_auth }}/{{ auth_path }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: "kubernetes"
+          description: "Kubernetes authentication for K3s cluster workloads"
+        status_code: [200, 204]
+        validate_certs: false
+      register: enable_result
+      when: not k8s_auth_enabled
+      no_log: false
+
+    - name: Auth method enabled
+      ansible.builtin.debug:
+        msg: "Kubernetes auth method enabled at path '{{ auth_path }}'"
+      when: enable_result is not skipped
+
+    # ===== STEP 5: Retrieve Kubernetes CA Certificate =====
+    - name: Read Kubernetes CA certificate from cluster
+      ansible.builtin.shell: |
+        cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt 2>/dev/null || \
+        kubectl config view --raw --flatten -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d
+      register: k8s_ca_cert
+      changed_when: false
+      failed_when: false
+
+    - name: Use provided CA cert or read from configmap
+      ansible.builtin.set_fact:
+        kubernetes_ca_cert: "{{ k8s_ca_cert.stdout }}"
+      when: k8s_ca_cert.stdout | length > 0
+
+    # ===== STEP 6: Configure Kubernetes Auth Method =====
+    - name: Configure Kubernetes auth method
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint_k8s_config }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          kubernetes_host: "{{ kubernetes_host }}"
+          kubernetes_ca_cert: "{{ kubernetes_ca_cert | default(omit) }}"
+          disable_local_ca_jwt: "{{ disable_local_ca_jwt | default(false) }}"
+        status_code: [200, 204]
+        validate_certs: false
+      register: config_result
+      no_log: true
+
+    - name: Kubernetes auth configured
+      ansible.builtin.debug:
+        msg: "Kubernetes auth configured with host: {{ kubernetes_host }}"
+
+    # ===== STEP 7: Write Auth Configuration to BWS._state =====
+    - name: Update BWS inventory with auth method status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.vault.auth_methods.kubernetes
+        UPDATED=$(echo "$CURRENT" | jq \
+          --argjson enabled true \
+          --arg path "{{ auth_path }}" \
+          --arg k8s_host "{{ kubernetes_host }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.vault == null then ._state.apps.vault = {} else . end |
+          if ._state.apps.vault.auth_methods == null then ._state.apps.vault.auth_methods = {} else . end |
+          if ._state.apps.vault.auth_methods.kubernetes == null then ._state.apps.vault.auth_methods.kubernetes = {} else . end |
+          ._state.apps.vault.auth_methods.kubernetes.enabled = $enabled |
+          ._state.apps.vault.auth_methods.kubernetes.path = $path |
+          ._state.apps.vault.auth_methods.kubernetes.kubernetes_host = $k8s_host |
+          ._state.apps.vault.auth_methods.kubernetes.configured_timestamp = $timestamp
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 8: Output Result =====
+    - name: Display Kubernetes auth configuration result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'updated' if k8s_auth_enabled else 'enabled' }}"
+          auth_path: "{{ auth_path }}"
+          kubernetes_host: "{{ kubernetes_host }}"
+          message: >-
+            Kubernetes auth method {{ 'updated' if k8s_auth_enabled else 'enabled and configured' }}
+            at path '{{ auth_path }}'. Workloads can now authenticate using service account tokens.

@@ -1,0 +1,11 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-ingressroute.yml:
+    summary: Verify that a Traefik IngressRoute exists and is properly configured.
+      Checks IngressRoute exists, TLS is configured with a valid certificate, the
+      backend service exists, and the route responds to HTTP requests.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - https://{{ app_host }}/

@@ -1,0 +1,63 @@
+---
+# Claudebox Deployment (J2 template)
+# Defaults match install/01-deploy.yml inline definitions
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ app_name | default('claudebox') }}
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ app_name | default('claudebox') }}
+spec:
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('claudebox') }}
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('claudebox') }}
+    spec:
+      serviceAccountName: {{ service_account_name | default('claudebox') }}
+      containers:
+        - name: {{ app_name | default('claudebox') }}
+          image: {{ image | default('node:20-slim') }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              export NPM_CONFIG_PREFIX=/tmp/.npm-global
+              export PATH=/tmp/.npm-global/bin:$PATH
+              npm install -g @anthropic-ai/claude-code &&
+              echo "Claude Code installed: $(claude --version)" &&
+              exec tail -f /dev/null
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          ports:
+            - name: http
+              containerPort: {{ container_port | default(8080) }}
+              protocol: TCP
+          env:
+            - name: MCP_SERVERS
+              value: "{{ mcp_servers | default('vault-mcp,awx-mcp,k8s-rag-mcp') }}"
+            - name: KUBECONFIG
+              value: "{{ kubeconfig_mount | default('/var/run/secrets/kubernetes.io/serviceaccount') }}"
+          volumeMounts:
+            - name: workspace
+              mountPath: {{ workspace_mount_path | default('/workspace') }}
+          resources:
+            requests:
+              cpu: {{ cpu_request | default('500m') }}
+              memory: {{ memory_request | default('1Gi') }}
+            limits:
+              cpu: {{ cpu_limit | default('2000m') }}
+              memory: {{ memory_limit | default('4Gi') }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: {{ run_as_user | default(1000) }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: {{ pvc_name | default('claudebox-workspace') }}

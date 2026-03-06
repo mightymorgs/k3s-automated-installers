@@ -1,0 +1,301 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/verification/06-verify-storage"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/verification/06-verify-storage.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.7.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         longhorn: "1.7.2"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "Creates test PVC/pod and verifies read/write persistence"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "longhorn_installed"]
+#   provides: ["storage_verified"]
+#   tags: ["k3s", "verification", "storage", "longhorn", "pvc"]
+#   estimated_duration: 180
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify storage persistence and PVC status across media stack namespaces
+- name: Verify storage persistence
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    namespaces_to_check: [media-stack, longhorn-system]
+    test_namespace: storage-verification-test
+    test_pod_name: storage-test-pod
+    test_pvc_name: storage-test-pvc
+    test_file_path: /data/verification-test.txt
+    test_content: Storage persistence verification test - {{ ansible_date_time.epoch }}
+  tasks:
+    - name: Display verification information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Storage Persistence Verification
+          - ==========================================
+          - "Checking namespaces: {{ namespaces_to_check | join(', ') }}"
+          - 'Will create test namespace: {{ test_namespace }}'
+          - ==========================================
+    - name: Get all PVCs in monitored namespaces
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: '{{ item }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: pvc_info
+      loop: '{{ namespaces_to_check }}'
+      loop_control:
+        label: '{{ item }}'
+    - name: Get all PVs
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolume
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: pv_info
+    - name: Get Longhorn StorageClass
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: longhorn
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: storageclass_info
+    - name: Verify Longhorn StorageClass exists
+      ansible.builtin.assert:
+        that: [storageclass_info.resources | length > 0]
+        fail_msg: Longhorn StorageClass not found
+        success_msg: Longhorn StorageClass verified
+    - name: Process PVC status
+      ansible.builtin.set_fact:
+        all_pvcs: >-
+          {{ pvc_info.results | selectattr('resources', 'defined') | map(attribute='resources') | flatten | list }}
+    - name: Count PVC statuses
+      ansible.builtin.set_fact:
+        bound_pvcs: "{{ all_pvcs | selectattr('status.phase', 'equalto', 'Bound') | list }}"
+        pending_pvcs: "{{ all_pvcs | selectattr('status.phase', 'equalto', 'Pending') | list }}"
+        lost_pvcs: "{{ all_pvcs | selectattr('status.phase', 'equalto', 'Lost') | list }}"
+    - name: Display PVC summary
+      ansible.builtin.debug:
+        msg:
+          - 'PVC Status Summary:'
+          - '  Total PVCs: {{ all_pvcs | length }}'
+          - '  Bound: {{ bound_pvcs | length }}'
+          - '  Pending: {{ pending_pvcs | length }}'
+          - '  Lost: {{ lost_pvcs | length }}'
+    - name: Warn about pending or lost PVCs
+      ansible.builtin.debug:
+        msg: 'WARNING: Found {{ pending_pvcs | length }} pending and {{ lost_pvcs | length }}
+          lost PVCs'
+      when: (pending_pvcs | length > 0) or (lost_pvcs | length > 0)
+    - name: Create test namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: '{{ test_namespace }}'
+        state: present
+        kubeconfig: '{{ kubeconfig_path }}'
+    - name: Create test PVC
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: '{{ kubeconfig_path }}'
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: '{{ test_pvc_name }}'
+            namespace: '{{ test_namespace }}'
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: longhorn
+            resources:
+              requests:
+                storage: 1Gi
+    - name: Wait for test PVC to be bound
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: '{{ test_pvc_name }}'
+        namespace: '{{ test_namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+        wait: true
+        wait_condition:
+          type: Bound
+        wait_timeout: 120
+      register: test_pvc_status
+    - name: Create test pod with PVC
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: '{{ kubeconfig_path }}'
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: '{{ test_pod_name }}'
+            namespace: '{{ test_namespace }}'
+          spec:
+            containers:
+              - name: test
+                image: busybox:latest
+                command: [/bin/sh, -c, sleep 3600]
+                volumeMounts:
+                  - name: test-volume
+                    mountPath: /data
+            volumes:
+              - name: test-volume
+                persistentVolumeClaim:
+                  claimName: '{{ test_pvc_name }}'
+            restartPolicy: Never
+    - name: Wait for test pod to be ready
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: '{{ test_pod_name }}'
+        namespace: '{{ test_namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+        wait: true
+        wait_condition:
+          type: Ready
+        wait_timeout: 120
+    - name: Write test file to PVC
+      kubernetes.core.k8s_exec:
+        namespace: '{{ test_namespace }}'
+        pod: '{{ test_pod_name }}'
+        command: /bin/sh -c "echo '{{ test_content }}' > {{ test_file_path }}"
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: write_result
+    - name: Read test file from PVC
+      kubernetes.core.k8s_exec:
+        namespace: '{{ test_namespace }}'
+        pod: '{{ test_pod_name }}'
+        command: cat {{ test_file_path }}
+        kubeconfig: '{{ kubeconfig_path }}'
+      register: read_result
+    - name: Verify file content
+      ansible.builtin.assert:
+        that: [read_result.stdout.strip() == test_content]
+        fail_msg: Storage persistence test failed - content mismatch
+        success_msg: Storage persistence test passed - content verified
+    - name: Delete test pod
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Pod
+        name: '{{ test_pod_name }}'
+        namespace: '{{ test_namespace }}'
+        state: absent
+        kubeconfig: '{{ kubeconfig_path }}'
+    - name: Wait for test pod to be deleted
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: '{{ test_pod_name }}'
+        namespace: '{{ test_namespace }}'
+        kubeconfig: '{{ kubeconfig_path }}'
+        wait: true
+        wait_condition:
+          type: Deleted
+        wait_timeout: 60
+      register: pod_delete_wait
+      failed_when: false
+    - name: Delete test PVC
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: '{{ test_pvc_name }}'
+        namespace: '{{ test_namespace }}'
+        state: absent
+        kubeconfig: '{{ kubeconfig_path }}'
+    - name: Delete test namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: '{{ test_namespace }}'
+        state: absent
+        kubeconfig: '{{ kubeconfig_path }}'
+    - name: Save storage verification results
+      ansible.builtin.copy:
+        content: |
+          # Storage Persistence Verification Results
+          Generated: {{ ansible_date_time.iso8601 }}
+
+          ## PVC Status Summary
+          - Total PVCs: {{ all_pvcs | length }}
+          - Bound: {{ bound_pvcs | length }}
+          - Pending: {{ pending_pvcs | length }}
+          - Lost: {{ lost_pvcs | length }}
+
+          ## PVC Details
+          {% for pvc in all_pvcs %}
+          ### {{ pvc.metadata.namespace }}/{{ pvc.metadata.name }}
+          - Status: {{ pvc.status.phase }}
+          - Storage Class: {{ pvc.spec.storageClassName | default('default') }}
+          - Capacity: {{ pvc.status.capacity.storage | default('N/A') }}
+          - Access Modes: {{ pvc.spec.accessModes | join(', ') }}
+          {% if pvc.status.phase != 'Bound' %}- WARNING: PVC not in Bound state{% endif %}
+          {% endfor %}
+
+          ## Storage Persistence Test
+          - Test Namespace: {{ test_namespace }}
+          - Test PVC: {{ test_pvc_name }}
+          - Test Result: PASSED
+          - Write Test: OK
+          - Read Test: OK
+          - Content Verification: OK
+
+          ## Longhorn Status
+          - StorageClass: {{ 'Present' if storageclass_info.resources | length > 0 else 'Missing' }}
+          - Total PVs: {{ pv_info.resources | length }}
+        dest: /tmp/storage-verification.md
+        mode: '0644'
+      delegate_to: localhost
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Storage Verification Summary
+          - ==========================================
+          - 'PVC Status:'
+          - '  Total: {{ all_pvcs | length }}'
+          - '  Bound: {{ bound_pvcs | length }}'
+          - '  Pending: {{ pending_pvcs | length }}'
+          - '  Lost: {{ lost_pvcs | length }}'
+          - ''
+          - 'Storage Persistence Test: PASSED'
+          - '  ✓ PVC creation'
+          - '  ✓ Pod mount'
+          - '  ✓ Write operation'
+          - '  ✓ Read operation'
+          - '  ✓ Content verification'
+          - ''
+          - 'Results saved to: /tmp/storage-verification.md'
+          - ==========================================
+    - name: Fail if critical PVC issues detected
+      ansible.builtin.fail:
+        msg: 'Critical storage issues detected: {{ lost_pvcs | length }} lost PVCs'
+      when: lost_pvcs | length > 0

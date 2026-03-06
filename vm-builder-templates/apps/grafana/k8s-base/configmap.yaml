@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+data:
+  # Configuration will be populated by ansible
+  APP_URL: "https://grafana.example.com"

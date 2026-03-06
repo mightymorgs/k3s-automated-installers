@@ -1,0 +1,146 @@
+---
+# qBittorrent StatefulSet
+# Torrent download client
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qbittorrent
+  namespace: media-stack
+  labels:
+    app: qbittorrent
+    app.kubernetes.io/name: qbittorrent
+    app.kubernetes.io/component: torrent-client
+spec:
+  serviceName: qbittorrent
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qbittorrent
+  template:
+    metadata:
+      labels:
+        app: qbittorrent
+    spec:
+      initContainers:
+        - name: setup-directories
+          image: busybox:1.35
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /downloads/complete
+              mkdir -p /downloads/incomplete
+              mkdir -p /downloads/seedtorrents
+              chown -R 1000:1000 /downloads || true
+          volumeMounts:
+            - name: nfs-media
+              mountPath: /downloads
+              subPath: downloads
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+        - name: configure-webui-auth
+          image: busybox:1.35
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /config/qBittorrent
+              if [ ! -f /config/qBittorrent/qBittorrent.conf ]; then
+                cat > /config/qBittorrent/qBittorrent.conf <<'EOF'
+              [Preferences]
+              WebUI\LocalHostAuth=false
+              WebUI\AuthSubnetWhitelistEnabled=true
+              WebUI\AuthSubnetWhitelist=10.42.0.0/16, 10.43.0.0/16, 100.64.0.0/10
+              EOF
+                chown -R 1000:1000 /config
+              fi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+      containers:
+        - name: qbittorrent
+          image: ghcr.io/k8s-at-home/qbittorrent:v4.4.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Australia/Sydney"
+            - name: WEBUI_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: bittorrent
+              containerPort: 47863
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: nfs-media
+              mountPath: /downloads
+              subPath: downloads
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 30
+      volumes:
+        - name: nfs-media
+          persistentVolumeClaim:
+            claimName: nfs-media-pvc
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+        labels:
+          app: qbittorrent
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 5Gi

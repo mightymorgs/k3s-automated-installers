@@ -1,0 +1,223 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/tailscale-operator/config/01-create-certs"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/tailscale-operator/config/01-create-certs.yml"
+#     category: "platform"
+#     subsystem: "tailscale"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["traefik_deployed", "tailscale_operator_deployed"]
+#   requires_apps: ["tailscale-operator", "traefik"]
+#   provides: ["tailscale_certs_created"]
+#   tags: ["tailscale", "certificates", "ingress", "tls", "phase5"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create Tailscale certificates for apps with ingress.tailscale.cert configuration.
+#     Reads registry.json to find apps requiring certificates, generates certs via
+#     tailscale cert command, stores in K8s Secrets, and writes metadata to BWS._state.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.tailscale.tailnet"
+#         purpose: "Tailnet name for certificate hostname construction"
+#       - path: "tailscale.tailnet_key"
+#         purpose: "Tailscale OAuth key for authentication"
+#
+#     writes:
+#       - path: "_state.ingress.tailscale_certs"
+#         example: {"grafana": "grafana.tailnet.ts.net", "awx": "awx.tailnet.ts.net"}
+
+- name: Create Tailscale Certificates for Apps
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: true
+  become: true
+
+  vars:
+    registry_path: "{{ playbook_dir }}/../../../registry.json"
+    cert_working_dir: "/tmp/tailscale-certs"
+
+  tasks:
+    - name: Check if registry.json exists
+      ansible.builtin.stat:
+        path: "{{ registry_path }}"
+      register: registry_file
+      delegate_to: localhost
+      become: false
+
+    - name: Fail if registry.json not found
+      ansible.builtin.fail:
+        msg: "Registry file not found at {{ registry_path }}"
+      when: not registry_file.stat.exists
+
+    - name: Read app registry
+      ansible.builtin.slurp:
+        src: "{{ registry_path }}"
+      register: registry_content
+      delegate_to: localhost
+      become: false
+
+    - name: Parse registry JSON
+      ansible.builtin.set_fact:
+        app_registry: "{{ registry_content.content | b64decode | from_json }}"
+
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    - name: Resolve Tailnet from pointer
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.tailscale.tailnet_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: tailnet_result
+      changed_when: false
+
+    - name: Set Tailnet name
+      ansible.builtin.set_fact:
+        tailnet_name: "{{ tailnet_result.stdout | trim }}"
+
+    - name: Set ingress mode and app overrides
+      ansible.builtin.set_fact:
+        default_ingress_mode: "{{ _inventory.ingress.mode | default('nodeport') }}"
+        app_overrides: "{{ _inventory.ingress.app_overrides | default({}) }}"
+        installed_apps: "{{ _inventory._state.apps.installed | default([]) }}"
+
+    - name: Build list of apps overridden away from tailscale
+      ansible.builtin.set_fact:
+        _non_tailscale_overrides: >-
+          {{ app_overrides | dict2items |
+          rejectattr('value', 'equalto', 'tailscale') |
+          map(attribute='key') | list }}
+
+    - name: Build list of apps overridden TO tailscale
+      ansible.builtin.set_fact:
+        _tailscale_overrides: >-
+          {{ app_overrides | dict2items |
+          selectattr('value', 'equalto', 'tailscale') |
+          map(attribute='key') | list }}
+
+    - name: Extract apps with Tailscale cert capability
+      ansible.builtin.set_fact:
+        _all_ts_capable: >-
+          {{ app_registry.apps | dict2items |
+          selectattr('value.ingress.tailscale.cert.method', 'defined') |
+          selectattr('value.ingress.tailscale.cert.method', 'equalto', 'tailscale-cert') |
+          selectattr('key', 'in', installed_apps) |
+          list }}
+
+    - name: Filter to apps with effective tailscale mode
+      ansible.builtin.set_fact:
+        tailscale_cert_apps: >-
+          {{ _all_ts_capable |
+          rejectattr('key', 'in', _non_tailscale_overrides) |
+          map(attribute='value') | list }}
+      when: default_ingress_mode == 'tailscale'
+
+    - name: Filter to apps with tailscale override only
+      ansible.builtin.set_fact:
+        tailscale_cert_apps: >-
+          {{ _all_ts_capable |
+          selectattr('key', 'in', _tailscale_overrides) |
+          map(attribute='value') | list }}
+      when: default_ingress_mode != 'tailscale'
+
+    - name: Display apps requiring Tailscale certificates
+      ansible.builtin.debug:
+        msg: "Found {{ tailscale_cert_apps | length }} apps requiring Tailscale certificates"
+
+    - name: Validate Tailnet name
+      ansible.builtin.fail:
+        msg: "Tailnet name is empty or null - cannot proceed"
+      when: tailnet_name == "" or tailnet_name == "null"
+
+    - name: Display Tailnet name
+      ansible.builtin.debug:
+        msg: "Using Tailnet: {{ tailnet_name }}"
+
+    - name: Create working directory for certificates
+      ansible.builtin.file:
+        path: "{{ cert_working_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Check if Tailscale is installed
+      ansible.builtin.command:
+        cmd: which tailscale
+      register: tailscale_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if Tailscale not installed
+      ansible.builtin.fail:
+        msg: "Tailscale is not installed on this host. Please install Tailscale before running this playbook."
+      when: tailscale_check.rc != 0
+
+    - name: End play if no apps need certificates
+      ansible.builtin.meta: end_play
+      when: tailscale_cert_apps | length == 0
+
+    - name: Process each app requiring Tailscale certificate
+      ansible.builtin.include_tasks: create_single_cert.yml
+      loop: "{{ tailscale_cert_apps }}"
+      loop_control:
+        loop_var: app
+        label: "{{ app.id }}"
+
+    - name: Build certificate metadata for BWS
+      ansible.builtin.set_fact:
+        cert_metadata: >-
+          {{ cert_metadata | default({}) |
+          combine({item.id: item.ingress.subdomain ~ '.' ~ vm_hostname ~ '.' ~ tailnet_name}) }}
+      loop: "{{ tailscale_cert_apps }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Write certificate metadata to BWS._state.ingress.tailscale_certs
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ _inv_id_raw.stdout | trim }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        # Update _state.ingress.tailscale_certs
+        updated=$(printf '%s' "$inv" | jq --argjson certs '{{ cert_metadata | to_json }}' \
+          '._state.ingress.tailscale_certs = $certs')
+
+        # Write back to BWS
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      changed_when: true
+      no_log: false
+
+    - name: Clean up working directory
+      ansible.builtin.file:
+        path: "{{ cert_working_dir }}"
+        state: absent
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg: "Successfully created {{ tailscale_cert_apps | length }} Tailscale certificates and stored in K8s Secrets"

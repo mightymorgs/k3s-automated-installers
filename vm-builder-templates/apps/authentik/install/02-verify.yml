@@ -1,0 +1,164 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "authentik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "authentik"
+#       supported_versions: ["2024.4.x", "2024.6.x", "2024.8.x"]
+#       version_range: ">=2024.4.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - authentik: "2024.8.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-28"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260128_authentik_install"
+#   dependencies: ["authentik_deployed"]
+#   provides: ["authentik_verified", "authentik_healthy"]
+#   tags: ["authentik", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify Authentik deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.authentik.verified"
+#         example: true
+
+- name: Verify Authentik Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: "authentik"
+    app_namespace: "authentik"
+    container_port: 9000
+    health_path: "/-/health/live/"
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. VERIFY SERVER STATEFULSET ==========
+    - name: Check Authentik server StatefulSet exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get statefulset authentik-server
+        -o jsonpath='{.status.readyReplicas}'
+      register: server_ready
+      changed_when: false
+      failed_when: server_ready.stdout == "" or server_ready.stdout == "0"
+
+    # ========== 2. VERIFY WORKER DEPLOYMENT ==========
+    - name: Check Authentik worker deployment exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get deployment authentik-worker
+        -o jsonpath='{.status.readyReplicas}'
+      register: worker_ready
+      changed_when: false
+      failed_when: worker_ready.stdout == "" or worker_ready.stdout == "0"
+
+    # ========== 3. VERIFY POSTGRES ==========
+    - name: Check PostgreSQL StatefulSet exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get statefulset authentik-postgres
+        -o jsonpath='{.status.readyReplicas}'
+      register: postgres_ready
+      changed_when: false
+      failed_when: postgres_ready.stdout == "" or postgres_ready.stdout == "0"
+
+    # ========== 4. VERIFY REDIS ==========
+    - name: Check Redis deployment exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get deployment authentik-redis
+        -o jsonpath='{.status.readyReplicas}'
+      register: redis_ready
+      changed_when: false
+      failed_when: redis_ready.stdout == "" or redis_ready.stdout == "0"
+
+    # ========== 5. VERIFY SERVICE ==========
+    - name: Check Authentik service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get service {{ app_name }} -o name
+      register: service_check
+      changed_when: false
+      failed_when: service_check.rc != 0
+
+    # ========== 6. GET READY POD NAME ==========
+    - name: Get ready server pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app=authentik,component=server
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 7. HEALTH CHECK (block/rescue) ==========
+    - name: Health check block
+      block:
+        - name: Test health endpoint (auto-detect curl/wget)
+          ansible.builtin.command: >-
+            kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} --
+            /bin/sh -c "command -v curl >/dev/null
+            && curl -sf --max-time {{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}
+            || wget -q -O - --timeout={{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}"
+          register: health_check
+          changed_when: false
+          failed_when: health_check.rc != 0
+          retries: 3
+          delay: "{{ retry_interval_seconds }}"
+          until: health_check.rc == 0
+
+      rescue:
+        - name: Capture failure diagnostics
+          ansible.builtin.set_fact:
+            health_failure:
+              app: "{{ app_name }}"
+              namespace: "{{ app_namespace }}"
+              pod: "{{ app_pod.stdout | default('unknown') }}"
+              endpoint: "http://127.0.0.1:{{ container_port }}{{ health_path }}"
+              rc: "{{ health_check.rc | default('N/A') }}"
+              stderr: "{{ health_check.stderr | default('') | truncate(500) }}"
+              stdout: "{{ health_check.stdout | default('') | truncate(500) }}"
+
+        - name: Fail with diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Health check failed for {{ app_name }}.
+              Diagnostics: {{ health_failure | to_nice_json }}
+
+    # ========== 8. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name }} Verification Summary"
+          - "=========================================="
+          - "Server StatefulSet: {{ server_ready.stdout }} ready"
+          - "Worker Deployment: {{ worker_ready.stdout }} ready"
+          - "PostgreSQL: {{ postgres_ready.stdout }} ready"
+          - "Redis: {{ redis_ready.stdout }} ready"
+          - "Ready Pod:      {{ app_pod.stdout | default('NONE') }} — {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Health Check:   {{ health_path }} — {{ 'OK' if health_check.rc == 0 else 'FAILED' }}"
+          - "=========================================="

@@ -1,0 +1,342 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/jellyfin/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/jellyfin/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "jellyfin"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260302_api_key_creation"
+#   dependencies: ["jellyfin_deployed"]
+#   provides: ["jellyfin_api_configured", "jellyfin_api_key"]
+#   tags: ["jellyfin", "api", "configuration", "zero-touch"]
+#   estimated_duration: 90
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Jellyfin network settings for Tailscale mode and create
+#     an API key for downstream automation. Enables remote access and
+#     trusts pod/Tailscale CIDR ranges as known proxies. Creates an API
+#     key via localhost (no auth required) and writes it to BWS
+#     _state.apps.jellyfin.api_key for Phase 4 extra-vars consumption.
+#   requires_apps: ["jellyfin"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.jellyfin.configured"
+#         example: true
+#       - path: "_state.apps.jellyfin.api_key"
+#         example: "a1b2c3d4e5f6..."
+
+- name: Configure Jellyfin network settings for Tailscale mode
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    jellyfin_namespace: "jellyfin"
+    app_namespace: "{{ jellyfin_namespace }}"
+    # Network config file inside the Jellyfin container
+    network_config: /config/data/network.xml
+
+  tasks:
+    # ========== CHECK IF JELLYFIN IS DEPLOYED ==========
+    - name: Check if Jellyfin pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=jellyfin --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: jellyfin_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Jellyfin not deployed
+      ansible.builtin.debug:
+        msg: "Jellyfin not deployed - skipping API configuration"
+      when: jellyfin_pod_check.rc != 0 or jellyfin_pod_check.stdout | length == 0
+
+    - name: End play if Jellyfin not available
+      ansible.builtin.meta: end_play
+      when: jellyfin_pod_check.rc != 0 or jellyfin_pod_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Jellyfin pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ app_namespace }} \
+          -l app.kubernetes.io/name=jellyfin \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ app_namespace }} \
+          -l app=jellyfin \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ========== WAIT FOR POD READY ==========
+    - name: Wait for Jellyfin pod to be ready
+      ansible.builtin.command: >-
+        kubectl wait pod/{{ app_pod.stdout }}
+        -n {{ app_namespace }}
+        --for=condition=Ready
+        --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== VERIFY API IS ACCESSIBLE ==========
+    # jellyfin_url: from BWS _state via Phase 4 extra-vars
+    - name: Wait for Jellyfin API to be accessible
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/System/Info/Public"
+        method: GET
+        return_content: false
+      register: jellyfin_public_status
+      retries: 10
+      delay: 10
+      until: jellyfin_public_status.status is defined and jellyfin_public_status.status == 200
+      failed_when: false
+
+    - name: Fail if Jellyfin API not accessible
+      ansible.builtin.fail:
+        msg: "Jellyfin API not accessible after retries (last status: {{ jellyfin_public_status.status | default('unknown') }})"
+      when: jellyfin_public_status.status is not defined or jellyfin_public_status.status != 200
+
+    # ========== CHECK IF NETWORK CONFIG EXISTS ==========
+    - name: Check if network config file exists
+      ansible.builtin.command: >-
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }}
+        -- test -f {{ network_config }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: network_config_exists
+      changed_when: false
+      failed_when: false
+
+    # ========== CREATE NETWORK CONFIG IF MISSING ==========
+    # Jellyfin may not create network.xml until first access; seed a minimal one.
+    - name: Create default network config if missing
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- sh -c "
+          mkdir -p /config/data
+          cat > {{ network_config }} << 'XMLEOF'
+        <?xml version=\"1.0\" encoding=\"utf-8\"?>
+        <NetworkConfiguration xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">
+          <EnableRemoteAccess>false</EnableRemoteAccess>
+          <RequireHttps>false</RequireHttps>
+          <EnableUPnP>false</EnableUPnP>
+          <IsRemoteIPFilterBlacklist>true</IsRemoteIPFilterBlacklist>
+          <RemoteIPFilter />
+          <KnownProxies />
+        </NetworkConfiguration>
+        XMLEOF
+        "
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      when: network_config_exists.rc != 0
+      changed_when: true
+
+    # ========== CONFIGURE NETWORK SETTINGS ==========
+    # Patch network.xml to enable remote access for Tailscale mode.
+    # Tailscale IS the auth layer, so Jellyfin trusts pod/service/Tailscale CIDRs.
+    - name: Enable remote access
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          sed -i 's|<EnableRemoteAccess>false</EnableRemoteAccess>|<EnableRemoteAccess>true</EnableRemoteAccess>|' {{ network_config }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: remote_access_result
+      changed_when: true
+
+    - name: Disable HTTPS requirement (Tailscale handles encryption)
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          sed -i 's|<RequireHttps>true</RequireHttps>|<RequireHttps>false</RequireHttps>|' {{ network_config }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: https_result
+      changed_when: true
+
+    - name: Disable UPnP
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          sed -i 's|<EnableUPnP>true</EnableUPnP>|<EnableUPnP>false</EnableUPnP>|' {{ network_config }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: upnp_result
+      changed_when: true
+
+    - name: Set remote IP filter to blacklist mode (empty = allow all)
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          sed -i 's|<IsRemoteIPFilterBlacklist>false</IsRemoteIPFilterBlacklist>|<IsRemoteIPFilterBlacklist>true</IsRemoteIPFilterBlacklist>|' {{ network_config }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: filter_mode_result
+      changed_when: true
+
+    - name: Set known proxies (pod CIDR, service CIDR, Tailscale CGNAT)
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- sh -c "
+          sed -i 's|<KnownProxies />|<KnownProxies>\n    <string>10.42.0.0/16</string>\n    <string>10.43.0.0/16</string>\n    <string>100.64.0.0/10</string>\n  </KnownProxies>|' {{ network_config }}
+          # Also handle the case where KnownProxies already has content
+          # by leaving it unchanged (idempotent)
+        "
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: proxies_result
+      changed_when: true
+
+    # ========== RESTART TO APPLY ==========
+    - name: Restart Jellyfin to apply network config changes
+      ansible.builtin.command:
+        cmd: kubectl rollout restart statefulset jellyfin -n {{ app_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: true
+
+    - name: Wait for Jellyfin to be ready after restart
+      ansible.builtin.command:
+        cmd: kubectl -n {{ app_namespace }} wait --for=condition=ready pod/{{ app_pod.stdout }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== VERIFY SETTINGS APPLIED ==========
+    - name: Verify Jellyfin API is accessible after restart
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/System/Info/Public"
+        method: GET
+        return_content: false
+      register: jellyfin_verify
+      retries: 10
+      delay: 10
+      until: jellyfin_verify.status is defined and jellyfin_verify.status == 200
+      failed_when: false
+
+    # ========== CREATE API KEY (IDEMPOTENT) ==========
+    # Jellyfin doesn't generate API keys automatically. Downstream
+    # playbooks (05-configure-libraries, radarr/07-wire-jellyfin,
+    # sonarr/07-wire-jellyfin) need jellyfin_api_key from BWS.
+    # The /Auth/Keys endpoint requires no auth when called from
+    # localhost inside the pod.
+
+    - name: Check if jellyfin_api_key already exists
+      ansible.builtin.set_fact:
+        _jellyfin_key_exists: "{{ jellyfin_api_key is defined and jellyfin_api_key | length > 0 }}"
+
+    - name: Check for existing API keys inside Jellyfin
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          curl -sf "http://localhost:8096/Auth/Keys" 2>/dev/null || echo '{"Items":[]}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: existing_keys_raw
+      changed_when: false
+      failed_when: false
+      when: not _jellyfin_key_exists
+
+    - name: Check if ansible-automation key already exists in Jellyfin
+      ansible.builtin.set_fact:
+        _jellyfin_key_in_app: >-
+          {{ (existing_keys_raw.stdout | default('{"Items":[]}') | from_json).Items
+             | selectattr('AppName', 'defined')
+             | selectattr('AppName', 'equalto', 'ansible-automation')
+             | list | length > 0 }}
+        _existing_key_value: >-
+          {{ ((existing_keys_raw.stdout | default('{"Items":[]}') | from_json).Items
+              | selectattr('AppName', 'defined')
+              | selectattr('AppName', 'equalto', 'ansible-automation')
+              | map(attribute='AccessToken') | first | default('')) | trim }}
+      when: not _jellyfin_key_exists
+
+    - name: Use existing ansible-automation key if found
+      ansible.builtin.set_fact:
+        jellyfin_api_key: "{{ _existing_key_value }}"
+        _jellyfin_key_exists: true
+      no_log: true
+      when:
+        - not _jellyfin_key_exists
+        - _jellyfin_key_in_app | default(false)
+        - _existing_key_value | default('') | length > 0
+
+    - name: Create Jellyfin API key via localhost (no auth required)
+      ansible.builtin.shell: |
+        set -eu
+        # Create the API key — POST /Auth/Keys?app=<name> from inside the pod
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          curl -sf -X POST "http://localhost:8096/Auth/Keys?app=ansible-automation" \
+          -H "Content-Type: application/json" 2>/dev/null || true
+        # Read back the key we just created
+        KEYS=$(kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} -- \
+          curl -sf "http://localhost:8096/Auth/Keys" 2>/dev/null || echo '{"Items":[]}')
+        # Extract the ansible-automation key (most recently created)
+        echo "$KEYS" | jq -r '[.Items[] | select(.AppName=="ansible-automation")] | last | .AccessToken // empty'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: jellyfin_key_raw
+      changed_when: jellyfin_key_raw.stdout | default('') | trim | length > 0
+      failed_when: false
+      when: not _jellyfin_key_exists
+
+    - name: Set jellyfin_api_key fact
+      ansible.builtin.set_fact:
+        jellyfin_api_key: "{{ jellyfin_key_raw.stdout | trim }}"
+      no_log: true
+      when:
+        - not _jellyfin_key_exists
+        - jellyfin_key_raw.stdout | default('') | trim | length > 0
+
+    - name: Fail if API key could not be created
+      ansible.builtin.fail:
+        msg: >-
+          Failed to create Jellyfin API key. Jellyfin may not be fully
+          initialized (startup wizard not completed). The key is required
+          by downstream playbooks (05-configure-libraries, radarr/sonarr
+          07-wire-jellyfin). Check Jellyfin logs:
+          kubectl logs -n {{ app_namespace }} {{ app_pod.stdout }}
+      when:
+        - jellyfin_api_key is not defined or jellyfin_api_key | length == 0
+
+    # ========== WRITE API KEY TO BWS ==========
+    - name: Write jellyfin_api_key to BWS inventory
+      ansible.builtin.shell: |
+        set -eu
+        INVENTORY_KEY="{{ inventory_secret_name }}"
+        SECRET_ID=$(bws secret list --output json | jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .id')
+        if [ -z "$SECRET_ID" ]; then
+          echo "ERROR: BWS secret '$INVENTORY_KEY' not found" >&2
+          exit 1
+        fi
+        CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+        UPDATED=$(echo "$CURRENT" | jq --arg key "{{ jellyfin_api_key }}" '._state.apps.jellyfin.api_key = $key')
+        bws secret edit --value "$UPDATED" "$SECRET_ID"
+        echo "Written jellyfin_api_key to BWS"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      no_log: true
+      register: bws_write
+      changed_when: "'Written' in bws_write.stdout"
+      when: not (_jellyfin_key_exists | default(false))
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Jellyfin Network + API Configuration Complete"
+          - "=========================================="
+          - "EnableRemoteAccess: true"
+          - "RequireHttps: false"
+          - "EnableUPnP: false"
+          - "IsRemoteIPFilterBlacklist: true (empty = allow all)"
+          - "KnownProxies: 10.42.0.0/16, 10.43.0.0/16, 100.64.0.0/10"
+          - "Auth layer: Tailscale (no Jellyfin login required)"
+          - "API Key: {{ (jellyfin_api_key[:8] + '...') if jellyfin_api_key | default('') | length > 8 else 'CREATED' }}"
+          - "BWS writeback: {{ 'Written' if bws_write.changed | default(false) else 'Skipped (key already in BWS)' }}"
+          - "=========================================="

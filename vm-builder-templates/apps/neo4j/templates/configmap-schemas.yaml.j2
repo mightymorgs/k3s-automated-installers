@@ -1,0 +1,90 @@
+---
+# Neo4j Schemas ConfigMap (J2 template)
+# Defaults match k8s-standalone/base/configmap-schemas.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ schemas_configmap_name | default('neo4j-schemas') }}
+  namespace: {{ app_namespace | default('neo4j') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+data:
+  mcp-core.cypher: |
+    // MCP Core Schema - Routing Layer
+    // Creates domain nodes and routing relationships for playbook discovery
+    // Token cost: ~2K tokens (always loaded)
+
+    // Core system node
+    MERGE (c:Core {name: 'ansible-automation-system'})
+    SET c.description = 'Root node for infrastructure automation',
+        c.updated_at = datetime();
+
+    // Domain nodes (5 domains)
+    MERGE (d1:Domain {name: 'infrastructure'})
+    SET d1.description = 'K3s clusters, VMs, storage, compute resources';
+
+    MERGE (d2:Domain {name: 'security'})
+    SET d2.description = 'Vault, RBAC, secrets management, access control';
+
+    MERGE (d3:Domain {name: 'networking'})
+    SET d3.description = 'Tailscale, Traefik, DNS, ingress, load balancing';
+
+    MERGE (d4:Domain {name: 'applications'})
+    SET d4.description = 'Neo4j, ArgoCD, AWX, user workloads';
+
+    MERGE (d5:Domain {name: 'observability'})
+    SET d5.description = 'Monitoring, logging, tracing, alerting';
+
+    // Create routing relationships
+    MATCH (c:Core {name: 'ansible-automation-system'})
+    MATCH (d:Domain)
+    MERGE (c)-[:ROUTES_TO]->(d);
+
+    // Create indexes for fast lookup
+    CREATE INDEX domain_name IF NOT EXISTS FOR (d:Domain) ON (d.name);
+    CREATE INDEX playbook_id IF NOT EXISTS FOR (p:Playbook) ON (p.id);
+    CREATE INDEX playbook_namespace IF NOT EXISTS FOR (p:Playbook) ON (p.namespace);
+    CREATE INDEX playbook_category IF NOT EXISTS FOR (p:Playbook) ON (p.category);
+    CREATE INDEX subsystem_name IF NOT EXISTS FOR (s:Subsystem) ON (s.name);
+    CREATE INDEX capability_name IF NOT EXISTS FOR (c:Capability) ON (c.name);
+
+    // Constraints
+    CREATE CONSTRAINT playbook_id_unique IF NOT EXISTS FOR (p:Playbook) REQUIRE p.id IS UNIQUE;
+    CREATE CONSTRAINT domain_name_unique IF NOT EXISTS FOR (d:Domain) REQUIRE d.name IS UNIQUE;
+
+  observation.cypher: |
+    // Observation Layer Schema - Vector Search
+    // Creates indexes for semantic search over cluster observations
+
+    // Vector index for YAML chunks (1024-dim BGE-M3 embeddings)
+    CALL db.index.vector.createNodeIndex(
+      'yaml_chunks_embeddings',
+      'YAMLChunk',
+      'embedding_1024',
+      1024,
+      'cosine'
+    );
+
+    // Vector index for kubectl output similarity
+    CALL db.index.vector.createNodeIndex(
+      'kubectl_output_embeddings',
+      'KubectlOutput',
+      'embedding_1024',
+      1024,
+      'cosine'
+    );
+
+    // Vector index for Helm values
+    CALL db.index.vector.createNodeIndex(
+      'helm_values_embeddings',
+      'HelmValues',
+      'embedding_1024',
+      1024,
+      'cosine'
+    );
+
+    // Graph indexes for observation nodes
+    CREATE INDEX cluster_name IF NOT EXISTS FOR (c:Cluster) ON (c.name);
+    CREATE INDEX k8s_resource_kind IF NOT EXISTS FOR (r:K8sResource) ON (r.kind);
+    CREATE INDEX k8s_resource_name IF NOT EXISTS FOR (r:K8sResource) ON (r.name);
+    CREATE INDEX pattern_name IF NOT EXISTS FOR (p:Pattern) ON (p.name);

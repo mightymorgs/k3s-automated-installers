@@ -1,0 +1,12 @@
+---
+# Alertmanager ConfigMap (J2 template)
+# Defaults match k8s-base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ configmap_name | default('alertmanager-config') }}
+  namespace: {{ app_namespace | default('alertmanager') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('alertmanager') }}
+data:
+  APP_URL: "{{ app_url | default('http://localhost:' ~ (nodeport | default(30093)) | string) }}"

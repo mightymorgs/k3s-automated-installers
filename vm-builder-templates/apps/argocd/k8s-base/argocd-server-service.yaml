@@ -1,0 +1,31 @@
+---
+# ArgoCD Server Service - NodePort Exposure
+# This service exposes the ArgoCD UI on NodePort 30280 for easy access
+# Alternative: Use LoadBalancer type if MetalLB is configured
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-server-nodeport
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/component: server
+  annotations:
+    # Traefik ingress configuration (if using IngressRoute)
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: argocd
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30280
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: 8080
+      nodePort: 30444
+      protocol: TCP

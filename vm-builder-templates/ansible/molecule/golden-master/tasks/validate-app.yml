@@ -1,0 +1,60 @@
+---
+# validate-app.yml — Per-app orchestrator
+#
+# Includes all validation task files in order for a single app.
+# Called from converge.yml in a loop over discovered app directories.
+#
+# Input variables (set by caller):
+#   app_path          — absolute path to the app directory (e.g. .../apps/grafana)
+#   validation_results — list accumulator (initialized by converge.yml)
+#
+# Each included file appends its results to validation_results.
+# validate-negative.yml uses app_name + apps_base instead of app_path,
+# and collects into its own negative_results list which we merge at the end.
+
+# ============================================================
+# 1. SET UP COMMON VARIABLES
+# ============================================================
+
+- name: "{{ app_path | basename }} | Set common variables"
+  ansible.builtin.set_fact:
+    app_name: "{{ app_path | basename }}"
+    apps_base: "{{ app_path | dirname }}"
+
+# ============================================================
+# 2. INCLUDE VALIDATION FILES IN ORDER
+# ============================================================
+
+- name: "{{ app_path | basename }} | Validate install playbooks"
+  ansible.builtin.include_tasks: validate-install.yml
+
+- name: "{{ app_path | basename }} | Validate verify playbooks"
+  ansible.builtin.include_tasks: validate-verify.yml
+
+- name: "{{ app_path | basename }} | Validate config playbooks"
+  ansible.builtin.include_tasks: validate-config.yml
+
+- name: "{{ app_path | basename }} | Validate templates"
+  ansible.builtin.include_tasks: validate-templates.yml
+
+- name: "{{ app_path | basename }} | Validate PushSecret"
+  ansible.builtin.include_tasks: validate-pushsecret.yml
+
+- name: "{{ app_path | basename }} | Validate credentials"
+  ansible.builtin.include_tasks: validate-credentials.yml
+
+- name: "{{ app_path | basename }} | Validate runtime safety"
+  ansible.builtin.include_tasks: validate-runtime-safety.yml
+
+# ============================================================
+# 3. NEGATIVE TESTS (uses app_name + apps_base, not app_path)
+# ============================================================
+
+- name: "{{ app_path | basename }} | Run negative tests"
+  ansible.builtin.include_tasks: validate-negative.yml
+
+# Merge negative_results into validation_results with normalized format
+- name: "{{ app_path | basename }} | Merge negative test results"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + (negative_results | default([]) | map('combine', {'category': 'negative'}) | list) }}

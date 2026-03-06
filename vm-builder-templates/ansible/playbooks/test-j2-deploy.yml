@@ -1,0 +1,358 @@
+---
+# Test playbook: render J2 templates and deploy to K3s
+# Usage:
+#   ansible-playbook test-j2-deploy.yml -e app=qbittorrent
+#   ansible-playbook test-j2-deploy.yml -e app=grafana
+#   ansible-playbook test-j2-deploy.yml -e app=prometheus
+- name: "Test J2 Template Deploy: {{ app }}"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    templates_root: "{{ playbook_dir }}/../../apps"
+    render_dir: "/tmp/{{ app }}-j2-test"
+
+    # App-specific defaults (namespace, prerequisites)
+    app_configs:
+      qbittorrent:
+        namespace: media-stack
+        templates_subdir: templates
+        label_key: app
+        prereqs: []
+      grafana:
+        namespace: observability
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: grafana-config
+            data:
+              GF_SERVER_HTTP_PORT: "3000"
+              GF_SECURITY_ADMIN_USER: admin
+          - kind: Secret
+            name: grafana-secrets
+            data:
+              GF_SECURITY_ADMIN_PASSWORD: admin
+      prometheus:
+        namespace: observability
+        templates_subdir: templates
+        label_key: app
+        config_from_file: "{{ templates_root }}/prometheus/k8s-base/configmap.yaml"
+        prereqs:
+          - kind: ServiceAccount
+            name: prometheus
+          - kind: ClusterRole
+            name: prometheus
+            rules:
+              - apiGroups: [""]
+                resources: [nodes, nodes/proxy, services, endpoints, pods]
+                verbs: [get, list, watch]
+              - nonResourceURLs: ["/metrics"]
+                verbs: [get]
+          - kind: ClusterRoleBinding
+            name: prometheus
+            role: prometheus
+            sa_namespace: observability
+          - kind: ConfigMap
+            name: prometheus-config
+            data_file: "{{ templates_root }}/prometheus/k8s-base/configmap.yaml"
+      alertmanager:
+        namespace: observability
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: alertmanager-config
+            data:
+              ALERTMANAGER_PORT: "9093"
+          - kind: Secret
+            name: alertmanager-secrets
+            data:
+              ADMIN_PASSWORD: admin
+      jellyfin:
+        namespace: jellyfin
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: jellyfin-config
+            data:
+              JELLYFIN_PublishedServerUrl: "http://localhost:8096"
+          - kind: Secret
+            name: jellyfin-secrets
+            data:
+              ADMIN_PASSWORD: admin
+      neo4j:
+        namespace: neo4j
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: Secret
+            name: neo4j-auth
+            data:
+              NEO4J_AUTH: "neo4j/testpassword"
+              NEO4J_PASSWORD: testpassword
+          - kind: ConfigMap
+            name: neo4j-schemas
+            data:
+              placeholder: "true"
+      plex:
+        namespace: plex
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: plex-config
+            data:
+              APP_URL: "https://plex.test.local"
+          - kind: Secret
+            name: plex-secrets
+            data:
+              PLEX_CLAIM: "test"
+      loki:
+        namespace: observability
+        templates_subdir: templates
+        label_key: app
+        config_from_file: "{{ templates_root }}/loki/k8s-base/configmap.yaml"
+        prereqs: []
+      teleport:
+        namespace: teleport
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        config_from_file: "{{ templates_root }}/teleport/k8s-base/configmap.yaml"
+        prereqs:
+          - kind: ServiceAccount
+            name: teleport
+      elastic:
+        namespace: elastic
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: elastic-config
+            data:
+              discovery.type: single-node
+              xpack.security.enabled: "false"
+              ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+          - kind: Secret
+            name: elastic-secrets
+            data:
+              ELASTIC_PASSWORD: admin
+      langfuse:
+        namespace: langfuse
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: langfuse-config
+            data:
+              NEXTAUTH_URL: "http://localhost:3000"
+              TELEMETRY_ENABLED: "false"
+              DATABASE_HOST: langfuse-postgres
+              DATABASE_PORT: "5432"
+              DATABASE_NAME: langfuse
+          - kind: Secret
+            name: langfuse-secrets
+            data:
+              DATABASE_URL: "postgresql://langfuse:langfusepass@langfuse-postgres:5432/langfuse"
+              NEXTAUTH_SECRET: "test-secret-key-for-nextauth"
+              SALT: "test-salt-value"
+              POSTGRES_USER: langfuse
+              POSTGRES_PASSWORD: langfusepass
+      argocd:
+        namespace: argocd
+        templates_subdir: templates
+        label_key: app.kubernetes.io/name
+        prereqs:
+          - kind: ConfigMap
+            name: argocd-config
+            data:
+              APP_URL: "https://argocd.test.local"
+          - kind: Secret
+            name: argocd-secrets
+            data:
+              ADMIN_PASSWORD: admin
+
+    app_config: "{{ app_configs[app] }}"
+    app_ns: "{{ app_config.namespace }}"
+    app_namespace: "{{ app_config.namespace }}"
+    app_templates: "{{ templates_root }}/{{ app }}/{{ app_config.templates_subdir }}"
+
+  tasks:
+    - name: "Validate app '{{ app }}' is configured"
+      ansible.builtin.assert:
+        that: app in app_configs
+        fail_msg: "Unknown app '{{ app }}'. Supported: {{ app_configs.keys() | list }}"
+
+    # ========== 1. CREATE NAMESPACE ==========
+    - name: "Create namespace {{ app_ns }}"
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_ns }} --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: ns_result
+      changed_when: "'created' in ns_result.stdout"
+
+    # ========== 2. CREATE PREREQUISITES ==========
+    - name: "Create ConfigMap prerequisites"
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ app_ns }}"
+          data: "{{ item.data }}"
+      loop: "{{ app_config.prereqs | selectattr('kind', 'equalto', 'ConfigMap') | list }}"
+      when: item.data is defined
+
+    - name: "Create Secret prerequisites"
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ app_ns }}"
+          type: Opaque
+          stringData: "{{ item.data }}"
+      loop: "{{ app_config.prereqs | selectattr('kind', 'equalto', 'Secret') | list }}"
+      when: item.data is defined
+
+    - name: "Create ServiceAccount prerequisites"
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ app_ns }}"
+      loop: "{{ app_config.prereqs | selectattr('kind', 'equalto', 'ServiceAccount') | list }}"
+
+    - name: "Create ClusterRole prerequisites"
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: "{{ item.name }}"
+          rules: "{{ item.rules }}"
+      loop: "{{ app_config.prereqs | selectattr('kind', 'equalto', 'ClusterRole') | list }}"
+
+    - name: "Create ClusterRoleBinding prerequisites"
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ item.name }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: "{{ item.role }}"
+          subjects:
+            - kind: ServiceAccount
+              name: "{{ item.name }}"
+              namespace: "{{ item.sa_namespace }}"
+      loop: "{{ app_config.prereqs | selectattr('kind', 'equalto', 'ClusterRoleBinding') | list }}"
+
+    # ========== 3. APPLY CONFIGMAP FROM FILE (if specified) ==========
+    - name: "Apply configmap from k8s-base file"
+      ansible.builtin.shell: |
+        kubectl apply -f {{ app_config.config_from_file }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: app_config.config_from_file is defined
+      changed_when: true
+
+    # ========== 4. RENDER J2 TEMPLATES ==========
+    - name: "Create render directory {{ render_dir }}"
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: "Find all J2 templates"
+      ansible.builtin.find:
+        paths: "{{ app_templates }}"
+        patterns: "*.j2"
+      register: j2_files
+
+    - name: "Render J2 templates"
+      ansible.builtin.template:
+        src: "{{ item.path }}"
+        dest: "{{ render_dir }}/{{ item.path | basename | regex_replace('\\.j2$', '') }}"
+        mode: '0644'
+      loop: "{{ j2_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: "Show rendered files"
+      ansible.builtin.command:
+        cmd: ls -la {{ render_dir }}/
+      register: rendered_files
+      changed_when: false
+
+    - name: "Display rendered files"
+      ansible.builtin.debug:
+        msg: "{{ rendered_files.stdout_lines }}"
+
+    # ========== 5. APPLY MANIFESTS ==========
+    - name: "Apply rendered manifests to K3s"
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ render_dir }}/
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: apply_result
+      changed_when: "'created' in apply_result.stdout or 'configured' in apply_result.stdout"
+
+    - name: "Display apply results"
+      ansible.builtin.debug:
+        msg: "{{ apply_result.stdout_lines }}"
+
+    # ========== 6. WAIT FOR POD ==========
+    - name: "Wait for {{ app }} pod to be ready (5 min timeout)"
+      ansible.builtin.command: >-
+        kubectl -n {{ app_ns }} wait
+        --for=condition=ready pod
+        -l {{ app_config.label_key }}={{ app }}
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pod_wait
+      changed_when: false
+
+    - name: "Get pod status"
+      ansible.builtin.command:
+        cmd: kubectl get pods -n {{ app_ns }} -l {{ app_config.label_key }}={{ app }} -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: pod_status
+      changed_when: false
+
+    - name: "Display deployment result"
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app | upper }} DEPLOYED VIA J2 TEMPLATES"
+          - "=========================================="
+          - "{{ pod_status.stdout }}"
+          - "=========================================="
+
+    # ========== 7. CLEANUP ==========
+    - name: "Clean up render directory"
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

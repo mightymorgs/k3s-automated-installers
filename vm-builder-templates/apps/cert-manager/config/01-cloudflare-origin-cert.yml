@@ -1,0 +1,210 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/cert-manager/01-cloudflare-origin-cert"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/cert-manager/config/01-cloudflare-origin-cert.yml"
+#     category: "apps"
+#     subsystem: "cert-manager"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260205_certmanager_cloudflare"
+#   dependencies: ["cloudflare_account_exists", "cert_manager_deployed"]
+#   provides: ["cloudflare_origin_cert_configured"]
+#   tags: ["cert-manager", "cloudflare", "tls", "certificates", "edge"]
+#   estimated_duration: 45
+#   parallel_safe: true
+#   idempotent: true
+#   description: Configure cert-manager with Cloudflare Origin CA for edge certificates
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.cloudflare.api_token"
+#       - path: "_state.cloudflare.zone_id"
+#     writes:
+#       - path: "_state.apps.cert_manager.cloudflare_issuer_configured"
+#         example: true
+
+- name: Configure cert-manager with Cloudflare Origin CA
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cert_manager_namespace: "cert-manager"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    cloudflare_api_url: "https://api.cloudflare.com/client/v4"
+    cloudflare_token: "{{ cloudflare_api_token }}"
+    domain: "{{ ingress_domain }}"
+    issuer_name: "cloudflare-origin-issuer"
+
+  tasks:
+    # ========== 0. VALIDATE BWS VARIABLES ==========
+    - name: Validate required BWS variables
+      ansible.builtin.assert:
+        that:
+          - cloudflare_token is defined and cloudflare_token | length > 0
+          - cloudflare_origin_ca_key is defined and cloudflare_origin_ca_key | length > 0
+          - domain is defined and domain | length > 0
+        fail_msg: "Missing required BWS vars: cloudflare_api_token, cloudflare_origin_ca_key, or ingress_domain"
+
+    # ========== 1. CREATE SECRET FOR ORIGIN CA KEY ==========
+    - name: Create Cloudflare Origin CA Key Secret
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: cloudflare-origin-ca-key
+            namespace: {{ cert_manager_namespace }}
+          type: Opaque
+          stringData:
+            key: "{{ cloudflare_origin_ca_key }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: origin_ca_secret
+      changed_when: "'created' in origin_ca_secret.stdout or 'configured' in origin_ca_secret.stdout"
+
+    # ========== 2. CREATE CLOUDFLARE ORIGIN ISSUER ==========
+    # Note: Requires cloudflare-origin-issuer CRD to be installed
+    # https://github.com/cloudflare/origin-ca-issuer
+    - name: Create Cloudflare Origin CA Issuer
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: cert-manager.k8s.cloudflare.com/v1
+          kind: OriginIssuer
+          metadata:
+            name: {{ issuer_name }}
+            namespace: {{ cert_manager_namespace }}
+          spec:
+            requestType: OriginECC
+            auth:
+              serviceKeyRef:
+                name: cloudflare-origin-ca-key
+                key: key
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: origin_issuer
+      changed_when: "'created' in origin_issuer.stdout or 'configured' in origin_issuer.stdout"
+
+    # ========== 3. CREATE SAMPLE CERTIFICATE ==========
+    - name: Create sample Origin CA Certificate for wildcard domain
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: wildcard-origin-cert
+            namespace: {{ cert_manager_namespace }}
+          spec:
+            secretName: wildcard-origin-tls
+            duration: 8760h
+            renewBefore: 720h
+            issuerRef:
+              name: {{ issuer_name }}
+              kind: OriginIssuer
+              group: cert-manager.k8s.cloudflare.com
+            commonName: "*.{{ domain }}"
+            dnsNames:
+              - "*.{{ domain }}"
+              - "{{ domain }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: wildcard_cert
+      changed_when: "'created' in wildcard_cert.stdout or 'configured' in wildcard_cert.stdout"
+
+    # ========== 4. CREATE CLOUDFLARE EDGE CERTIFICATE VIA API ==========
+    # This creates an Origin CA certificate directly via Cloudflare API
+    # for use cases outside of cert-manager
+    - name: Generate CSR for Origin CA
+      ansible.builtin.command:
+        cmd: >
+          openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+          -nodes -keyout /tmp/origin.key -out /tmp/origin.csr
+          -subj "/CN=*.{{ domain }}"
+      register: csr_result
+      changed_when: true
+
+    - name: Read CSR content
+      ansible.builtin.slurp:
+        src: /tmp/origin.csr
+      register: csr_content
+
+    - name: Create Origin CA Certificate via Cloudflare API
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api_url }}/certificates"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          hostnames:
+            - "*.{{ domain }}"
+            - "{{ domain }}"
+          requested_validity: 5475  # 15 years (max)
+          request_type: "origin-ecc"
+          csr: "{{ csr_content.content | b64decode }}"
+        status_code: [200, 201]
+        validate_certs: true
+      register: origin_cert_response
+
+    # ========== 5. STORE CERTIFICATE IN K8S SECRET ==========
+    - name: Store Origin CA Certificate in Kubernetes Secret
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: cloudflare-origin-manual-cert
+            namespace: {{ cert_manager_namespace }}
+          type: kubernetes.io/tls
+          stringData:
+            tls.crt: "{{ origin_cert_response.json.result.certificate }}"
+            tls.key: "{{ lookup('file', '/tmp/origin.key') }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: manual_cert_result
+      changed_when: "'created' in manual_cert_result.stdout or 'configured' in manual_cert_result.stdout"
+
+    # ========== 6. CLEANUP ==========
+    - name: Cleanup temporary files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/origin.csr
+        - /tmp/origin.key
+      ignore_errors: true
+
+    # ========== 7. DISPLAY RESULT ==========
+    - name: Display certificate configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Cloudflare Origin CA Configuration Complete"
+          - "=========================================="
+          - "Domain: {{ domain }}"
+          - "Namespace: {{ cert_manager_namespace }}"
+          - "Issuer Name: {{ issuer_name }}"
+          - "=========================================="
+          - "Resources Created:"
+          - "  - Secret: cloudflare-origin-ca-key"
+          - "  - OriginIssuer: {{ issuer_name }}"
+          - "  - Certificate: wildcard-origin-cert"
+          - "  - Secret: wildcard-origin-tls (auto-created by cert-manager)"
+          - "=========================================="
+          - ""
+          - "To use this certificate in an IngressRoute:"
+          - "  tls:"
+          - "    secretName: wildcard-origin-tls"
+          - "=========================================="

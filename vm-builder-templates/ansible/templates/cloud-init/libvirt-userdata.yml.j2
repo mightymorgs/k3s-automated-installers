@@ -1,0 +1,174 @@
+{#
+  Ubuntu Cloud-Init for Libvirt VMs (J2 Template)
+
+  This template is rendered by the Phase 2 workflow and passed to Terraform
+  via the user_data_content variable, enabling OOBE compatibility for forks.
+
+  IMPORTANT: Uses libvirt NAT DHCP by default. SSH is via Tailscale only.
+  VM joins Tailscale during boot with proper tags for ACL-controlled SSH access.
+
+  Variables (all sourced from BWS inventory and workflow context):
+    - hostname: VM hostname from inventory.identity.hostname (REQUIRED)
+    - ssh_authorized_keys: List of SSH public keys (REQUIRED)
+    - console_username: Username for console access (REQUIRED - from BWS)
+    - console_password: Password for console user (optional)
+    - tailscale_auth_key: Ephemeral auth key with VM-specific tags (REQUIRED)
+    - github_repo: Org/repo for runner registration (REQUIRED - from github.repository)
+    - github_runner_token: Ephemeral runner registration token (optional)
+    - github_runner_version: GitHub Actions runner version (REQUIRED)
+    - ssh_private_key_b64: Base64-encoded SSH private key for deploy key (optional)
+
+  Usage:
+    ansible localhost -m template \
+      -a "src=ansible/templates/cloud-init/libvirt-userdata.yml.j2 dest=/tmp/user-data.yml" \
+      -e "@/tmp/j2_vars.yml"
+#}
+#cloud-config
+hostname: {{ hostname }}
+manage_etc_hosts: true
+
+users:
+  - name: {{ console_username }}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: ["adm", "sudo"]
+    shell: /bin/bash
+    lock_passwd: false
+    ssh_authorized_keys:
+{% for key in ssh_authorized_keys %}
+      - {{ key }}
+{% endfor %}
+
+{% if console_password | default('') != '' %}
+ssh_pwauth: true
+chpasswd:
+  users:
+    - name: {{ console_username }}
+      password: {{ console_password }}
+      type: text
+  expire: false
+{% else %}
+ssh_pwauth: false
+{% endif %}
+
+package_update: true
+packages:
+  - qemu-guest-agent
+  - curl
+  - gnupg
+  - jq
+  - unzip
+  - python3
+  - python3-pip
+  - python3-apt
+  - git
+  - iptables-persistent
+  - ansible
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+
+  # Wait for network (DHCP from libvirt NAT)
+  - |
+    echo "Waiting for network..."
+    for i in $(seq 1 30); do
+      if ip route | grep -q default; then
+        echo "Network is up"
+        break
+      fi
+      sleep 2
+    done
+
+  # Wait for DNS resolution before installing anything
+  - |
+    echo "Waiting for DNS resolution..."
+    for i in $(seq 1 30); do
+      if nslookup tailscale.com >/dev/null 2>&1 || host tailscale.com >/dev/null 2>&1; then
+        echo "DNS resolution working"
+        break
+      fi
+      sleep 2
+    done
+
+  # Install and join Tailscale with SSH enabled
+  - |
+    echo "Installing Tailscale..."
+    for i in $(seq 1 3); do
+      if curl -fsSL https://tailscale.com/install.sh | sh; then
+        echo "Tailscale installed successfully"
+        break
+      fi
+      echo "Attempt $i failed, retrying in 5 seconds..."
+      sleep 5
+    done
+
+{% if tailscale_auth_key | default('') != '' %}
+  # Join Tailscale with auth key and enable SSH
+  - |
+    echo "Joining Tailscale network..."
+    tailscale up --authkey '{{ tailscale_auth_key }}' --ssh --hostname '{{ hostname }}'
+    echo "Tailscale joined successfully"
+    tailscale status
+
+  # Allow SSH on Tailscale interface (for regular SSH as fallback)
+  - |
+    iptables -I INPUT -i tailscale0 -p tcp --dport 22 -j ACCEPT
+    netfilter-persistent save || iptables-save > /etc/iptables/rules.v4
+    echo "Tailscale SSH firewall rules configured"
+{% endif %}
+
+{% if github_runner_token | default('') != '' %}
+  # Install GitHub Actions self-hosted runner
+  - |
+    set -e
+    echo "Setting up GitHub Actions runner..."
+    # Resolve latest runner version from GitHub API
+    RUNNER_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
+    if [ -z "$RUNNER_VERSION" ]; then
+      RUNNER_VERSION="{{ github_runner_version }}"
+      echo "WARNING: Could not fetch latest runner version, falling back to $RUNNER_VERSION"
+    fi
+    echo "Using GitHub Actions runner version: $RUNNER_VERSION"
+    RUNNER_ORG="{{ github_repo }}"
+    RUNNER_TOKEN='{{ github_runner_token }}'
+    RUNNER_LABELS='self-hosted,libvirt,{{ hostname }}'
+
+    # Create runner user with passwordless sudo (required for Ansible playbooks)
+    useradd -m -d /home/runner -s /bin/bash runner || true
+    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+    chmod 440 /etc/sudoers.d/runner
+
+    # Download and install runner
+    cd /home/runner
+    mkdir -p actions-runner && cd actions-runner
+    curl -o actions-runner-linux-x64-$RUNNER_VERSION.tar.gz -L \
+      https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-x64-$RUNNER_VERSION.tar.gz
+    tar xzf ./actions-runner-linux-x64-$RUNNER_VERSION.tar.gz
+    chown -R runner:runner /home/runner/actions-runner
+
+{% if ssh_private_key_b64 | default('') != '' %}
+    # Configure SSH deploy key
+    mkdir -p /home/runner/.ssh && chmod 700 /home/runner/.ssh
+    echo "{{ ssh_private_key_b64 }}" | base64 -d > /home/runner/.ssh/id_ed25519
+    chmod 600 /home/runner/.ssh/id_ed25519
+    ssh-keyscan github.com >> /home/runner/.ssh/known_hosts 2>/dev/null || true
+    chmod 644 /home/runner/.ssh/known_hosts
+    chown -R runner:runner /home/runner/.ssh
+    echo "SSH deploy key configured"
+{% endif %}
+
+    # Register runner (as runner user)
+    su - runner -c "/home/runner/actions-runner/config.sh \
+      --url https://github.com/$RUNNER_ORG \
+      --token $RUNNER_TOKEN \
+      --labels $RUNNER_LABELS \
+      --unattended"
+
+    # Install and start service
+    cd /home/runner/actions-runner
+    ./svc.sh install runner
+    ./svc.sh start
+    echo "GitHub Actions runner installed and started" | tee /var/log/github-runner-setup.log
+{% endif %}
+
+  # Signal cloud-init complete
+  - echo "Cloud-init completed successfully" > /var/log/cloud-init-complete.log

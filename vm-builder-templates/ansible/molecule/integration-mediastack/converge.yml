@@ -1,0 +1,32 @@
+---
+- name: "Tier 3: Deploy mediastack apps to test namespace"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    test_namespace: "molecule-test-mediastack"
+    apps_to_test:
+      - sonarr
+      - radarr
+      - prowlarr
+  tasks:
+    - name: Create test namespace
+      ansible.builtin.command: >-
+        kubectl create namespace {{ test_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_create
+      changed_when: "'created' in ns_create.stdout"
+
+    - name: Run prepare-fixtures.sh
+      ansible.builtin.command:
+        cmd: "{{ playbook_dir }}/../prepare-fixtures.sh"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      changed_when: false
+
+    - name: Deploy each mediastack app
+      ansible.builtin.include_tasks:
+        file: deploy-app.yml
+      loop: "{{ apps_to_test }}"
+      loop_control:
+        loop_var: app_name
+
+# deploy-app.yml would import the actual install playbook with namespace override

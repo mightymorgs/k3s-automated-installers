@@ -1,0 +1,73 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  00-create-admin-user.yml:
+    summary: "Create an authentik admin (superuser) using console credentials from\
+      \ BWS. Reads username and password from shared BWS secrets. Idempotent \u2014\
+      \ skips creation if user already exists, updates password if user exists."
+    source: inferred
+    confidence: medium
+  00-create-admin-user.yml.j2:
+    summary: 'Jinja2 template: 00-create-admin-user.yml.j2'
+    source: inferred
+    confidence: medium
+  01-create-oauth-apps.yml:
+    summary: 'Auto-generate OAuth applications in Authentik for all apps with sso.enabled:
+      true from registry metadata. Supports both Cloudflare Tunnel and Tailscale MagicDNS
+      ingress modes.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ authentik_api_base }}/flows/instances/?designation=authorization'
+  01-create-oauth-apps.yml.j2:
+    summary: 'Jinja2 template: 01-create-oauth-apps.yml.j2'
+    source: inferred
+    confidence: medium
+  02-wire-forwardauth.yml:
+    summary: Create Authentik ForwardAuth Middleware CRD. ForwardAuth middleware references
+      are baked into IngressRoutes at creation time by 01-create-ingressroutes.yml.
+      This playbook only creates the Middleware CRD itself and writes state to BWS.
+    source: inferred
+    confidence: medium
+    references_services:
+    - auth
+  02-wire-forwardauth.yml.j2:
+    summary: 'Jinja2 template: 02-wire-forwardauth.yml.j2'
+    source: inferred
+    confidence: medium
+  03-create-proxy-providers.yml:
+    summary: Create authentik proxy providers (forward_single mode) and applications
+      for all Cloudflare-mode SSO-enabled apps. Uses embedded outpost (auto-discovers
+      providers). ForwardAuth address stays cluster-internal.
+    source: inferred
+    confidence: medium
+  03-create-proxy-providers.yml.j2:
+    summary: 'Jinja2 template: 03-create-proxy-providers.yml.j2'
+    source: inferred
+    confidence: medium
+  04-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to the authentik-server deployment.
+      Authentik natively exposes metrics on port 9300 at /metrics. This playbook discovers
+      the correct deployment name via the app.kubernetes.io/name=authentik label,
+      then adds pod-level annotations so Prometheus auto-discovers and scrapes the
+      metrics endpoint via its kubernetes-pods scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+  create_oauth_app.yml:
+    summary: 'Playbook: create_oauth_app.yml'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ authentik_api_base }}/providers/oauth2/'
+    - '{{ authentik_api_base }}/providers/oauth2/'
+    - '{{ authentik_api_base }}/core/applications/'
+    - '{{ authentik_api_base }}/core/applications/'
+  create_oauth_app.yml.j2:
+    summary: 'Jinja2 template: create_oauth_app.yml.j2'
+    source: inferred
+    confidence: medium
+depends_on_apps:
+- auth
+- prometheus

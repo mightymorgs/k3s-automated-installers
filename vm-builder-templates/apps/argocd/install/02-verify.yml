@@ -1,0 +1,142 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "argocd"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "argocd"
+#       supported_versions: ["latest"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - argocd: "latest"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-28"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260128_argocd_install"
+#   dependencies: ["argocd_deployed"]
+#   provides: ["argocd_verified", "argocd_healthy"]
+#   tags: ["argocd", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify ArgoCD deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.argocd.verified"
+#         example: true
+
+- name: Verify ArgoCD Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: "argocd"
+    app_namespace: "argocd"
+    container_port: 8080
+    health_path: "/healthz"
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. POD PHASE CHECK ==========
+    # ArgoCD uses component-specific labels (argocd-server, argocd-repo-server, etc.)
+    # We verify argocd-server specifically — it's the main UI/API component.
+    - name: Check pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name=argocd-server
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.rc != 0 or pod_phase.stdout != 'Running'
+      retries: 6
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_phase.rc == 0 and pod_phase.stdout == 'Running'
+
+    # ========== 2. GET READY POD NAME ==========
+    - name: Get ready pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name=argocd-server
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 6
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 3. HEALTH CHECK (block/rescue) ==========
+    # ArgoCD containers don't ship curl or wget.
+    # Use ansible.builtin.uri from the host (via NodePort) instead of kubectl exec.
+    - name: Health check block
+      block:
+        - name: Test health endpoint via NodePort
+          ansible.builtin.uri:
+            url: "https://127.0.0.1:{{ nodeport | default(30280) }}{{ health_path }}"
+            method: GET
+            status_code: 200
+            validate_certs: false
+            timeout: "{{ health_probe_timeout_seconds }}"
+          register: health_check
+          retries: 3
+          delay: "{{ retry_interval_seconds }}"
+          until: health_check.status == 200
+
+      rescue:
+        - name: Capture failure diagnostics
+          ansible.builtin.set_fact:
+            health_failure:
+              app: "{{ app_name }}"
+              namespace: "{{ app_namespace }}"
+              pod: "{{ app_pod.stdout | default('unknown') }}"
+              endpoint: "https://127.0.0.1:{{ nodeport | default(30280) }}{{ health_path }}"
+              status: "{{ health_check.status | default('N/A') }}"
+              msg: "{{ health_check.msg | default('') | truncate(500) }}"
+
+        - name: Fail with diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Health check failed for {{ app_name }}.
+              Diagnostics: {{ health_failure | to_nice_json }}
+
+    # ========== 4. SERVICE EXISTENCE CHECK ==========
+    - name: Check service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc argocd-server
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 5. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name }} Verification Summary"
+          - "=========================================="
+          - "Pod Phase:      {{ pod_phase.stdout | default('UNKNOWN') }} — {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "Ready Pod:      {{ app_pod.stdout | default('NONE') }} — {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Health Check:   {{ health_path }} — {{ 'OK' if health_check.status | default(0) == 200 else 'FAILED' }}"
+          - "Service:        {{ service_check.stdout | default('NONE') }} — {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

@@ -1,0 +1,84 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/github/08-create-issues"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/github/08-create-issues.yml"
+#     category: "tools"
+#     subsystem: "github"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "gh-api"
+#       folder_version: null
+#       supported_versions: ["2020-01-01+"]
+#       version_range: ">=2020-01-01"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - gh-api: "2024-11-01"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-13"
+#         notes: "Creates GitHub issues via REST API from list of {title, body} dicts, idempotent (skips on 410)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: []
+#   provides: ["github_issues_created"]
+#   tags: ["github", "issues", "tracking"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Create GitHub issues from a provided list using API
+- name: Create GitHub issues
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    repo_name: "{{ target_repo_name | default('media-stack') }}"
+    issues: []  # list of dicts: {title, body}
+    secrets_json_path: "{{ project_root | default(playbook_dir + '/../../../../..') }}/secrets/secrets.json"
+  tasks:
+    - name: Load GitHub PAT
+      ansible.builtin.set_fact:
+        github_pat: "{{ (lookup('file', secrets_json_path) | from_json).github.token | default('') }}"
+      no_log: true
+    - name: Resolve GitHub owner via API
+      ansible.builtin.uri:
+        url: https://api.github.com/user
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: gh_user
+      no_log: true
+    - name: Set owner
+      ansible.builtin.set_fact:
+        github_owner: '{{ gh_user.json.login }}'
+    - name: Create issues (skip if exists)
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/{{ github_owner }}/{{ repo_name }}/issues
+        method: POST
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        body_format: json
+        status_code: [201, 410]
+        body:
+          title: '{{ item.title }}'
+          body: '{{ item.body }}'
+      loop: '{{ issues }}'
+      register: created
+      failed_when: false
+    - name: Report created URLs
+      ansible.builtin.debug:
+        msg: "{{ created.results | map(attribute='json.html_url') | select('string') | list }}"

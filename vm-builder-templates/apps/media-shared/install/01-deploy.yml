@@ -1,0 +1,444 @@
+---
+# playbook_metadata:
+#   id: "atomic/storage/media-shared/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/storage/media-shared/install/01-deploy.yml"
+#     category: "storage"
+#     subsystem: "media-shared"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "media-storage"
+#       folder_version: null
+#       supported_versions: ["longhorn", "nfs", "smb"]
+#       version_range: "any"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.6.0 (for longhorn backend)"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - backend: "longhorn"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "success"
+#         test_date: "2026-01-21"
+#         notes: "Tested on GCP VM"
+#       - backend: "nfs"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-22"
+#         notes: "Awaiting test with custom NFS server"
+#       - backend: "smb"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-22"
+#         notes: "Awaiting test with SMB/CIFS share"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["media_shared_storage_deployed"]
+#   tags: ["storage", "longhorn", "nfs", "smb", "cifs", "pvc", "media", "shared"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy shared media storage PVC for media stack applications.
+#     Supports three backends:
+#     - longhorn: Creates Longhorn RWX volume (for cloud deployments)
+#     - nfs: Mounts custom NFS share (requires server IP and path)
+#     - smb: Mounts SMB/CIFS share (requires server, share, username, password)
+#     Required by: sonarr, radarr, sabnzbd, qbittorrent.
+#   namespace: "media-stack"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: false
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: false
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Media Shared Storage"
+#     icon: "hard-drive"
+#     category: "Storage"
+#     description: "SMB shared storage for media applications"
+#     docs_url: null
+#     port: null
+#     nodeport: null
+#     required_by: ["sonarr", "radarr", "sabnzbd", "qbittorrent"]
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     media_storage_backend:
+#       label: "Storage Backend"
+#       description: "Type of storage to use for media files"
+#       type: "choice"
+#       options:
+#         - value: "longhorn"
+#           label: "Longhorn (Cloud)"
+#           description: "Distributed block storage - best for cloud VMs"
+#         - value: "nfs"
+#           label: "NFS Share"
+#           description: "Network File System - for NAS devices"
+#         - value: "smb"
+#           label: "SMB/CIFS Share"
+#           description: "Windows file sharing - for Windows servers or NAS"
+#       default: "longhorn"
+#       required: true
+#
+#     media_storage_size:
+#       label: "Storage Size"
+#       description: "Size of the storage volume (for Longhorn only)"
+#       type: "string"
+#       default: "100Gi"
+#       required: false
+#       show_when: "media_storage_backend == 'longhorn'"
+#
+#     nfs_server:
+#       label: "NFS Server"
+#       description: "NFS server IP address or hostname"
+#       type: "string"
+#       placeholder: "192.168.1.100"
+#       required: false
+#       show_when: "media_storage_backend == 'nfs'"
+#
+#     nfs_path:
+#       label: "NFS Export Path"
+#       description: "Path to the NFS export"
+#       type: "string"
+#       placeholder: "/volume1/media"
+#       required: false
+#       show_when: "media_storage_backend == 'nfs'"
+#
+#     smb_server:
+#       label: "SMB Server"
+#       description: "SMB/CIFS server IP address or hostname"
+#       type: "string"
+#       placeholder: "192.168.1.100"
+#       required: false
+#       show_when: "media_storage_backend == 'smb'"
+#
+#     smb_share:
+#       label: "SMB Share Name"
+#       description: "Name of the SMB share"
+#       type: "string"
+#       placeholder: "media"
+#       required: false
+#       show_when: "media_storage_backend == 'smb'"
+#
+#     smb_username:
+#       label: "SMB Username"
+#       description: "Username for SMB authentication"
+#       type: "string"
+#       placeholder: "mediauser"
+#       required: false
+#       show_when: "media_storage_backend == 'smb'"
+#
+#     smb_password:
+#       label: "SMB Password"
+#       description: "Password for SMB authentication"
+#       type: "secret"
+#       required: false
+#       show_when: "media_storage_backend == 'smb'"
+
+- name: Deploy Shared Media Storage
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    storage_namespace: media-stack
+    # Storage backend: 'longhorn' (default for cloud), 'nfs-homelab', or 'smb'
+    storage_backend: "{{ media_storage_backend | default('longhorn') }}"
+    kustomize_path: >-
+      {{ playbook_dir }}/../k8s-storage/
+      {%- if storage_backend == 'longhorn' %}base{% else %}overlays/{{ storage_backend }}{% endif %}
+    storage_size: "{{ media_storage_size | default('5Gi') }}"
+    # SMB-specific vars: passed by Phase 3 install-media-storage job via -e extra-vars
+    # Do NOT define self-referencing defaults here (e.g. smb_server: "{{ smb_server | default('') }}")
+    # Ansible detects that as a recursive template loop. These vars are only used in
+    # tasks guarded by "when: storage_backend == 'smb'" so they're safe to leave undefined.
+    # Defaults for mount_point only (always needed for SMB path checks):
+    smb_mount_point: "{{ mount_point | default('/mnt/nas') }}"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/media-shared-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+  tasks:
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: nodes_check.rc == 0
+
+    - name: Display storage backend being used
+      ansible.builtin.debug:
+        msg: "Using storage backend: {{ storage_backend }} (path: {{ kustomize_path | trim }})"
+
+    - name: Check if Longhorn storage class exists (for longhorn backend)
+      ansible.builtin.command: kubectl get storageclass longhorn
+      register: longhorn_sc
+      changed_when: false
+      failed_when: false
+      when: storage_backend == 'longhorn'
+
+    - name: Fail if Longhorn not available (longhorn backend only)
+      ansible.builtin.fail:
+        msg: "Longhorn storage class not found. Install Longhorn before deploying shared storage."
+      when: storage_backend == 'longhorn' and longhorn_sc.rc != 0
+
+    - name: Install NFS client packages (for NFS backend)
+      ansible.builtin.apt:
+        name: nfs-common
+        state: present
+        update_cache: true
+      become: true
+      when: storage_backend in ['nfs', 'nfs-homelab']
+
+    # ========== SMB HOST MOUNT ==========
+    - name: Install cifs-utils for SMB support
+      ansible.builtin.apt:
+        name: cifs-utils
+        state: present
+        update_cache: true
+      become: true
+      when: storage_backend == 'smb'
+
+    - name: Create SMB mount point
+      ansible.builtin.file:
+        path: "{{ smb_mount_point }}"
+        state: directory
+        mode: '0755'
+      become: true
+      when: storage_backend == 'smb'
+
+    - name: Create SMB credentials file
+      ansible.builtin.copy:
+        content: |
+          username={{ smb_username }}
+          password={{ smb_password }}
+        dest: /root/.smb-media-creds
+        mode: '0600'
+      become: true
+      when: storage_backend == 'smb'
+      no_log: true
+
+    - name: Mount SMB share on host
+      ansible.posix.mount:
+        path: "{{ smb_mount_point }}"
+        src: "//{{ smb_server }}/{{ smb_share }}"
+        fstype: cifs
+        opts: "credentials=/root/.smb-media-creds,uid=1000,gid=1000,file_mode=0775,dir_mode=0775"
+        state: mounted
+      become: true
+      when: storage_backend == 'smb'
+
+    # ========== SMB K8s MANIFESTS (J2 templates) ==========
+    - name: Create render directory for SMB manifests
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+      when: storage_backend == 'smb'
+
+    - name: Render SMB PV template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/smb-pv.yaml.j2"
+        dest: "{{ render_dir }}/smb-pv.yaml"
+        mode: '0644'
+      when: storage_backend == 'smb'
+
+    - name: Render SMB PVC template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/smb-pvc.yaml.j2"
+        dest: "{{ render_dir }}/smb-pvc.yaml"
+        mode: '0644'
+      when: storage_backend == 'smb'
+
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ storage_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ storage_namespace }}
+        app.kubernetes.io/name=media-shared
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    - name: Check if media-shared-pvc already exists
+      ansible.builtin.command:
+        cmd: kubectl -n {{ storage_namespace }} get pvc media-shared-pvc -o jsonpath='{.status.phase}'
+      register: existing_pvc
+      changed_when: false
+      failed_when: false
+
+    - name: Apply shared storage Kustomize manifests (longhorn/nfs)
+      ansible.builtin.command:
+        cmd: kubectl apply -k {{ kustomize_path }}
+      register: kustomize_apply
+      changed_when: "'created' in kustomize_apply.stdout or 'configured' in kustomize_apply.stdout"
+      when:
+        - storage_backend != 'smb'
+        - existing_pvc.rc != 0 or existing_pvc.stdout == ''
+
+    - name: Skip kustomize apply (PVC already exists)
+      ansible.builtin.debug:
+        msg: "media-shared-pvc already exists ({{ existing_pvc.stdout }}), skipping kustomize apply"
+      when:
+        - storage_backend != 'smb'
+        - existing_pvc.rc == 0
+        - existing_pvc.stdout != ''
+
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    - name: Apply protected resources (Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+      when:
+        - storage_backend == 'smb'
+        - existing_pvc.rc != 0 or existing_pvc.stdout == ''
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret)
+              ;;
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+      when:
+        - storage_backend == 'smb'
+        - existing_pvc.rc != 0 or existing_pvc.stdout == ''
+
+    - name: Skip SMB apply (PVC already exists)
+      ansible.builtin.debug:
+        msg: "media-shared-pvc already exists ({{ existing_pvc.stdout }}), skipping SMB apply"
+      when:
+        - storage_backend == 'smb'
+        - existing_pvc.rc == 0
+        - existing_pvc.stdout != ''
+
+    - name: Wait for PVC to be bound
+      ansible.builtin.command: >-
+        kubectl -n {{ storage_namespace }} wait
+        --for=jsonpath='{.status.phase}'=Bound pvc/media-shared-pvc
+        --timeout=300s
+      register: pvc_wait
+      changed_when: false
+
+    - name: Wait for Longhorn share-manager pod to exist
+      ansible.builtin.shell: >-
+        PV_NAME=$(kubectl get pvc media-shared-pvc -n {{ storage_namespace }} -o jsonpath='{.spec.volumeName}');
+        kubectl -n longhorn-system get pods -l longhorn.io/share-manager="$PV_NAME"
+        -o json | jq '.items | length'
+      register: share_pod_count
+      changed_when: false
+      retries: "{{ (app_start_timeout_seconds / retry_interval_seconds) | int }}"
+      delay: "{{ retry_interval_seconds }}"
+      until: share_pod_count.rc == 0 and (share_pod_count.stdout | int) > 0
+      when: storage_backend == 'longhorn'
+
+    - name: Wait for Longhorn share-manager pod (RWX volumes)
+      ansible.builtin.shell: |
+        # Get the PV name for the media-shared-pvc
+        PV_NAME=$(kubectl get pvc media-shared-pvc -n {{ storage_namespace }} -o jsonpath='{.spec.volumeName}')
+        if [ -n "$PV_NAME" ]; then
+          # Wait for share-manager pod for this volume
+          kubectl wait --for=condition=ready \
+            pod -l longhorn.io/share-manager="$PV_NAME" \
+            -n longhorn-system --timeout={{ app_start_timeout_seconds }}s
+        fi
+        # Additional grace period for NFS export
+        sleep 10
+      register: share_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: share_wait.rc == 0
+      when: storage_backend == 'longhorn'
+
+    - name: Verify NFS mount is accessible (for NFS backend)
+      ansible.builtin.shell: |
+        # Test that the NFS server is reachable
+        showmount -e 192.168.0.103 | grep -q "/volume2/NAS/media" || echo "NFS share accessible"
+      register: nfs_check
+      changed_when: false
+      failed_when: false
+      when: storage_backend == 'nfs-homelab'
+
+    - name: Verify SMB mount is accessible
+      ansible.builtin.command: ls {{ smb_mount_point }}
+      register: smb_check
+      changed_when: false
+      failed_when: false
+      when: storage_backend == 'smb'
+
+    - name: Clean up SMB render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent
+      when: storage_backend == 'smb'
+
+    - name: Get PVC status
+      ansible.builtin.command: kubectl -n {{ storage_namespace }} get pvc media-shared-pvc
+      register: pvc_status
+      changed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Shared Media Storage Deployed"
+          - "=========================================="
+          - "Backend: {{ storage_backend }}"
+          - "Namespace: {{ storage_namespace }}"
+          - "PVC Name: media-shared-pvc"
+          - >-
+            {% if storage_backend == 'smb' %}SMB Share: //{{ smb_server }}/{{ smb_share }} -> {{ smb_mount_point }}
+            {% elif storage_backend == 'nfs-homelab' %}NFS Server: 192.168.0.103:/volume2/NAS/media
+            {% else %}Size: {{ storage_size }}{% endif %}
+          - "Status: {{ pvc_status.stdout_lines }}"
+          - "=========================================="

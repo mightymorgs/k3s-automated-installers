@@ -1,0 +1,9 @@
+---
+# Tailscale Operator Namespace (J2 template)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ tailscale_namespace | default('tailscale') }}
+  labels:
+    app.kubernetes.io/name: tailscale-operator
+    app.kubernetes.io/part-of: networking

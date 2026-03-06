@@ -1,0 +1,305 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prometheus/07-configure-alert-rules"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prometheus/config/07-configure-alert-rules.yml"
+#     category: "apps"
+#     subsystem: "prometheus"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_alert_rules"
+#   dependencies: ["prometheus_deployed", "alertmanager_deployed"]
+#   provides: ["prometheus_alert_rules_configured"]
+#   tags: ["prometheus", "alertmanager", "alerting", "rules", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create or update the prometheus-rules ConfigMap in the observability
+#     namespace containing all Prometheus alert rules. Rules are split into
+#     two groups: infrastructure (cert-manager, vault, argocd, longhorn,
+#     external-secrets, traefik, authentik) and media-stack (sonarr, radarr,
+#     prowlarr, sabnzbd, qbittorrent, jellyfin, plex). The prerequisite
+#     playbook (06-enable-rule-files.yml) sets up the rule_files path and
+#     volume mount -- this playbook only manages the ConfigMap content.
+#     Prometheus watches ConfigMaps if configured with rule_files, so no
+#     restart is needed. Idempotent: skips apply if content hash unchanged.
+#   requires_apps: ["prometheus", "alertmanager"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Configure Prometheus Alert Rules
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    prometheus_namespace: "observability"
+    alertmanager_namespace: "alertmanager"
+    # prometheus_url: from BWS _state via Phase 4 extra-vars
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ConfigMap manifest applied via kubectl apply -f -
+    rules_configmap: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: prometheus-rules
+        namespace: {{ prometheus_namespace }}
+      data:
+        infrastructure-alerts.yml: |
+          groups:
+            - name: infrastructure
+              rules:
+                - alert: CertificateExpiringSoon
+                  expr: certmanager_certificate_expiration_timestamp_seconds - time() < 604800
+                  for: 1h
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Certificate {{ '{{' }} $labels.name {{ '}}' }} expires in less than 7 days"
+                    description: "Certificate {{ '{{' }} $labels.name {{ '}}' }} in namespace {{ '{{' }} $labels.namespace {{ '}}' }} expires in {{ '{{' }} $value | humanizeDuration {{ '}}' }}"
+
+                - alert: VaultSealed
+                  expr: vault_core_unsealed == 0
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Vault is sealed"
+                    description: "Vault instance has been sealed for more than 5 minutes"
+
+                - alert: ArgoCDSyncFailed
+                  expr: argocd_app_info{sync_status="OutOfSync",health_status="Degraded"} > 0
+                  for: 15m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "ArgoCD app {{ '{{' }} $labels.name {{ '}}' }} is OutOfSync and Degraded"
+                    description: "Application {{ '{{' }} $labels.name {{ '}}' }} has been OutOfSync and Degraded for 15 minutes"
+
+                - alert: LonghornVolumeUnhealthy
+                  expr: longhorn_volume_robustness == 2 or longhorn_volume_robustness == 3
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Longhorn volume {{ '{{' }} $labels.volume {{ '}}' }} is unhealthy"
+                    description: "Volume {{ '{{' }} $labels.volume {{ '}}' }} robustness is {{ '{{' }} $value {{ '}}' }} (2=degraded, 3=faulted)"
+
+                - alert: ExternalSecretSyncFailed
+                  expr: increase(externalsecret_sync_calls_error_total[5m]) > 0
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "ExternalSecret sync failures detected"
+                    description: "ExternalSecret in namespace {{ '{{' }} $labels.namespace {{ '}}' }} has sync errors"
+
+                - alert: TraefikHighErrorRate
+                  expr: sum(rate(traefik_service_requests_total{code=~"5.."}[5m])) > 10
+                  for: 5m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Traefik high 5xx error rate"
+                    description: "More than 10 5xx errors per second over 5 minutes"
+
+                - alert: AuthentikLoginFailures
+                  expr: rate(authentik_login_failed_total[5m]) > 0.5
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "High rate of failed authentication attempts"
+                    description: "More than 0.5 login failures per second over 10 minutes"
+
+        media-alerts.yml: |
+          groups:
+            - name: media-stack
+              rules:
+                - alert: MediaAppDown
+                  expr: up{job=~"sonarr|radarr|prowlarr|sabnzbd|qbittorrent|jellyfin|plex"} == 0
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Media app {{ '{{' }} $labels.job {{ '}}' }} is down"
+                    description: "{{ '{{' }} $labels.job {{ '}}' }} has been unreachable for 5 minutes"
+
+                - alert: SonarrMissingEpisodes
+                  expr: sonarr_episode_missing_total > 100
+                  for: 1h
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Sonarr has {{ '{{' }} $value {{ '}}' }} missing episodes"
+                    description: "More than 100 episodes are missing and unmonitored"
+
+                - alert: RadarrMissingMovies
+                  expr: radarr_movie_missing_total > 50
+                  for: 1h
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Radarr has {{ '{{' }} $value {{ '}}' }} missing movies"
+                    description: "More than 50 movies are missing"
+
+                - alert: QueueBacklog
+                  expr: sonarr_queue_total > 20 or radarr_queue_total > 20
+                  for: 30m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Download queue backlog detected"
+                    description: "{{ '{{' }} $labels.job {{ '}}' }} has {{ '{{' }} $value {{ '}}' }} items in download queue"
+
+                - alert: DownloadSpeedLow
+                  expr: qbittorrent_global_download_speed < 1000 and qbittorrent_torrents_count{state="downloading"} > 0
+                  for: 30m
+                  labels:
+                    severity: info
+                  annotations:
+                    summary: "qBittorrent download speed is very low"
+                    description: "Download speed is {{ '{{' }} $value {{ '}}' }} bytes/s with active torrents"
+
+                - alert: MediaDiskSpaceLow
+                  expr: (1 - node_filesystem_avail_bytes{mountpoint="/media"} / node_filesystem_size_bytes{mountpoint="/media"}) > 0.85
+                  for: 15m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Media disk space is above 85%"
+                    description: "{{ '{{' }} $value | humanizePercentage {{ '}}' }} of /media disk used"
+
+  tasks:
+    # ========== CHECK IF PROMETHEUS IS DEPLOYED ==========
+    - name: Check if Prometheus pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ prometheus_namespace }} -l app=prometheus --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Prometheus not deployed
+      ansible.builtin.meta: end_play
+      when: prometheus_pod_check.rc != 0 or prometheus_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ALERTMANAGER IS DEPLOYED ==========
+    - name: Check if Alertmanager pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ alertmanager_namespace }} -l app.kubernetes.io/name=alertmanager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alertmanager_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Alertmanager not deployed
+      ansible.builtin.meta: end_play
+      when: alertmanager_pod_check.rc != 0 or alertmanager_pod_check.stdout | length == 0
+
+    # ========== CHECK IF CONFIGMAP ALREADY EXISTS WITH SAME CONTENT ==========
+    # Hash the desired ConfigMap content to detect changes. If the ConfigMap
+    # already exists with the same hash annotation, skip the apply.
+    - name: Compute desired content hash
+      ansible.builtin.set_fact:
+        desired_hash: "{{ rules_configmap | hash('sha256') }}"
+
+    - name: Get existing ConfigMap hash annotation
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap prometheus-rules -n {{ prometheus_namespace }}
+          -o jsonpath='{.metadata.annotations.idi/content-hash}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: existing_hash_result
+      changed_when: false
+      failed_when: false
+
+    - name: Determine if ConfigMap needs update
+      ansible.builtin.set_fact:
+        configmap_needs_update: "{{ existing_hash_result.rc != 0 or existing_hash_result.stdout != desired_hash }}"
+
+    - name: Note ConfigMap already up to date
+      ansible.builtin.debug:
+        msg: "prometheus-rules ConfigMap already exists with matching content hash - skipping apply"
+      when: not configmap_needs_update
+
+    # ========== APPLY CONFIGMAP ==========
+    - name: Apply prometheus-rules ConfigMap
+      when: configmap_needs_update
+      block:
+        - name: Write ConfigMap manifest to temp file
+          ansible.builtin.copy:
+            content: "{{ rules_configmap }}"
+            dest: /tmp/prometheus-rules-configmap.yml
+            mode: '0644'
+
+        - name: Apply ConfigMap via kubectl
+          ansible.builtin.command:
+            cmd: kubectl apply -f /tmp/prometheus-rules-configmap.yml
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: apply_result
+          changed_when: "'configured' in apply_result.stdout or 'created' in apply_result.stdout"
+
+        - name: Annotate ConfigMap with content hash
+          ansible.builtin.command:
+            cmd: >-
+              kubectl annotate configmap prometheus-rules -n {{ prometheus_namespace }}
+              idi/content-hash={{ desired_hash }} --overwrite
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          changed_when: false
+
+        - name: Clean up temp file
+          ansible.builtin.file:
+            path: /tmp/prometheus-rules-configmap.yml
+            state: absent
+
+    # ========== VERIFY RULES LOADED ==========
+    # Prometheus watches ConfigMaps when configured with rule_files.
+    # No restart is needed -- just verify the rules API shows our groups.
+    - name: Wait for Prometheus to load rules
+      ansible.builtin.uri:
+        url: "{{ prometheus_url }}/api/v1/rules"
+        method: GET
+        return_content: true
+      register: rules_check
+      retries: 6
+      delay: 10
+      until: >-
+        rules_check.status is defined and
+        rules_check.status == 200 and
+        rules_check.json is defined and
+        rules_check.json.status == 'success'
+      failed_when: false
+
+    - name: Count loaded rule groups
+      ansible.builtin.set_fact:
+        loaded_groups: "{{ rules_check.json.data.groups | default([]) | length }}"
+      when: rules_check.status is defined and rules_check.status == 200
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display alert rules result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prometheus Alert Rules Configuration"
+          - "=========================================="
+          - "ConfigMap: prometheus-rules"
+          - "Namespace: {{ prometheus_namespace }}"
+          - "Rule Files: infrastructure-alerts.yml, media-alerts.yml"
+          - "Infrastructure Rules: 7 (cert-manager, vault, argocd, longhorn, external-secrets, traefik, authentik)"
+          - "Media Stack Rules: 6 (media-app-down, sonarr, radarr, queue, download-speed, disk-space)"
+          - "Content Hash: {{ desired_hash[:12] }}"
+          - "Status: {{ 'Already up to date' if not configmap_needs_update else 'Applied' }}"
+          - "Rule Groups Loaded: {{ loaded_groups | default('check skipped') }}"
+          - "=========================================="

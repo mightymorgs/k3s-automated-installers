@@ -1,0 +1,23 @@
+---
+# SMB/CIFS Persistent Volume (host-mounted)
+# The SMB share is mounted on the host at {{ smb_mount_point }},
+# then exposed to K8s pods via hostPath.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-shared-smb-pv
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+    storage-type: smb
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ smb_mount_point }}
+    type: Directory

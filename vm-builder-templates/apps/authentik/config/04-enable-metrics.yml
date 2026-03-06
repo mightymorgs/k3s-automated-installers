@@ -1,0 +1,130 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/04-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/config/04-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "authentik"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["authentik_deployed"]
+#   provides: ["authentik_metrics_enabled"]
+#   tags: ["authentik", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus scrape annotations to the authentik-server deployment.
+#     Authentik natively exposes metrics on port 9300 at /metrics.
+#     This playbook discovers the correct deployment name via the
+#     app.kubernetes.io/name=authentik label, then adds pod-level
+#     annotations so Prometheus auto-discovers and scrapes the metrics
+#     endpoint via its kubernetes-pods scrape config.
+#   requires_apps: ["authentik", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for Authentik
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    authentik_namespace: "authentik"
+    app_namespace: "{{ authentik_namespace }}"
+  tasks:
+    # ========== CHECK IF AUTHENTIK IS DEPLOYED ==========
+    - name: Check if Authentik pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=authentik --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: authentik_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Authentik not deployed
+      ansible.builtin.debug:
+        msg: "Authentik not deployed - skipping metrics configuration"
+      when: authentik_pod_check.rc != 0 or authentik_pod_check.stdout | length == 0
+
+    - name: End play if Authentik not available
+      ansible.builtin.meta: end_play
+      when: authentik_pod_check.rc != 0 or authentik_pod_check.stdout | length == 0
+
+    # ========== DISCOVER DEPLOYMENT NAME ==========
+    # Authentik server deployment may be named authentik-server or similar.
+    # Discover it dynamically via the standard label.
+    - name: Get authentik server deployment name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ app_namespace }}
+          -l app.kubernetes.io/name=authentik
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: authentik_deploy_name
+      changed_when: false
+      failed_when: false
+
+    - name: Set deployment name fact
+      ansible.builtin.set_fact:
+        authentik_deployment: "{{ authentik_deploy_name.stdout | default('authentik-server') }}"
+
+    - name: End play if no deployment found
+      ansible.builtin.meta: end_play
+      when: authentik_deployment | length == 0
+
+    # ========== CHECK IF ANNOTATIONS ALREADY PRESENT ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ authentik_deployment }} -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to {{ authentik_deployment }}
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ authentik_deployment }} -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"9300","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    - name: Annotations already present
+      ansible.builtin.debug:
+        msg: "Prometheus scrape annotations already present on {{ authentik_deployment }} - skipping"
+      when: current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for authentik rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/{{ authentik_deployment }} -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: current_scrape.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Authentik Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: deployment/{{ authentik_deployment }}"
+          - "Namespace: {{ app_namespace }}"
+          - "Scrape Port: 9300"
+          - "Metrics Path: /metrics"
+          - "Status: {{ 'Annotations added' if current_scrape.stdout != 'true' else 'Already configured' }}"
+          - "=========================================="

@@ -1,0 +1,210 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/25-datasource-neo4j"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/25-datasource-neo4j.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "neo4j_deployed"]
+#   provides: ["grafana_neo4j_wired"]
+#   tags: ["grafana", "neo4j", "datasource", "plugin", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Install the Neo4j community datasource plugin in Grafana and add
+#     Neo4j as a datasource via the Grafana HTTP API. Requires a Grafana
+#     pod restart to load the plugin after installation. Uses internal
+#     K8s DNS bolt:// protocol for Neo4j connectivity.
+#   requires_apps: ["grafana", "neo4j"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Add Neo4j Datasource to Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    neo4j_namespace: "neo4j"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    neo4j_bolt_url: "bolt://{{ neo4j_service_name }}.{{ neo4j_namespace }}.svc:{{ bolt_nodeport }}"
+    neo4j_plugin_id: "hamedkarbasi93-neo4j-datasource"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+
+    # ========== SKIP IF NEO4J NOT INSTALLED ==========
+    - name: Skip if neo4j is not installed on this VM
+      when: neo4j_admin_password is not defined
+      block:
+        - name: "neo4j not installed — skipping grafana <-> neo4j wiring"
+          ansible.builtin.debug:
+            msg: "neo4j is not installed on this VM (no neo4j_admin_password in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if neo4j_admin_password not provided
+      ansible.builtin.fail:
+        msg: "neo4j_admin_password must be provided via extra-vars (from BWS inventory)"
+      when: neo4j_admin_password is not defined or neo4j_admin_password | length == 0
+
+    # ========== VERIFY GRAFANA API ==========
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== CHECK IF PLUGIN ALREADY INSTALLED ==========
+    - name: Check installed Grafana plugins
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/plugins"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: installed_plugins
+      changed_when: false
+
+    - name: Check if Neo4j plugin is installed
+      ansible.builtin.set_fact:
+        neo4j_plugin_installed: "{{ (installed_plugins.json | selectattr('id', 'equalto', neo4j_plugin_id) | list | length) > 0 }}"
+
+    # ========== INSTALL NEO4J PLUGIN ==========
+    - name: Get Grafana pod name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ grafana_namespace }} -l app.kubernetes.io/name=grafana
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: grafana_pod
+      changed_when: false
+      when: not neo4j_plugin_installed
+
+    - name: Install Neo4j datasource plugin via grafana-cli
+      ansible.builtin.command:
+        cmd: >-
+          kubectl exec -n {{ grafana_namespace }} {{ grafana_pod.stdout }} --
+          grafana-cli plugins install {{ neo4j_plugin_id }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: plugin_install
+      changed_when: "'Installed' in plugin_install.stdout"
+      when: not neo4j_plugin_installed
+
+    # ========== RESTART GRAFANA TO LOAD PLUGIN ==========
+    - name: Restart Grafana deployment to load new plugin
+      ansible.builtin.command:
+        cmd: kubectl rollout restart deployment/grafana -n {{ grafana_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: restart_result
+      changed_when: "'restarted' in restart_result.stdout"
+      when: not neo4j_plugin_installed
+
+    - name: Wait for Grafana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/grafana -n {{ grafana_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not neo4j_plugin_installed
+
+    - name: Wait for Grafana API to become available after restart
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_post_restart
+      retries: 12
+      delay: 10
+      until: grafana_post_restart.status is defined and grafana_post_restart.status == 200
+      failed_when: false
+      when: not neo4j_plugin_installed
+
+    # ========== CHECK IF DATASOURCE ALREADY EXISTS ==========
+    - name: Get existing datasources
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: existing_datasources
+      changed_when: false
+
+    - name: Check if Neo4j datasource already exists
+      ansible.builtin.set_fact:
+        neo4j_ds_exists: >-
+          {{ (existing_datasources.json | selectattr('type', 'equalto', neo4j_plugin_id) | list | length) > 0 }}
+
+    # ========== ADD NEO4J DATASOURCE ==========
+    - name: Add Neo4j as datasource in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Neo4j"
+          type: "{{ neo4j_plugin_id }}"
+          url: "{{ neo4j_bolt_url }}"
+          access: "proxy"
+          isDefault: false
+          jsonData:
+            database: "neo4j"
+          secureJsonData:
+            password: "{{ neo4j_admin_password }}"
+        status_code: [200, 409]
+      register: add_neo4j
+      changed_when: add_neo4j.status == 200
+      when: not neo4j_ds_exists
+
+    - name: Neo4j datasource already configured
+      ansible.builtin.debug:
+        msg: "Neo4j datasource already exists in Grafana - skipping"
+      when: neo4j_ds_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana <-> Neo4j Wiring Complete"
+          - "=========================================="
+          - "Plugin: {{ neo4j_plugin_id }} ({{ 'installed' if not neo4j_plugin_installed else 'already present' }})"
+          - "Datasource: Neo4j ({{ 'Added' if not neo4j_ds_exists else 'Already configured' }})"
+          - "Bolt URL: {{ neo4j_bolt_url }}"
+          - "Database: neo4j"
+          - "Access Mode: proxy (server-side)"
+          - "=========================================="

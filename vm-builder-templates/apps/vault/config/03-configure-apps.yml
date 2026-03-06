@@ -1,0 +1,258 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/03-configure-apps"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/config/03-configure-apps.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260128_vault_config"
+#   dependencies: ["vault_deployed", "vault_initialized"]
+#   provides: ["vault_apps_configured", "eso_configured"]
+#   tags: ["vault", "secrets", "eso", "zero-touch"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure Vault policies and secrets for all apps
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.vault.root_token"
+#     writes:
+#       - path: "_state.vault.apps_configured"
+#         example: true
+
+- name: Configure Vault for All Apps
+  hosts: localhost
+  gather_facts: false
+  vars:
+    jellyfin_namespace: "jellyfin"
+    prowlarr_namespace: "media-stack"
+    qbittorrent_namespace: "media-stack"
+    radarr_namespace: "media-stack"
+    sabnzbd_namespace: "media-stack"
+    sonarr_namespace: "media-stack"
+    vault_addr: "{{ vault_url }}"
+    vault_api_url: "{{ vault_url }}"
+    apps:
+      - name: authentik
+        secrets:
+          - key: secret_key
+            generate: true
+          - key: postgres_password
+            generate: true
+      - name: grafana
+        secrets:
+          - key: admin_password
+            generate: true
+      - name: argocd
+        secrets:
+          - key: admin_password
+            generate: true
+      - name: langfuse
+        secrets:
+          - key: nextauth_secret
+            generate: true
+          - key: salt
+            generate: true
+      - name: neo4j
+        secrets:
+          - key: auth_password
+            generate: true
+      - name: sonarr
+        namespace: "{{ sonarr_namespace }}"
+        secrets:
+          - key: api_key
+            generate: true
+      - name: radarr
+        namespace: "{{ radarr_namespace }}"
+        secrets:
+          - key: api_key
+            generate: true
+      - name: prowlarr
+        namespace: "{{ prowlarr_namespace }}"
+        secrets:
+          - key: api_key
+            generate: true
+      - name: sabnzbd
+        namespace: "{{ sabnzbd_namespace }}"
+        secrets:
+          - key: api_key
+            generate: true
+      - name: qbittorrent
+        namespace: "{{ qbittorrent_namespace }}"
+        secrets:
+          - key: webui_password
+            generate: true
+      - name: jellyfin
+        namespace: "{{ jellyfin_namespace }}"
+        secrets:
+          - key: api_key
+            generate: true
+
+  tasks:
+    # ========== SKIP IF VAULT NOT INITIALIZED ==========
+    - name: Skip if vault root token is not available
+      when: vault_root_token | length == 0
+      block:
+        - name: "vault not initialized — skipping app configuration"
+          ansible.builtin.debug:
+            msg: "vault_root_token not provided (vault not initialized) — skipping"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    # ========== ENSURE VAULT IS UNSEALED ==========
+    - name: Ensure Vault is unsealed
+      ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+
+    # ========== 1. ENABLE KV SECRETS ENGINE ==========
+    - name: Enable KV v2 secrets engine
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/mounts/apps"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          type: "kv"
+          options:
+            version: "2"
+        status_code: [200, 204, 400]  # 400 = already exists
+      register: kv_engine
+
+    # ========== 2. ENABLE KUBERNETES AUTH ==========
+    - name: Enable Kubernetes auth method
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/auth/kubernetes"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          type: "kubernetes"
+        status_code: [200, 204, 400]
+      register: k8s_auth
+
+    - name: Configure Kubernetes auth
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/kubernetes/config"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          kubernetes_host: "https://kubernetes.default.svc"
+        status_code: [200, 204]
+
+    # ========== 3. CREATE POLICIES FOR EACH APP ==========
+    - name: Create policy for each app
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/policies/acl/{{ item.name }}"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          policy: |
+            path "apps/data/{{ item.name }}/*" {
+              capabilities = ["read", "create", "update"]
+            }
+        status_code: [200, 204]
+      loop: "{{ apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ========== 3b. CREATE ESO PUSH POLICY ==========
+    - name: Create ESO push policy for PushSecret write access
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/policies/acl/external-secrets-push"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          policy: |
+            path "apps/data/*" {
+              capabilities = ["create", "update", "read"]
+            }
+            path "apps/metadata/*" {
+              capabilities = ["list", "read"]
+            }
+        status_code: [200, 204]
+
+    # ========== 4. CREATE K8S AUTH ROLES ==========
+    # Some apps deploy to a shared namespace (e.g. sabnzbd, qbittorrent -> media-stack).
+    # The optional 'namespace' field overrides the default (app name) for
+    # bound_service_account_namespaces.
+    - name: Create Kubernetes auth role for each app
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/kubernetes/role/{{ item.name }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          bound_service_account_names:
+            - "{{ item.name }}"
+            - "default"
+          bound_service_account_namespaces:
+            - "{{ item.namespace | default(item.name) }}"
+          policies:
+            - "{{ item.name }}"
+          ttl: "1h"
+        status_code: [200, 204]
+      loop: "{{ apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ========== 4b. CREATE ESO K8S AUTH ROLE FOR PUSHSECRET ==========
+    - name: Create Kubernetes auth role for ESO PushSecret
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/kubernetes/role/external-secrets"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          bound_service_account_names:
+            - "external-secrets"
+          bound_service_account_namespaces:
+            - "external-secrets"
+          policies:
+            - "external-secrets-push"
+          ttl: "1h"
+        status_code: [200, 204]
+
+    # ========== 5. GENERATE AND STORE SECRETS ==========
+    - name: Generate and store secrets for each app
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/apps/data/{{ item.0.name }}/{{ item.1.key }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          data:
+            value: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=32') }}"
+        status_code: [200, 204]
+      loop: "{{ apps | subelements('secrets') }}"
+      loop_control:
+        label: "{{ item.0.name }}/{{ item.1.key }}"
+      when: item.1.generate | default(false)
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display Vault configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Configuration Complete"
+          - "=========================================="
+          - "KV Engine: apps/"
+          - "Kubernetes Auth: Enabled"
+          - "Apps Configured: {{ apps | length }}"
+          - "=========================================="

@@ -1,0 +1,82 @@
+---
+# Prowlarr StatefulSet
+# Indexer manager for *arr stack
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prowlarr
+  namespace: media-stack
+  labels:
+    app: prowlarr
+    app.kubernetes.io/name: prowlarr
+    app.kubernetes.io/component: indexer-manager
+spec:
+  serviceName: prowlarr
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prowlarr
+  template:
+    metadata:
+      labels:
+        app: prowlarr
+    spec:
+      containers:
+        - name: prowlarr
+          image: lscr.io/linuxserver/prowlarr:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Australia/Sydney"
+          ports:
+            - name: http
+              containerPort: 9696
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: nfs-media
+              mountPath: /downloads
+              subPath: downloads
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: nfs-media
+          persistentVolumeClaim:
+            claimName: nfs-media-pvc
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+        labels:
+          app: prowlarr
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 5Gi

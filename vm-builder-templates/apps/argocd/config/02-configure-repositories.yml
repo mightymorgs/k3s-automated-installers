@@ -1,0 +1,116 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/03-configure-repositories"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/config/02-configure-repositories.yml"
+#     category: "platform"
+#     subsystem: "argocd"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["argocd_manifests_applied"]
+#   provides: ["argocd_repositories_configured"]
+#   tags: ["argocd", "gitops", "repositories", "golden-master"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure ArgoCD Git repositories with credentials from BWS
+
+- name: Configure ArgoCD Repositories
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    argocd_namespace: "argocd"
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    bws_github_deploy_key_secret: "github/deploy_key"
+    repositories:
+      - name: k8s-platform-automation
+        url: git@github.com:mightymorgs/k8s-platform-automation.git
+        type: git
+        insecure: false
+
+  tasks:
+    # ========================================
+    # CHECK IF ARGOCD IS DEPLOYED
+    # ========================================
+    - name: Check if ArgoCD is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ argocd_namespace }} -l app.kubernetes.io/name=argocd-server
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: argocd_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set ArgoCD availability fact
+      ansible.builtin.set_fact:
+        argocd_available: "{{ argocd_check.rc == 0 and argocd_check.stdout | length > 0 }}"
+
+    - name: Skip if ArgoCD not deployed
+      ansible.builtin.debug:
+        msg: "ArgoCD not deployed - skipping configuration"
+      when: not argocd_available
+
+    - name: End play if ArgoCD not available
+      ansible.builtin.meta: end_play
+      when: not argocd_available
+
+    - name: Retrieve GitHub deploy key from BWS
+      ansible.builtin.command:
+        cmd: bws secret get "{{ bws_github_deploy_key_secret }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_deploy_key
+      changed_when: false
+      no_log: true
+
+    - name: Parse deploy key
+      ansible.builtin.set_fact:
+        github_ssh_private_key: "{{ (bws_deploy_key.stdout | from_json).value }}"
+      no_log: true
+
+    - name: Create repository secrets
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: repo-{{ item.name }}
+            namespace: {{ argocd_namespace }}
+            labels:
+              argocd.argoproj.io/secret-type: repository
+          stringData:
+            type: {{ item.type }}
+            url: {{ item.url }}
+            sshPrivateKey: "{{ github_ssh_private_key }}"
+            insecure: "{{ item.insecure | string | lower }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop: "{{ repositories }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: repo_secret_result
+      changed_when: "'created' in repo_secret_result.stdout or 'configured' in repo_secret_result.stdout"
+      no_log: true
+
+    - name: Verify repositories are accessible
+      ansible.builtin.shell: |
+        kubectl get secrets -n {{ argocd_namespace }} -l argocd.argoproj.io/secret-type=repository -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: repo_secrets
+      changed_when: false
+
+    - name: Display configured repositories
+      ansible.builtin.debug:
+        msg:
+          - "========== ArgoCD Repositories Configured =========="
+          - "{{ repo_secrets.stdout_lines }}"

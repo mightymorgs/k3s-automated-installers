@@ -1,0 +1,100 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  database-create.yml:
+    summary: 'Create a new database in Neo4j via the HTTP Transaction API. This operation
+      is idempotent - uses CREATE DATABASE IF NOT EXISTS. Waits for the database to
+      become online before completing. Note: Multi-database requires Neo4j Enterprise.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/{{ database_name }}/tx/commit'
+    wiring:
+      reads_from:
+      - app: neo4j
+        field: password
+      - app: neo4j
+        field: url
+      writes_to:
+      - app: neo4j
+        field: databases
+      - app: neo4j
+        field: databases
+      - app: neo4j
+        field: databases
+  index-create.yml:
+    summary: 'Create an index in Neo4j via the HTTP Transaction API. Supports multiple
+      index types: range (default), text, fulltext, and composite. This operation
+      is idempotent - uses IF NOT EXISTS clause. Waits for the index to become ONLINE.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ neo4j_url }}/db/{{ database }}/tx/commit'
+    - '{{ neo4j_url }}/db/{{ database }}/tx/commit'
+    - '{{ neo4j_url }}/db/{{ database }}/tx/commit'
+    wiring:
+      reads_from:
+      - app: neo4j
+        field: password
+      - app: neo4j
+        field: url
+      writes_to:
+      - app: neo4j
+        field: indexes
+      - app: neo4j
+        field: indexes
+      - app: neo4j
+        field: indexes
+      - app: neo4j
+        field: indexes
+  role-create.yml:
+    summary: 'Create a new role in Neo4j via the HTTP Transaction API. This operation
+      is idempotent - uses CREATE ROLE IF NOT EXISTS. Optionally grants privileges
+      and assigns the role to users. Note: Custom roles require Neo4j Enterprise.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    wiring:
+      reads_from:
+      - app: neo4j
+        field: password
+      - app: neo4j
+        field: url
+      writes_to:
+      - app: neo4j
+        field: roles
+      - app: neo4j
+        field: roles
+      - app: neo4j
+        field: roles
+  user-create.yml:
+    summary: Create a new user in Neo4j via the HTTP Transaction API. This operation
+      is idempotent - if the user already exists, it will be skipped. Uses Cypher's
+      CREATE USER command executed against the system database.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    - '{{ neo4j_url }}/db/system/tx/commit'
+    wiring:
+      reads_from:
+      - app: neo4j
+        field: password
+      - app: neo4j
+        field: url
+      writes_to:
+      - app: neo4j
+        field: users
+      - app: neo4j
+        field: users

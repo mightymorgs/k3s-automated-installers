@@ -1,0 +1,21 @@
+---
+# SMB/CIFS Persistent Volume Claim
+# Binds to the host-mounted SMB PV for shared media storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-shared-pvc
+  namespace: {{ storage_namespace }}
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+    storage-type: smb
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: media-shared-smb-pv
+  resources:
+    requests:
+      storage: 1Ti

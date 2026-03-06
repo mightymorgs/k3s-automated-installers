@@ -1,0 +1,22 @@
+---
+# Claudebox Service (J2 template)
+# Defaults match install/01-deploy.yml inline definitions
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('claudebox') }}
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ app_name | default('claudebox') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('claudebox') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(8080) }}
+      targetPort: {{ container_port | default(8080) }}
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30800) }}
+{% endif %}
+      protocol: TCP

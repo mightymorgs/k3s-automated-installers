@@ -1,0 +1,20 @@
+---
+# Langfuse PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ postgres_host | default('langfuse-postgres') }}
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ postgres_host | default('langfuse-postgres') }}
+    app.kubernetes.io/name: {{ postgres_host | default('langfuse-postgres') }}
+    app.kubernetes.io/part-of: {{ app_name | default('langfuse') }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ postgres_host | default('langfuse-postgres') }}
+  ports:
+    - name: postgres
+      port: {{ postgres_port | default(5432) }}
+      targetPort: {{ postgres_port | default(5432) }}
+      protocol: TCP

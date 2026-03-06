@@ -1,0 +1,19 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-argocd-config.yml:
+    summary: Verify that ArgoCD is properly configured and healthy. Checks that the
+      API server is accessible, projects exist with expected settings, repositories
+      are connected and synced, clusters are registered and reachable, applications
+      are synced and healthy, and ApplicationSets are generating expected apps. Provides
+      a comprehensive health report.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ argocd_api_base }}/version'
+    - '{{ argocd_api_base }}/projects'
+    - '{{ argocd_api_base }}/projects/{{ item | urlencode }}'
+    - '{{ argocd_api_base }}/repositories'
+    - '{{ argocd_api_base }}/clusters'
+    - '{{ argocd_api_base }}/applications'
+    - '{{ argocd_api_base }}/applicationsets'

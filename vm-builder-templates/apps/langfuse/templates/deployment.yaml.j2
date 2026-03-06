@@ -1,0 +1,80 @@
+---
+# Langfuse Application Deployment
+# NOTE: POSTGRES_PASSWORD env var MUST appear before DATABASE_URL so that
+#       $(POSTGRES_PASSWORD) variable interpolation works in the container runtime.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ app_name | default('langfuse') }}
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ app_name | default('langfuse') }}
+    app.kubernetes.io/name: {{ app_name | default('langfuse') }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('langfuse') }}
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('langfuse') }}
+        app.kubernetes.io/name: {{ app_name | default('langfuse') }}
+    spec:
+      containers:
+        - name: {{ app_name | default('langfuse') }}
+          image: {{ image | default('langfuse/langfuse:2') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          ports:
+            - name: http
+              containerPort: {{ container_port | default(3000) }}
+              protocol: TCP
+          env:
+            # POSTGRES_PASSWORD must be defined BEFORE DATABASE_URL
+            # so $(POSTGRES_PASSWORD) interpolation resolves correctly
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ postgres_secret_name | default('langfuse-postgres') }}
+                  key: password
+            - name: DATABASE_URL
+              value: >-
+                postgresql://{{ postgres_user | default('langfuse') }}:$(POSTGRES_PASSWORD)@{{ postgres_host | default('langfuse-postgres') }}:{{ postgres_port | default(5432) }}/{{ postgres_db | default('langfuse') }}
+            - name: NEXTAUTH_URL
+              value: "{{ nextauth_url | default('http://localhost:3000') }}"
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ config_secret_name | default('langfuse-config') }}
+                  key: NEXTAUTH_SECRET
+            - name: SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ config_secret_name | default('langfuse-config') }}
+                  key: SALT
+            - name: TELEMETRY_ENABLED
+              value: "{{ telemetry_enabled | default('false') }}"
+            # Next.js binds to pod IP by default, not 0.0.0.0.
+            # HOSTNAME=0.0.0.0 makes health checks via 127.0.0.1 work.
+            - name: HOSTNAME
+              value: "0.0.0.0"
+          resources:
+            requests:
+              cpu: {{ cpu_request | default('200m') }}
+              memory: {{ memory_request | default('512Mi') }}
+            limits:
+              cpu: {{ cpu_limit | default('1000m') }}
+              memory: {{ memory_limit | default('2Gi') }}
+          livenessProbe:
+            httpGet:
+              path: {{ health_path | default('/api/public/health') }}
+              port: http
+            initialDelaySeconds: {{ liveness_initial_delay | default(30) }}
+            periodSeconds: {{ liveness_period | default(10) }}
+          readinessProbe:
+            httpGet:
+              path: {{ health_path | default('/api/public/health') }}
+              port: http
+            initialDelaySeconds: {{ readiness_initial_delay | default(5) }}
+            periodSeconds: {{ readiness_period | default(5) }}

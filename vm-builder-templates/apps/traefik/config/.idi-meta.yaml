@@ -1,0 +1,31 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Enable the Traefik dashboard in insecure mode for Tailscale Ingress.
+      Sets TRAEFIK_API_INSECURE=true via kubectl set env so that the dashboard API
+      listens on port 8080 without its own auth layer. Tailscale provides the authentication
+      layer.
+    source: inferred
+    confidence: medium
+  05-wire-loki.yml:
+    summary: Enable Traefik structured JSON access logging and add Loki scrape labels
+      so that Alloy (DaemonSet) can collect and forward access logs to Loki. Traefik
+      logs to stdout by default; Alloy collects from /var/log/pods. This playbook
+      adds --accesslog args for JSON format and labels the pods for Loki log discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - loki
+  06-enable-metrics.yml:
+    summary: Enable Traefik Prometheus metrics endpoint. Patches the Traefik deployment
+      to add --metrics.prometheus args and a metrics entrypoint on port 9100. Adds
+      prometheus.io annotations to the pod template for automatic scrape discovery.
+      Verifies the /metrics endpoint responds after rollout.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- loki
+- prometheus

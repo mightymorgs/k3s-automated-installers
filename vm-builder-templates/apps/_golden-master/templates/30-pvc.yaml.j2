@@ -1,0 +1,25 @@
+{#
+  PVC for {{ app_name }}.
+  Prefix 30 → always kubectl apply (never replace --force).
+  pvc-protection finalizer deadlocks on force-delete while pods are mounted.
+
+  For StatefulSet volumeClaimTemplates, the PVC is embedded in 40-statefulset.yaml.j2.
+  This template is for standalone PVCs (e.g., claudebox workspace).
+#}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ pvc_name | default(app_name + '-data') }}
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: golden-master
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ storage_class | default('longhorn') }}
+  resources:
+    requests:
+      storage: {{ storage_size | default('10Gi') }}

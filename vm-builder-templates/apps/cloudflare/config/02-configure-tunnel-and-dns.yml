@@ -1,0 +1,262 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/cloudflare/config/02-configure-tunnel-and-dns"
+#   type: "atomic"
+#   path_info:
+#     file_path: "atomic/apps/cloudflare/config/02-configure-tunnel-and-dns.yml"
+#     category: "platform"
+#     subsystem: "cloudflare"
+#     role: "config"
+#   batch_id: "20260223_cloudflare_phase5"
+#   dependencies: ["cloudflare_tunnel_deployed"]
+#   provides: ["tunnel_ingress_configured", "dns_records_created"]
+#   tags: ["cloudflare", "tunnel", "dns", "phase5"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Cloudflare Tunnel ingress rules and create DNS CNAME records
+#     dynamically from registry.json + installed apps. Routes all traffic
+#     through Traefik. Includes auth.{domain} for authentik.
+#   bws_state:
+#     reads:
+#       - path: "cloudflare.api_token_key"
+#         purpose: "Cloudflare API authentication"
+#       - path: "cloudflare.account_id_key"
+#         purpose: "Cloudflare account for tunnel config API"
+#       - path: "cloudflare.zone_id_key"
+#         purpose: "Cloudflare zone for DNS record creation"
+#       - path: "_state.cloudflare.tunnel_id"
+#         purpose: "Tunnel ID for config and DNS CNAME target"
+#     writes:
+#       - path: "_state.cloudflare.ingress_rules"
+#         example: ["sonarr.example.local", "radarr.example.local", "auth.example.local"]
+#       - path: "_state.cloudflare.dns_records"
+#         example: ["sonarr.example.local", "radarr.example.local"]
+
+- name: Configure Cloudflare Tunnel Ingress and DNS Records
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    registry_path: "{{ playbook_dir }}/../../../registry.json"
+
+  tasks:
+    # === Read inventory + registry ===
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    - name: Read app registry
+      ansible.builtin.slurp:
+        src: "{{ registry_path }}"
+      register: registry_content
+      delegate_to: localhost
+      become: false
+
+    - name: Parse registry
+      ansible.builtin.set_fact:
+        app_registry: "{{ registry_content.content | b64decode | from_json }}"
+
+    - name: Extract traefik service details from registry
+      ansible.builtin.set_fact:
+        _traefik_namespace: "{{ app_registry.apps.traefik.ingress.namespace }}"
+        _traefik_service: "traefik"
+
+    # === Extract Traefik websecure port from BWS inventory (written by Phase 3) ===
+    - name: Extract traefik websecure port from inventory
+      ansible.builtin.set_fact:
+        traefik_websecure_port: "{{ _inventory._state.apps.traefik.websecure_port | default('443') }}"
+
+    - name: Set Traefik backend URL from BWS inventory
+      ansible.builtin.set_fact:
+        traefik_backend: "https://{{ _traefik_service }}.{{ _traefik_namespace }}.svc.cluster.local:{{ traefik_websecure_port }}"
+
+    - name: Extract authentik subdomain from registry
+      ansible.builtin.set_fact:
+        _ak_subdomain: "{{ app_registry.apps.authentik.ingress.subdomain }}"
+
+    - name: Extract config
+      ansible.builtin.set_fact:
+        ingress_domain: "{{ _inventory.ingress.domain }}"
+        default_ingress_mode: "{{ _inventory.ingress.mode | default('nodeport') }}"
+        app_overrides: "{{ _inventory.ingress.app_overrides | default({}) }}"
+        installed_apps: "{{ _inventory._state.apps.installed | default([]) }}"
+        tunnel_id: "{{ _inventory._state.cloudflare.tunnel_id }}"
+
+    # === Resolve Cloudflare credentials ===
+    - name: Resolve Cloudflare API token
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.cloudflare.api_token_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_api_token_raw
+      changed_when: false
+      no_log: true
+
+    - name: Resolve Cloudflare Account ID
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.cloudflare.account_id_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_account_id_raw
+      changed_when: false
+
+    - name: Resolve Cloudflare Zone ID
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.cloudflare.zone_id_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_zone_id_raw
+      changed_when: false
+
+    - name: Set credentials
+      ansible.builtin.set_fact:
+        cf_api_token: "{{ cf_api_token_raw.stdout | trim }}"
+        cf_account_id: "{{ cf_account_id_raw.stdout | trim }}"
+        cf_zone_id: "{{ cf_zone_id_raw.stdout | trim }}"
+      no_log: true
+
+    # === Filter apps to Cloudflare mode ===
+    - name: Build list of non-cloudflare overrides
+      ansible.builtin.set_fact:
+        _non_cf_overrides: >-
+          {{ app_overrides | dict2items |
+          rejectattr('value', 'equalto', 'cloudflare') |
+          map(attribute='key') | list }}
+
+    - name: Build list of cloudflare overrides
+      ansible.builtin.set_fact:
+        _cf_overrides: >-
+          {{ app_overrides | dict2items |
+          selectattr('value', 'equalto', 'cloudflare') |
+          map(attribute='key') | list }}
+
+    - name: Extract installed apps with ingress enabled
+      ansible.builtin.set_fact:
+        _all_ingress_apps: >-
+          {{ app_registry.apps | dict2items |
+          selectattr('value.ingress.enabled', 'defined') |
+          selectattr('value.ingress.enabled', 'equalto', true) |
+          selectattr('key', 'in', installed_apps) |
+          list }}
+
+    - name: Filter to effective cloudflare-mode apps (default=cloudflare)
+      ansible.builtin.set_fact:
+        cloudflare_apps: >-
+          {{ _all_ingress_apps |
+          rejectattr('key', 'in', _non_cf_overrides) |
+          list }}
+      when: default_ingress_mode == 'cloudflare'
+
+    - name: Filter to effective cloudflare-mode apps (default!=cloudflare)
+      ansible.builtin.set_fact:
+        cloudflare_apps: >-
+          {{ _all_ingress_apps |
+          selectattr('key', 'in', _cf_overrides) |
+          list }}
+      when: default_ingress_mode != 'cloudflare'
+
+    # === Build tunnel ingress rules ===
+    # All apps route to Traefik. Authentik (auth.{domain}) is always included.
+    - name: Build hostnames list
+      ansible.builtin.set_fact:
+        tunnel_hostnames: >-
+          {{ cloudflare_apps | map(attribute='value.ingress.subdomain') |
+          map('regex_replace', '^(.*)$', '\1.' ~ ingress_domain) |
+          list + [_ak_subdomain ~ '.' ~ ingress_domain] | unique }}
+
+    - name: Build ingress rules JSON
+      ansible.builtin.set_fact:
+        ingress_rules: >-
+          {{ tunnel_hostnames | map('community.general.dict_kv', 'hostname') |
+          map('combine', {'service': traefik_backend, 'originRequest': {'noTLSVerify': true}}) |
+          list + [{'service': 'http_status:404'}] }}
+
+    - name: Display tunnel ingress rules
+      ansible.builtin.debug:
+        msg: "Configuring {{ tunnel_hostnames | length }} hostnames: {{ tunnel_hostnames | join(', ') }}"
+
+    # === PUT tunnel config ===
+    - name: Configure tunnel ingress rules
+      ansible.builtin.shell: |
+        set -eu
+        curl -sf \
+          -X PUT \
+          -H "Authorization: Bearer $CF_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{{ {"config": {"ingress": ingress_rules}} | to_json }}' \
+          "https://api.cloudflare.com/client/v4/accounts/{{ cf_account_id }}/cfd_tunnel/{{ tunnel_id }}/configurations"
+      environment:
+        CF_TOKEN: "{{ cf_api_token }}"
+      register: tunnel_config_raw
+      changed_when: true
+      no_log: true
+
+    # === Create DNS CNAME records ===
+    - name: Create DNS CNAME records
+      ansible.builtin.shell: |
+        set -eu
+        SUBDOMAIN="{{ item | regex_replace('\\.' ~ ingress_domain ~ '$', '') }}"
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST \
+          -H "Authorization: Bearer $CF_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{\"type\":\"CNAME\",\"name\":\"$SUBDOMAIN\",\"content\":\"{{ tunnel_id }}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}" \
+          "https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records")
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+        echo "$BODY"
+        # 400 = already exists (OK), anything else non-2xx = fail
+        if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then exit 0; fi
+        exit 1
+      environment:
+        CF_TOKEN: "{{ cf_api_token }}"
+      loop: "{{ tunnel_hostnames }}"
+      loop_control:
+        label: "{{ item }}"
+      register: dns_results
+      changed_when: true
+      failed_when: false
+
+    # === Write state to BWS ===
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Write tunnel config state to BWS
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ _inv_id_raw.stdout | trim }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        updated=$(printf '%s' "$inv" | jq \
+          --argjson rules '{{ tunnel_hostnames | to_json }}' \
+          --argjson dns '{{ tunnel_hostnames | to_json }}' \
+          '._state.cloudflare.ingress_rules = $rules |
+           ._state.cloudflare.dns_records = $dns')
+
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      changed_when: true
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "Tunnel ingress + DNS configured"
+          - "  Hostnames: {{ tunnel_hostnames | length }}"
+          - "  DNS records: {{ dns_results.results | selectattr('rc', 'equalto', 0) | list | length }} processed"

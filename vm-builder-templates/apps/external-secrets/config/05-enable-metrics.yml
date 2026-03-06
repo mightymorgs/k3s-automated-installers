@@ -1,0 +1,106 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/external-secrets/05-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/external-secrets/config/05-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "external-secrets"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["external_secrets_deployed"]
+#   provides: ["external_secrets_metrics_enabled"]
+#   tags: ["external-secrets", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus scrape annotations to the external-secrets controller
+#     deployment. External Secrets Operator natively exposes metrics on
+#     port 8080 at /metrics. This playbook adds pod-level annotations
+#     so Prometheus auto-discovers and scrapes the metrics endpoint via
+#     its kubernetes-pods scrape config.
+#   requires_apps: ["external-secrets", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for External Secrets
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    external_secrets_namespace: "external-secrets"
+    app_namespace: "{{ external_secrets_namespace }}"
+  tasks:
+    # ========== CHECK IF EXTERNAL-SECRETS IS DEPLOYED ==========
+    - name: Check if external-secrets controller pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=external-secrets --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: eso_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if external-secrets not deployed
+      ansible.builtin.debug:
+        msg: "External Secrets Operator not deployed - skipping metrics configuration"
+      when: eso_pod_check.rc != 0 or eso_pod_check.stdout | length == 0
+
+    - name: End play if external-secrets not available
+      ansible.builtin.meta: end_play
+      when: eso_pod_check.rc != 0 or eso_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ANNOTATIONS ALREADY PRESENT ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment external-secrets -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to external-secrets
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment external-secrets -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"8080","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    - name: Annotations already present
+      ansible.builtin.debug:
+        msg: "Prometheus scrape annotations already present on external-secrets - skipping"
+      when: current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for external-secrets rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/external-secrets -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: current_scrape.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "External Secrets Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: deployment/external-secrets"
+          - "Namespace: {{ app_namespace }}"
+          - "Scrape Port: 8080"
+          - "Metrics Path: /metrics"
+          - "Status: {{ 'Annotations added' if current_scrape.stdout != 'true' else 'Already configured' }}"
+          - "=========================================="

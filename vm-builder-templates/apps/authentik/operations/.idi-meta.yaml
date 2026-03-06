@@ -1,0 +1,68 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  core-applications-create.yml:
+    summary: Create an application in Authentik and link it to an OAuth2 provider.
+      This operation is idempotent - if an application with the same slug exists,
+      it will be skipped. The application appears in the user portal and controls
+      access to the linked provider.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ authentik_api_base }}{{ endpoint }}'
+    - '{{ authentik_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: authentik
+        field: admin_token
+      - app: '{app_name}'
+        field: oauth
+      writes_to:
+      - app: '{app_name}'
+        field: oauth
+      - app: '{app_name}'
+        field: oauth
+  outposts-instances-create.yml:
+    summary: Create an outpost in Authentik to deploy the proxy/LDAP/RADIUS frontend.
+      Outposts handle the actual authentication flow for applications. This operation
+      is idempotent - if an outpost with the same name exists, it will be updated
+      with new provider list if different.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ authentik_api_base }}{{ endpoint }}'
+    - '{{ authentik_api_base }}{{ endpoint }}'
+    - '{{ authentik_api_base }}{{ endpoint }}{{ existing_outpost.pk }}/'
+    wiring:
+      reads_from:
+      - app: authentik
+        field: admin_token
+      - app: '{app_name}'
+        field: oauth
+      writes_to:
+      - app: authentik
+        field: outpost
+      - app: authentik
+        field: outpost
+      - app: authentik
+        field: outpost
+  providers-oauth2-create.yml:
+    summary: Create an OAuth2 provider in Authentik. This operation is idempotent
+      - if a provider with the same name exists, it will be skipped. Returns the provider
+      ID for use in application creation.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ authentik_api_base }}{{ endpoint }}'
+    - '{{ authentik_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: authentik
+        field: admin_token
+      writes_to:
+      - app: '{app_name}'
+        field: oauth
+      - app: '{app_name}'
+        field: oauth
+      - app: '{app_name}'
+        field: oauth

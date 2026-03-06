@@ -1,0 +1,285 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/neo4j/operations/user-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "neo4j.users.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/neo4j/operations/user-create.yml"
+#     category: "platform"
+#     subsystem: "neo4j"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "neo4j"
+#       supported_versions: ["5.x"]
+#       version_range: ">=5.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - neo4j: "5.26.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Neo4j Cypher/HTTP API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_neo4j_operations"
+#   dependencies: ["neo4j_deployed", "neo4j_ready"]
+#   provides: ["neo4j_user_created"]
+#   tags: ["neo4j", "users", "security", "cypher", "operations", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a new user in Neo4j via the HTTP Transaction API. This operation is
+#     idempotent - if the user already exists, it will be skipped. Uses Cypher's
+#     CREATE USER command executed against the system database.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.neo4j.password"
+#         purpose: "Neo4j admin password for API authentication"
+#       - path: "_state.apps.neo4j.url"
+#         purpose: "Neo4j HTTP endpoint URL"
+#
+#     writes:
+#       - path: "_state.apps.neo4j.users.{username}.created"
+#         example: true
+#       - path: "_state.apps.neo4j.users.{username}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+
+- name: Neo4j - Create User
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    neo4j_base_url: "{{ neo4j_url }}"
+    neo4j_admin_user: "{{ neo4j_admin_user_input | default('neo4j') }}"
+
+    # User configuration (required)
+    # username: Name for the new user (required)
+    # password: Password for the new user (required)
+
+    # Optional configuration
+    require_password_change: "{{ require_password_change_input | default(false) }}"
+    suspended: "{{ suspended_input | default(false) }}"
+    home_database: "{{ home_database_input | default('') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - username is defined and username | length > 0
+          - password is defined and password | length > 0
+        fail_msg: >-
+          Required inputs: username (string), password (string).
+          Example: -e "username=appuser" -e "password=SecurePassword123"
+        success_msg: "All required inputs validated: username={{ username }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Neo4j Credentials =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Neo4j credentials
+      ansible.builtin.set_fact:
+        neo4j_admin_password: "{{ inventory._state.apps.neo4j.password }}"
+        neo4j_url: "{{ inventory._state.apps.neo4j.url | default(neo4j_base_url) }}"
+      no_log: true
+
+    - name: Validate Neo4j credentials are available
+      ansible.builtin.assert:
+        that:
+          - neo4j_admin_password | length > 0
+        fail_msg: "Neo4j admin password not found in BWS _state. Deploy Neo4j first."
+        success_msg: "Neo4j credentials retrieved from BWS _state"
+
+    # ===== STEP 4: Check if User Already Exists (Idempotency) =====
+    - name: Check if user already exists
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW USERS YIELD user WHERE user = $username RETURN user"
+              parameters:
+                username: "{{ username }}"
+        status_code: [200]
+        validate_certs: false
+      register: check_user_result
+      no_log: false
+
+    - name: Determine if user exists
+      ansible.builtin.set_fact:
+        user_exists: "{{ check_user_result.json.results[0].data | length > 0 }}"
+
+    - name: Display user status
+      ansible.builtin.debug:
+        msg: "User '{{ username }}': {{ 'Already exists (skipping creation)' if user_exists else 'Does not exist (will create)' }}"
+
+    # ===== STEP 5: Create User =====
+    - name: Build CREATE USER Cypher statement
+      ansible.builtin.set_fact:
+        create_user_cypher: >-
+          CREATE USER $username
+          SET PASSWORD $password
+          SET PASSWORD CHANGE {{ 'REQUIRED' if require_password_change else 'NOT REQUIRED' }}
+          SET STATUS {{ 'SUSPENDED' if suspended else 'ACTIVE' }}
+          {{ 'SET HOME DATABASE $homeDatabase' if home_database | length > 0 else '' }}
+      when: not user_exists
+
+    - name: Create user in Neo4j
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "{{ create_user_cypher }}"
+              parameters:
+                username: "{{ username }}"
+                password: "{{ password }}"
+                homeDatabase: "{{ home_database }}"
+        status_code: [200]
+        validate_certs: false
+      register: create_user_result
+      when: not user_exists
+      no_log: true
+
+    - name: Check for Neo4j errors in response
+      ansible.builtin.assert:
+        that:
+          - create_user_result.json.errors | length == 0
+        fail_msg: "Failed to create user: {{ create_user_result.json.errors | map(attribute='message') | join(', ') }}"
+        success_msg: "User '{{ username }}' created successfully"
+      when: not user_exists
+
+    # ===== STEP 6: Verify User Was Created =====
+    - name: Verify user exists after creation
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW USERS YIELD user, suspended WHERE user = $username RETURN user, suspended"
+              parameters:
+                username: "{{ username }}"
+        status_code: [200]
+        validate_certs: false
+      register: verify_user_result
+      when: not user_exists
+      no_log: false
+
+    - name: Assert user verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_user_result.json.results[0].data | length > 0
+        fail_msg: "Failed to verify user '{{ username }}' after creation"
+        success_msg: "User '{{ username }}' verified successfully"
+      when: not user_exists
+
+    # ===== STEP 7: Write User Status to BWS._state =====
+    - name: Update BWS inventory with user status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.neo4j.users.{username}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ username }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          --argjson suspended {{ suspended | lower }} \
+          --arg home_db "{{ home_database }}" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.neo4j == null then ._state.apps.neo4j = {} else . end |
+          if ._state.apps.neo4j.users == null then ._state.apps.neo4j.users = {} else . end |
+          ._state.apps.neo4j.users[$name] = {
+            "created": $created,
+            "created_timestamp": $timestamp,
+            "suspended": $suspended,
+            "home_database": (if $home_db == "" then null else $home_db end)
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not user_exists
+
+    # ===== STEP 8: Output Result =====
+    - name: Display user creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if user_exists else 'created' }}"
+          username: "{{ username }}"
+          suspended: "{{ suspended }}"
+          home_database: "{{ home_database if home_database | length > 0 else 'default' }}"
+          require_password_change: "{{ require_password_change }}"
+          message: >-
+            User '{{ username }}' {{ 'already exists' if user_exists else 'created successfully' }}.
+            {{ 'Status recorded in BWS _state.' if not user_exists else '' }}

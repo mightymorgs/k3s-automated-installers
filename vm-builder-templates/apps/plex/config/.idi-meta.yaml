@@ -1,0 +1,47 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure Plex network settings for Tailscale Ingress mode. Sets ALLOWED_NETWORKS
+      to include Tailscale CGNAT range (100.64.0.0/10) and pod/service CIDRs so Plex
+      treats tailnet clients as local. Plex requires Plex.tv account auth which cannot
+      be bypassed; this ensures the network layer recognises Tailscale traffic.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ plex_url }}/identity'
+  05-configure-libraries.yml:
+    summary: 'Configure Plex media libraries for TV Shows, Movies, and Music. Uses
+      the Plex HTTP API with X-Plex-Token authentication. Library sections are created
+      via form-encoded POST (Plex API quirk). Idempotent: checks for existing library
+      sections before creating.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ plex_url }}/identity'
+    - '{{ plex_url }}/library/sections'
+    - '{{ plex_url }}/library/sections'
+    - '{{ plex_url }}/library/sections'
+    - '{{ plex_url }}/library/sections'
+    - '{{ plex_url }}/library/sections'
+  06-deploy-exporter.yml:
+    summary: Deploy Plex Media Server exporter sidecar container to the Plex StatefulSet
+      for Prometheus metrics scraping. Uses X-Plex-Token for authentication. Exposes
+      metrics on port 9594 and adds prometheus.io annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+  07-create-external-secret.yml:
+    summary: Create an ExternalSecret CRD in the plex namespace that pulls the Plex
+      API key (X-Plex-Token) from Vault via the ClusterSecretStore vault-backend.
+      Creates a K8s Secret 'plex-secrets' with key 'api-key'.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - external-secrets
+    - vault
+depends_on_apps:
+- external-secrets
+- prometheus
+- vault

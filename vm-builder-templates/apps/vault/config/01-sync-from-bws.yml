@@ -1,0 +1,271 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/02-sync-from-bws"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/config/01-sync-from-bws.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["vault_server_deployed", "vault_unsealed"]
+#   provides: ["vault_secrets_synced", "vault_policies_created"]
+#   tags: ["vault", "secrets", "bws", "sync", "golden-master"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Sync secrets from Bitwarden Secrets Manager (BWS) to HashiCorp Vault KV store
+- name: Sync Secrets from BWS to Vault
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vault_namespace: "vault"
+    vault_api_url: "{{ vault_url }}"
+    vault_kv_path: secret
+    vault_kv_version: '2'
+    bws_vault_root_token_secret: vault/root_token
+    # Secret mapping: BWS path -> Vault path
+    secret_mappings:
+      - bws_secret: homelab/staging/media-stack/nfs_server_ip
+        vault_path: secret/data/homelab/staging/media-stack/nfs_server_ip
+        key: value
+      - bws_secret: homelab/staging/media-stack/nfs_media_path
+        vault_path: secret/data/homelab/staging/media-stack/nfs_media_path
+        key: value
+      - bws_secret: homelab/staging/media-stack/nfs_config_path
+        vault_path: secret/data/homelab/staging/media-stack/nfs_config_path
+        key: value
+  tasks:
+    # ========================================
+    # CHECK IF VAULT IS DEPLOYED
+    # ========================================
+    - name: Check if Vault is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ vault_namespace }} -l app.kubernetes.io/name=vault -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: vault_pod_check
+      changed_when: false
+      failed_when: false  # Don't fail if not found
+
+    - name: Set Vault availability fact
+      ansible.builtin.set_fact:
+        vault_available: "{{ vault_pod_check.rc == 0 and vault_pod_check.stdout | length > 0 }}"
+
+    - name: Skip if Vault not deployed
+      ansible.builtin.debug:
+        msg: "Vault not deployed - skipping BWS sync configuration"
+      when: not vault_available
+
+    - name: End play if Vault not available
+      ansible.builtin.meta: end_play
+      when: not vault_available
+
+    # ========================================
+    # GET POD NAME DYNAMICALLY
+    # ========================================
+    - name: Get Vault pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app.kubernetes.io/name=vault \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app=vault \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ========================================
+    # ENSURE VAULT IS UNSEALED
+    # ========================================
+    - name: Ensure Vault is unsealed
+      ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+
+    # ========================================
+    # BWS SYNC CONFIGURATION
+    # ========================================
+    - name: Verify BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that: ["lookup('env', 'BWS_ACCESS_TOKEN') | length > 0"]
+        fail_msg: BWS_ACCESS_TOKEN environment variable must be set
+    - name: Retrieve Vault root token from BWS
+      ansible.builtin.command:
+        cmd: bws secret get "{{ bws_vault_root_token_secret }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_root_token
+      changed_when: false
+      no_log: true
+    - name: Parse Vault root token
+      ansible.builtin.set_fact:
+        vault_root_token: '{{ (bws_root_token.stdout | from_json).value }}'
+      no_log: true
+    - name: Verify Vault is accessible
+      ansible.builtin.uri:
+        url: '{{ vault_api_url }}/v1/sys/health'
+        method: GET
+        headers:
+          X-Vault-Token: '{{ vault_root_token }}'
+        status_code: 200
+      register: vault_health
+      retries: 3
+      delay: 5
+    - name: Check if KV v2 secrets engine is enabled
+      ansible.builtin.uri:
+        url: '{{ vault_api_url }}/v1/sys/mounts/{{ vault_kv_path }}'
+        method: GET
+        headers:
+          X-Vault-Token: '{{ vault_root_token }}'
+        status_code: [200, 404]
+      register: kv_mount_check
+      changed_when: false
+    - name: Enable KV v2 secrets engine
+      ansible.builtin.uri:
+        url: '{{ vault_api_url }}/v1/sys/mounts/{{ vault_kv_path }}'
+        method: POST
+        headers:
+          X-Vault-Token: '{{ vault_root_token }}'
+          Content-Type: application/json
+        body_format: json
+        body:
+          type: kv
+          options:
+            version: '{{ vault_kv_version }}'
+          description: KV v2 secrets engine for application secrets
+        status_code: [200, 204]
+      when: kv_mount_check.status == 404
+    - name: Fetch all secrets from BWS and write to Vault
+      block:
+        - name: Retrieve secret from BWS
+          ansible.builtin.command:
+            cmd: bws secret get "{{ item.bws_secret }}" --output json
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_secret
+          changed_when: false
+          no_log: true
+          loop: '{{ secret_mappings }}'
+          loop_control:
+            label: '{{ item.bws_secret }}'
+        - name: Write secrets to Vault KV store
+          ansible.builtin.uri:
+            url: '{{ vault_api_url }}/v1/{{ item.item.vault_path }}'
+            method: POST
+            headers:
+              X-Vault-Token: '{{ vault_root_token }}'
+              Content-Type: application/json
+            body_format: json
+            body:
+              data:
+                '{{ item.item.key }}': '{{ (item.stdout | from_json).value }}'
+            status_code: [200, 204]
+          loop: '{{ bws_secret.results }}'
+          loop_control:
+            label: '{{ item.item.vault_path }}'
+          no_log: true
+          register: vault_write_results
+      rescue:
+        - name: Display error message
+          ansible.builtin.debug:
+            msg: Failed to sync secrets from BWS to Vault. Check BWS_ACCESS_TOKEN
+              and Vault connectivity.
+        - name: Fail playbook
+          ansible.builtin.fail:
+            msg: Secret sync failed
+    - name: Create Vault policy for media-stack
+      ansible.builtin.uri:
+        url: '{{ vault_api_url }}/v1/sys/policies/acl/media-stack'
+        method: PUT
+        headers:
+          X-Vault-Token: '{{ vault_root_token }}'
+          Content-Type: application/json
+        body_format: json
+        body:
+          policy: |
+            # Allow read access to media-stack secrets
+            path "secret/data/homelab/*/media-stack/*" {
+              capabilities = ["read", "list"]
+            }
+
+            # Allow list secrets
+            path "secret/metadata/homelab/*/media-stack/*" {
+              capabilities = ["list"]
+            }
+        status_code: [200, 204]
+      register: policy_create
+    - name: Create Vault policy for applications (ESO)
+      ansible.builtin.uri:
+        url: '{{ vault_api_url }}/v1/sys/policies/acl/external-secrets-operator'
+        method: PUT
+        headers:
+          X-Vault-Token: '{{ vault_root_token }}'
+          Content-Type: application/json
+        body_format: json
+        body:
+          policy: |
+            # Allow ESO to read all secrets under homelab
+            path "secret/data/homelab/*" {
+              capabilities = ["read", "list"]
+            }
+
+            # Allow list metadata
+            path "secret/metadata/homelab/*" {
+              capabilities = ["list"]
+            }
+        status_code: [200, 204]
+      register: eso_policy_create
+    - name: Verify secrets written successfully
+      ansible.builtin.uri:
+        url: '{{ vault_api_url }}/v1/{{ item.vault_path }}'
+        method: GET
+        headers:
+          X-Vault-Token: '{{ vault_root_token }}'
+        status_code: 200
+        return_content: true
+      loop: '{{ secret_mappings }}'
+      loop_control:
+        label: '{{ item.vault_path }}'
+      register: vault_verify
+      changed_when: false
+      no_log: true
+    - name: Count successfully synced secrets
+      ansible.builtin.set_fact:
+        synced_count: "{{ vault_verify.results | selectattr('status', 'equalto', 200) | list | length }}"
+        total_count: '{{ secret_mappings | length }}'
+    - name: Display sync summary
+      ansible.builtin.debug:
+        msg:
+          - 'Vault Secrets Sync Summary:'
+          - '  Total secrets: {{ total_count }}'
+          - '  Successfully synced: {{ synced_count }}'
+          - '  Failed: {{ total_count | int - synced_count | int }}'
+          - ''
+          - 'Policies created:'
+          - '  - media-stack (read access to media-stack secrets)'
+          - '  - external-secrets-operator (read access to all homelab secrets)'
+          - ''
+          - 'Verify secrets:'
+          - >-
+            kubectl exec -n {{ vault_namespace }} {{ app_pod.stdout }} --
+            vault kv list {{ vault_kv_path }}/homelab/staging/media-stack
+    - name: List all secrets in Vault (for verification)
+      ansible.builtin.command:
+        cmd: >
+          kubectl exec -n {{ vault_namespace }} {{ app_pod.stdout }} --
+          sh -c "VAULT_TOKEN={{ vault_root_token }}
+          vault kv list -format=json {{ vault_kv_path }}/homelab/staging/media-stack"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: vault_list
+      changed_when: false
+      failed_when: false
+      no_log: true
+    - name: Display secret paths in Vault
+      ansible.builtin.debug:
+        msg: "Secrets in Vault: {{ vault_list.stdout | from_json if vault_list.rc == 0 else 'Unable to list' }}"
+      when: vault_list.rc == 0

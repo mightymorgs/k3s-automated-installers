@@ -1,0 +1,25 @@
+---
+- name: Prepare test namespaces
+  hosts: localhost
+  gather_facts: false
+  environment:
+    KUBECONFIG: /tmp/molecule-kubeconfig
+  tasks:
+    - name: Create common test namespaces
+      ansible.builtin.command: >-
+        kubectl create namespace {{ item }} --dry-run=client -o yaml | kubectl apply -f -
+      loop:
+        - media-stack
+        - vault
+        - observability
+        - external-secrets
+        - ai-tools
+        - cert-manager
+        - ingress
+      register: ns_results
+      changed_when: "'created' in item_result.stdout"
+      loop_control:
+        loop_var: item
+        label: "{{ item }}"
+      vars:
+        item_result: "{{ ns_results }}"

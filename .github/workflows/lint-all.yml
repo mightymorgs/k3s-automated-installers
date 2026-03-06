@@ -1,0 +1,206 @@
+---
+name: Lint All (vm-builder)
+# Manual dispatch only — run locally to save Actions minutes.
+# Scoped to vm-builder/ directory + .github/ workflows.
+on:
+  workflow_dispatch:
+
+jobs:
+  # ── YAML ────────────────────────────────────────────────────────────
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yamllint
+      - name: Lint Ansible playbooks
+        run: |
+          yamllint -d '{extends: default, rules: {
+            line-length: {max: 120},
+            truthy: disable,
+            document-start: disable,
+            comments-indentation: disable}}' \
+            vm-builder/vm-builder-templates/ansible/
+      - name: Lint K8s manifests
+        run: |
+          yamllint -d '{extends: default, rules: {
+            line-length: {max: 120},
+            truthy: disable,
+            document-start: disable,
+            comments-indentation: disable}}' \
+            vm-builder/vm-builder-templates/apps/
+        continue-on-error: true
+
+  # ── Ansible ─────────────────────────────────────────────────────────
+  ansible-lint:
+    name: ansible-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-lint
+      - name: Run ansible-lint
+        run: ansible-lint vm-builder/vm-builder-templates/ansible/
+
+  # ── Jinja2 (j2lint) ────────────────────────────────────────────────
+  j2lint:
+    name: j2lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install j2lint
+      - name: Run j2lint
+        run: j2lint vm-builder/
+
+  # ── Jinja2 (djlint) ────────────────────────────────────────────────
+  djlint:
+    name: djlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install djlint
+      - name: Run djlint on .j2 templates
+        run: >-
+          find vm-builder -name '*.j2' -print0
+          | xargs -0 djlint --profile=jinja --lint
+
+  # ── K8s schema validation ──────────────────────────────────────────
+  kubeconform:
+    name: kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          wget -q https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+          tar xf kubeconform-linux-amd64.tar.gz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Validate K8s manifests
+        run: |
+          find vm-builder/vm-builder-templates/apps -path '*/k8s-base/*.yaml' \
+            -not -name '.idi-meta.yaml' -not -name 'kustomization.yaml' \
+            -not -name 'values.yaml' -print0 \
+          | xargs -0 kubeconform -summary -verbose \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -ignore-missing-schemas \
+              -kubernetes-version 1.28.0
+
+  # ── K8s best practices ─────────────────────────────────────────────
+  kube-linter:
+    name: kube-linter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kube-linter
+        run: |
+          wget -q https://github.com/stackrox/kube-linter/releases/latest/download/kube-linter-linux.tar.gz
+          tar xf kube-linter-linux.tar.gz
+          sudo mv kube-linter /usr/local/bin/
+      - name: Lint K8s manifests
+        run: |
+          find vm-builder/vm-builder-templates/apps -path '*/k8s-base/*.yaml' \
+            -not -name '.idi-meta.yaml' -not -name 'kustomization.yaml' \
+            -not -name 'values.yaml' -print0 \
+          | xargs -0 kube-linter lint
+
+  # ── GitHub Actions syntax ──────────────────────────────────────────
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          sudo mv ./actionlint /usr/local/bin/
+      - name: Run actionlint
+        run: actionlint -color
+
+  # ── GitHub Actions security ────────────────────────────────────────
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install zizmor
+      - name: Run zizmor security analysis
+        run: zizmor .github/workflows/*.yml
+
+  # ── GitHub Actions policy ──────────────────────────────────────────
+  ghalint:
+    name: ghalint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ghalint
+        run: |
+          wget -q https://github.com/suzuki-shunsuke/ghalint/releases/latest/download/ghalint_linux_amd64.tar.gz
+          tar xf ghalint_linux_amd64.tar.gz
+          sudo mv ghalint /usr/local/bin/
+      - name: Run ghalint
+        run: ghalint run
+
+  # ── Shell scripts ──────────────────────────────────────────────────
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        run: |
+          find .github/scripts -name '*.sh' -print0 \
+          | xargs -0 --no-run-if-empty shellcheck
+
+  # ── Summary ────────────────────────────────────────────────────────
+  lint-summary:
+    name: Lint Summary
+    runs-on: ubuntu-latest
+    needs:
+      - yamllint
+      - ansible-lint
+      - j2lint
+      - djlint
+      - kubeconform
+      - kube-linter
+      - actionlint
+      - zizmor
+      - ghalint
+      - shellcheck
+    if: always()
+    steps:
+      - name: Build summary table
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Lint Summary
+
+          | Linter | Scope | Status |
+          |--------|-------|--------|
+          | yamllint | Ansible + K8s YAML | ${{ needs.yamllint.result }} |
+          | ansible-lint | Playbooks | ${{ needs.ansible-lint.result }} |
+          | j2lint | Jinja2 templates | ${{ needs.j2lint.result }} |
+          | djlint | Jinja2 templates | ${{ needs.djlint.result }} |
+          | kubeconform | K8s schema | ${{ needs.kubeconform.result }} |
+          | kube-linter | K8s best practices | ${{ needs.kube-linter.result }} |
+          | actionlint | Workflow syntax | ${{ needs.actionlint.result }} |
+          | zizmor | Workflow security | ${{ needs.zizmor.result }} |
+          | ghalint | Workflow policy | ${{ needs.ghalint.result }} |
+          | shellcheck | Shell scripts | ${{ needs.shellcheck.result }} |
+          EOF
+      - name: Fail if any linter failed
+        if: contains(needs.*.result, 'failure')
+        run: exit 1

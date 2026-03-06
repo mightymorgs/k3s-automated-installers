@@ -1,0 +1,145 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/mcp-servers/02-configure-vault-mcp"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/mcp-servers/config/01-configure-vault-mcp.yml"
+#     category: "platform"
+#     subsystem: "mcp-servers"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["mcp_manifests_applied", "vault_ready"]
+#   requires_apps: ["mcp-servers", "vault"]
+#   provides: ["vault_mcp_configured"]
+#   tags: ["mcp", "vault", "ai-operations", "configuration", "golden-master"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Configure Vault MCP Server with proper credentials
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.apps.installed"
+#         purpose: "Check if vault-mcp and vault are installed"
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for vault-mcp backend"
+#       - path: "_state.apps.vault.root_token"
+#         purpose: "Vault authentication for MCP server"
+#       - path: "_state.apps.vault_mcp.url"
+#         purpose: "Vault MCP Server endpoint"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.vault_mcp.configured"
+#         example: true
+#       - path: "_state.apps.vault_mcp.backend_url"
+#         example: "http://vault.vault.svc.cluster.local:8200"
+#       - path: "_state.apps.vault.connected_from"
+#         example: ["vault_mcp"]
+
+- name: Configure Vault MCP Server
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    mcp_servers_namespace: "mcp-servers"
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    mcp_namespace: "{{ mcp_servers_namespace }}"
+    vault_namespace: "vault"
+    bws_vault_root_token_secret: "vault/root_token"
+
+  tasks:
+    # ========================================
+    # CHECK IF VAULT-MCP IS DEPLOYED
+    # ========================================
+    - name: Check if Vault MCP Server is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ mcp_namespace }} -l app=vault-mcp
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: vault_mcp_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set Vault MCP availability fact
+      ansible.builtin.set_fact:
+        vault_mcp_available: "{{ vault_mcp_check.rc == 0 and vault_mcp_check.stdout | length > 0 }}"
+
+    - name: Skip if Vault MCP Server not deployed
+      ansible.builtin.debug:
+        msg: "Vault MCP Server not deployed - skipping configuration"
+      when: not vault_mcp_available
+
+    - name: End play if Vault MCP Server not available
+      ansible.builtin.meta: end_play
+      when: not vault_mcp_available
+
+    - name: Retrieve Vault root token from BWS
+      ansible.builtin.command:
+        cmd: bws secret get "{{ bws_vault_root_token_secret }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_vault_token
+      changed_when: false
+      no_log: true
+
+    - name: Parse Vault token
+      ansible.builtin.set_fact:
+        vault_token: "{{ (bws_vault_token.stdout | from_json).value }}"
+      no_log: true
+
+    - name: Create MCP Vault credentials secret
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: vault-mcp-credentials
+            namespace: {{ mcp_namespace }}
+          type: Opaque
+          stringData:
+            VAULT_ADDR: "{{ vault_url }}"
+            VAULT_TOKEN: "{{ vault_token }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: vault_creds_result
+      changed_when: "'created' in vault_creds_result.stdout or 'configured' in vault_creds_result.stdout"
+      no_log: true
+
+    - name: Restart Vault MCP Server to pick up credentials
+      ansible.builtin.shell: |
+        kubectl rollout restart deployment/vault-mcp-server -n {{ mcp_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: restart_result
+      changed_when: true
+
+    - name: Wait for Vault MCP Server to be ready
+      ansible.builtin.shell: |
+        kubectl get deployment vault-mcp-server -n {{ mcp_namespace }} -o json
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: vault_mcp
+      retries: 30
+      delay: 10
+      until:
+        - vault_mcp.rc == 0
+        - (vault_mcp.stdout | from_json).status.readyReplicas | default(0) > 0
+      changed_when: false
+
+    - name: Display Vault MCP configuration status
+      ansible.builtin.debug:
+        msg:
+          - "Vault MCP Server configured successfully"
+          - "Namespace: {{ mcp_namespace }}"
+          - "Vault Address: {{ vault_url }}"
+          - "Status: Ready"

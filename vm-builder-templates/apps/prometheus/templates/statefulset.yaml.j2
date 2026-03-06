@@ -1,0 +1,83 @@
+---
+# Prometheus StatefulSet (J2 template)
+# Defaults match k8s-base/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('prometheus') }}
+  namespace: {{ app_namespace | default('observability') }}
+  labels:
+    app: {{ app_name | default('prometheus') }}
+    app.kubernetes.io/name: {{ app_name | default('prometheus') }}
+    app.kubernetes.io/part-of: {{ app_part_of | default('observability') }}
+spec:
+  serviceName: {{ app_name | default('prometheus') }}
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('prometheus') }}
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('prometheus') }}
+        app.kubernetes.io/name: {{ app_name | default('prometheus') }}
+    spec:
+      serviceAccountName: {{ service_account_name | default('prometheus') }}
+      securityContext:
+        fsGroup: {{ fs_group | default(65534) }}
+        runAsUser: {{ run_as_user | default(65534) }}
+        runAsGroup: {{ run_as_group | default(65534) }}
+        runAsNonRoot: {{ run_as_non_root | default(true) }}
+      containers:
+        - name: {{ app_name | default('prometheus') }}
+          image: {{ image | default('prom/prometheus:v2.54.1') }}
+          args:
+            - --config.file={{ config_file | default('/etc/prometheus/prometheus.yml') }}
+            - --storage.tsdb.path={{ tsdb_path | default('/prometheus') }}
+            - --storage.tsdb.retention.time={{ retention_time | default('15d') }}
+            - --web.enable-lifecycle
+            - --web.console.libraries=/etc/prometheus/console_libraries
+            - --web.console.templates=/etc/prometheus/consoles
+          ports:
+            - containerPort: {{ container_port | default(9090) }}
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: {{ config_mount_path | default('/etc/prometheus') }}
+            - name: data
+              mountPath: {{ data_mount_path | default('/prometheus') }}
+          resources:
+            requests:
+              cpu: {{ cpu_request | default('250m') }}
+              memory: {{ memory_request | default('512Mi') }}
+            limits:
+              cpu: {{ cpu_limit | default('1000m') }}
+              memory: {{ memory_limit | default('2Gi') }}
+          readinessProbe:
+            httpGet:
+              path: {{ ready_path | default('/-/ready') }}
+              port: {{ container_port | default(9090) }}
+            initialDelaySeconds: {{ readiness_initial_delay | default(10) }}
+            periodSeconds: {{ readiness_period | default(10) }}
+          livenessProbe:
+            httpGet:
+              path: {{ health_path | default('/-/healthy') }}
+              port: {{ container_port | default(9090) }}
+            initialDelaySeconds: {{ liveness_initial_delay | default(30) }}
+            periodSeconds: {{ liveness_period | default(30) }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ configmap_name | default('prometheus-config') }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: {{ app_name | default('prometheus') }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: {{ storage_class | default('longhorn-single') }}
+        resources:
+          requests:
+            storage: {{ data_storage_size | default('10Gi') }}

@@ -1,0 +1,298 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/operations/oidc-connector-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "teleport.oidc_connectors.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/operations/oidc-connector-create.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "teleport"
+#       supported_versions: ["15.x", "16.x"]
+#       version_range: ">=15.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - teleport: "16.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Teleport API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_teleport_operations"
+#   dependencies: ["teleport_deployed", "teleport_admin_token_available", "teleport_role_created"]
+#   provides: ["teleport_oidc_connector_created"]
+#   tags: ["teleport", "oidc", "sso", "auth-connectors", "authentik", "phase5"]
+#   estimated_duration: 45
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an OIDC SSO connector in Teleport. This enables users to authenticate
+#     via external identity providers like Authentik, Okta, or Google Workspace.
+#     Claims are mapped to Teleport roles for authorization. Idempotent - skips if exists.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.teleport.admin_token"
+#         purpose: "Teleport API admin token for authentication"
+#       - path: "_state.apps.teleport.proxy_url"
+#         purpose: "Teleport proxy URL for API calls"
+#       - path: "_state.apps.authentik.oauth.client_id"
+#         purpose: "OAuth client ID from Authentik (if using Authentik)"
+#       - path: "_state.apps.authentik.oauth.client_secret"
+#         purpose: "OAuth client secret from Authentik (if using Authentik)"
+#
+#     writes:
+#       - path: "_state.apps.teleport.oidc_connectors.{connector_name}.created"
+#         example: true
+#       - path: "_state.apps.teleport.oidc_connectors.{connector_name}.issuer_url"
+#         example: "https://authentik.example.com/application/o/teleport/"
+#       - path: "_state.apps.teleport.oidc_connectors.{connector_name}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+
+- name: Teleport - Create OIDC SSO Connector
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    teleport_base_url: "{{ teleport_proxy_url }}"
+    teleport_api_base: "{{ teleport_base_url }}/v1"
+    endpoint: "/oidc"
+
+    # OIDC connector configuration defaults
+    connector_version: "v3"
+    oidc_scope: "{{ oidc_scope_input | default(['openid', 'email', 'profile', 'groups']) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - connector_name is defined and connector_name | length > 0
+          - issuer_url is defined and issuer_url | length > 0
+          - client_id is defined and client_id | length > 0
+          - client_secret is defined and client_secret | length > 0
+          - redirect_url is defined and redirect_url | length > 0
+        fail_msg: >-
+          Required inputs: connector_name, issuer_url, client_id, client_secret, redirect_url.
+          Optional: claims_to_roles, display_name, oidc_scope, username_claim
+        success_msg: "Required inputs validated: connector_name={{ connector_name }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Teleport Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Teleport admin token
+      ansible.builtin.set_fact:
+        teleport_token: "{{ inventory._state.apps.teleport.admin_token }}"
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        teleport_base_url: "{{ inventory._state.apps.teleport.proxy_url }}"
+        teleport_api_base: "{{ inventory._state.apps.teleport.proxy_url }}/v1"
+      when: inventory._state.apps.teleport.proxy_url is defined
+
+    - name: Validate Teleport token is available
+      ansible.builtin.assert:
+        that:
+          - teleport_token | length > 0
+        fail_msg: "Teleport admin token not found in BWS _state. Ensure Teleport is configured."
+        success_msg: "Teleport admin token retrieved from BWS _state"
+
+    # ===== STEP 4: Check if OIDC Connector Already Exists (Idempotency) =====
+    - name: Check if OIDC connector already exists
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ connector_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_connector
+      failed_when: false
+      no_log: false
+
+    - name: Determine if connector exists
+      ansible.builtin.set_fact:
+        connector_exists: "{{ existing_connector.status == 200 }}"
+
+    - name: Skip creation if connector exists
+      ansible.builtin.debug:
+        msg: "OIDC connector '{{ connector_name }}' already exists - skipping creation"
+      when: connector_exists
+
+    # ===== STEP 5: Build Claims to Roles Mapping =====
+    - name: Set default claims_to_roles if not provided
+      ansible.builtin.set_fact:
+        effective_claims_to_roles: >-
+          {{
+            claims_to_roles | default([
+              {
+                "claim": "groups",
+                "value": "teleport-admins",
+                "roles": ["access", "editor"]
+              },
+              {
+                "claim": "groups",
+                "value": "teleport-users",
+                "roles": ["access"]
+              }
+            ])
+          }}
+      when: not connector_exists
+
+    # ===== STEP 6: Build OIDC Connector Payload =====
+    - name: Build OIDC connector creation payload
+      ansible.builtin.set_fact:
+        connector_payload:
+          kind: "oidc"
+          version: "{{ connector_version }}"
+          metadata:
+            name: "{{ connector_name }}"
+            description: "{{ connector_description | default('OIDC SSO connector created via IDI automation') }}"
+          spec:
+            issuer_url: "{{ issuer_url }}"
+            client_id: "{{ client_id }}"
+            client_secret: "{{ client_secret }}"
+            redirect_url: "{{ redirect_url }}"
+            display: "{{ display_name | default(connector_name | capitalize + ' SSO') }}"
+            scope: "{{ oidc_scope }}"
+            claims_to_roles: "{{ effective_claims_to_roles }}"
+            username_claim: "email"
+            allowed_domains: "{{ allowed_domains | default(omit) }}"
+            acr_values: "{{ acr_values | default(omit) }}"
+            prompt: "{{ oidc_prompt | default(omit) }}"
+            max_age: "{{ max_age | default(omit) }}"
+      when: not connector_exists
+      no_log: true
+
+    # ===== STEP 7: Create OIDC Connector =====
+    - name: Create OIDC connector in Teleport
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ connector_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not connector_exists
+
+    - name: OIDC connector creation completed
+      ansible.builtin.debug:
+        msg: "OIDC connector '{{ connector_name }}' created successfully for issuer: {{ issuer_url }}"
+      when: not connector_exists and create_result is defined
+
+    # ===== STEP 8: Verify OIDC Connector Was Created =====
+    - name: Verify OIDC connector exists after creation
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ connector_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: verify_connector
+      when: not connector_exists
+      no_log: false
+
+    - name: Assert connector verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_connector.status == 200
+        fail_msg: "Failed to verify OIDC connector '{{ connector_name }}' after creation"
+        success_msg: "OIDC connector '{{ connector_name }}' verified successfully"
+      when: not connector_exists
+
+    # ===== STEP 9: Write OIDC Connector Status to BWS._state =====
+    - name: Update BWS inventory with OIDC connector status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.teleport.oidc_connectors.{connector_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ connector_name }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          --arg issuer "{{ issuer_url }}" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.teleport == null then ._state.apps.teleport = {} else . end |
+          if ._state.apps.teleport.oidc_connectors == null then ._state.apps.teleport.oidc_connectors = {} else . end |
+          ._state.apps.teleport.oidc_connectors[$name] = {
+            "created": $created,
+            "issuer_url": $issuer,
+            "created_timestamp": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not connector_exists
+
+    # ===== STEP 10: Output Result =====
+    - name: Display OIDC connector creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if connector_exists else 'created' }}"
+          connector_name: "{{ connector_name }}"
+          issuer_url: "{{ issuer_url }}"
+          redirect_url: "{{ redirect_url }}"
+          message: >-
+            OIDC connector '{{ connector_name }}' {{ 'already exists' if connector_exists else 'created successfully' }}.
+            {{ 'Status recorded in BWS _state.' if not connector_exists else '' }}
+          login_url: "{{ teleport_base_url }}/v1/webapi/oidc/login?connector_id={{ connector_name }}"

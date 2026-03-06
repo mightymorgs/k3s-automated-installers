@@ -1,0 +1,283 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/operations/app-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "teleport.apps.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/operations/app-create.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "teleport"
+#       supported_versions: ["15.x", "16.x"]
+#       version_range: ">=15.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - teleport: "16.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Teleport API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_teleport_operations"
+#   dependencies: ["teleport_deployed", "teleport_admin_token_available"]
+#   provides: ["teleport_app_registered"]
+#   tags: ["teleport", "apps", "application-access", "zero-trust", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Register an application with Teleport for secure access. This enables
+#     zero-trust application access with authentication, authorization, and
+#     audit logging. Applications can be internal web apps, APIs, or cloud consoles.
+#     Idempotent - skips if app already exists.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.teleport.admin_token"
+#         purpose: "Teleport API admin token for authentication"
+#       - path: "_state.apps.teleport.proxy_url"
+#         purpose: "Teleport proxy URL for API calls"
+#
+#     writes:
+#       - path: "_state.apps.teleport.registered_apps.{app_name}.created"
+#         example: true
+#       - path: "_state.apps.teleport.registered_apps.{app_name}.uri"
+#         example: "http://grafana.grafana.svc:3000"
+#       - path: "_state.apps.teleport.registered_apps.{app_name}.public_addr"
+#         example: "grafana.example.com"
+#       - path: "_state.apps.teleport.registered_apps.{app_name}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+
+- name: Teleport - Register Application
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    teleport_base_url: "{{ teleport_proxy_url }}"
+    teleport_api_base: "{{ teleport_base_url }}/v1"
+    endpoint: "/apps"
+
+    # App configuration defaults
+    app_version: "v3"
+    insecure_skip_verify: "{{ insecure_skip_verify_input | default(false) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - app_name is defined and app_name | length > 0
+          - app_uri is defined and app_uri | length > 0
+        fail_msg: >-
+          Required inputs: app_name (string), app_uri (internal URI like http://localhost:3000).
+          Optional: public_addr, app_labels, app_description, insecure_skip_verify
+        success_msg: "Required inputs validated: app_name={{ app_name }}, app_uri={{ app_uri }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Teleport Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Teleport admin token
+      ansible.builtin.set_fact:
+        teleport_token: "{{ inventory._state.apps.teleport.admin_token }}"
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        teleport_base_url: "{{ inventory._state.apps.teleport.proxy_url }}"
+        teleport_api_base: "{{ inventory._state.apps.teleport.proxy_url }}/v1"
+      when: inventory._state.apps.teleport.proxy_url is defined
+
+    - name: Validate Teleport token is available
+      ansible.builtin.assert:
+        that:
+          - teleport_token | length > 0
+        fail_msg: "Teleport admin token not found in BWS _state. Ensure Teleport is configured."
+        success_msg: "Teleport admin token retrieved from BWS _state"
+
+    # ===== STEP 4: Check if App Already Exists (Idempotency) =====
+    - name: Check if app already exists
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ app_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_app
+      failed_when: false
+      no_log: false
+
+    - name: Determine if app exists
+      ansible.builtin.set_fact:
+        app_exists: "{{ existing_app.status == 200 }}"
+
+    - name: Skip creation if app exists
+      ansible.builtin.debug:
+        msg: "Application '{{ app_name }}' already exists - skipping registration"
+      when: app_exists
+
+    # ===== STEP 5: Build App Payload =====
+    - name: Build default app labels
+      ansible.builtin.set_fact:
+        effective_app_labels: >-
+          {{
+            app_labels | default({
+              "env": "production",
+              "managed-by": "idi-automation"
+            })
+          }}
+      when: not app_exists
+
+    - name: Build app creation payload
+      ansible.builtin.set_fact:
+        app_payload:
+          kind: "app"
+          version: "{{ app_version }}"
+          metadata:
+            name: "{{ app_name }}"
+            description: "{{ app_description | default('Registered via IDI automation') }}"
+            labels: "{{ effective_app_labels }}"
+          spec:
+            uri: "{{ app_uri }}"
+            public_addr: "{{ public_addr | default(omit) }}"
+            insecure_skip_verify: "{{ insecure_skip_verify }}"
+            rewrite: "{{ rewrite_config | default(omit) }}"
+            cloud: "{{ cloud_provider | default(omit) }}"
+            dynamic_labels: "{{ dynamic_labels | default(omit) }}"
+      when: not app_exists
+      no_log: false
+
+    # ===== STEP 6: Create App =====
+    - name: Register application in Teleport
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ app_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not app_exists
+
+    - name: Application registration completed
+      ansible.builtin.debug:
+        msg: "Application '{{ app_name }}' registered successfully with URI: {{ app_uri }}"
+      when: not app_exists and create_result is defined
+
+    # ===== STEP 7: Verify App Was Created =====
+    - name: Verify app exists after creation
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ app_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: verify_app
+      when: not app_exists
+      no_log: false
+
+    - name: Assert app verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_app.status == 200
+        fail_msg: "Failed to verify application '{{ app_name }}' after registration"
+        success_msg: "Application '{{ app_name }}' verified successfully"
+      when: not app_exists
+
+    # ===== STEP 8: Write App Status to BWS._state =====
+    - name: Update BWS inventory with app status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.teleport.registered_apps.{app_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ app_name }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          --arg uri "{{ app_uri }}" \
+          --arg public_addr "{{ public_addr | default('') }}" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.teleport == null then ._state.apps.teleport = {} else . end |
+          if ._state.apps.teleport.registered_apps == null then ._state.apps.teleport.registered_apps = {} else . end |
+          ._state.apps.teleport.registered_apps[$name] = {
+            "created": $created,
+            "uri": $uri,
+            "public_addr": (if $public_addr == "" then null else $public_addr end),
+            "created_timestamp": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not app_exists
+
+    # ===== STEP 9: Output Result =====
+    - name: Display app registration result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if app_exists else 'created' }}"
+          app_name: "{{ app_name }}"
+          app_uri: "{{ app_uri }}"
+          public_addr: "not configured"
+          message: >-
+            Application '{{ app_name }}' {{ 'already exists' if app_exists else 'registered successfully' }}.
+            {{ 'Status recorded in BWS _state.' if not app_exists else '' }}
+          access_url: >-
+            {{ teleport_base_url }}/web/launch/{{ app_name }}

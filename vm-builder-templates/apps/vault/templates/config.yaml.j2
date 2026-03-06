@@ -1,0 +1,48 @@
+{#
+  Vault Server ConfigMap (HCL Configuration)
+
+  Variables:
+    - namespace: Kubernetes namespace (default: "vault")
+    - vault_ui_enabled: Enable Vault UI (default: true)
+    - vault_api_port: Vault API port (default: 8200)
+    - vault_cluster_port: Vault cluster port (default: 8201)
+    - vault_storage_backend: Storage backend type (default: "file")
+    - vault_storage_path: File backend path (default: "/vault/data")
+    - vault_tls_disable: Disable TLS on listener (default: 1)
+    - vault_listener_address: Listener bind address (default: "0.0.0.0:8200")
+    - vault_disable_mlock: Disable mlock (default: true)
+
+  Usage:
+    ansible.builtin.template:
+      src: templates/config.yaml.j2
+      dest: /tmp/vault-config.yaml
+#}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: {{ vault_namespace | default('vault') }}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+    app.kubernetes.io/part-of: golden-master
+data:
+  vault.hcl: |
+    ui = {{ vault_ui_enabled | default(true) | lower }}
+
+    listener "tcp" {
+      address = "{{ vault_listener_address | default('0.0.0.0:8200') }}"
+      tls_disable = {{ vault_tls_disable | default(1) }}
+    }
+
+    storage "{{ vault_storage_backend | default('file') }}" {
+      path = "{{ vault_storage_path | default('/vault/data') }}"
+    }
+
+    api_addr = "http://vault.{{ vault_namespace | default('vault') }}.svc.cluster.local:{{
+      vault_api_port | default(8200) }}"
+    cluster_addr = "http://vault.{{ vault_namespace | default('vault') }}.svc.cluster.local:{{
+      vault_cluster_port | default(8201) }}"
+
+    disable_mlock = {{ vault_disable_mlock | default(true) | lower }}

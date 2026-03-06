@@ -1,0 +1,153 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/github/03-push-repo"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/github/03-push-repo.yml"
+#     category: "tools"
+#     subsystem: "github"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "git"
+#       folder_version: null
+#       supported_versions: ["2.25.0+", "2.x"]
+#       version_range: ">=2.25.0"
+#
+#     requires:
+#       git: ">=2.25.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - git: "2.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-13"
+#         notes: "Pushes repo to GitHub using PAT via GIT_ASKPASS, idempotent (push is no-op if up-to-date)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["github_repo_created"]
+#   provides: ["github_repo_pushed"]
+#   tags: ["github", "git", "push"]
+#   estimated_duration: 20
+#   parallel_safe: true
+#   idempotent: true
+#   description: Push current working tree to GitHub repo using PAT; avoids committing secrets via .gitignore
+- name: Push repository to GitHub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    repo_name: "{{ target_repo_name | default('media-stack') }}"
+    secrets_json_path: "{{ project_root | default(playbook_dir + '/../../../../..') }}/secrets/secrets.json"
+  tasks:
+    - name: Resolve GitHub PAT from secrets.json (local fallback)
+      ansible.builtin.set_fact:
+        github_pat: "{{ (lookup('file', secrets_json_path) | from_json).github.token | default('') }}"
+      no_log: true
+    - name: Assert PAT available
+      ansible.builtin.assert:
+        that: [github_pat | length > 0]
+        fail_msg: GitHub PAT not found in secrets.json
+      no_log: true
+    - name: Resolve GitHub username via API
+      ansible.builtin.uri:
+        url: https://api.github.com/user
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: gh_user
+      no_log: true
+    - name: Set GitHub owner fact
+      ansible.builtin.set_fact:
+        github_owner: "{{ (gh_user.json.login | default('')) }}"
+    - name: Initialize git repo if needed
+      ansible.builtin.command: git rev-parse --is-inside-work-tree
+      register: git_check
+      failed_when: false
+      changed_when: false
+    - name: Run git init when not initialized
+      ansible.builtin.command: git init
+      when: git_check.rc != 0
+      changed_when: true
+    - name: Configure git identity
+      ansible.builtin.command: git config user.name "{{ git_user_name | default('automation') }}"
+      changed_when: false
+    - name: Configure git email
+      ansible.builtin.command: >-
+        git config user.email
+        "{{ git_user_email | default('automation@users.noreply.github.com') }}"
+      changed_when: false
+    - name: Set remote origin URL
+      ansible.builtin.command: git remote get-url origin
+      register: remote_check
+      failed_when: false
+      changed_when: false
+    - name: Add origin if missing
+      ansible.builtin.command: >-
+        git remote add origin https://github.com/{{ github_owner }}/{{ repo_name
+        }}.git
+      when: remote_check.rc != 0
+      changed_when: true
+    - name: Update origin URL
+      ansible.builtin.command: >-
+        git remote set-url origin https://github.com/{{ github_owner }}/{{ repo_name
+        }}.git
+      when: remote_check.rc == 0
+      changed_when: true
+    - name: Ensure main branch
+      ansible.builtin.shell: |
+        set -e
+        if ! git rev-parse --abbrev-ref HEAD >/dev/null 2>&1; then
+          git checkout -b main
+        fi
+      args: {executable: /bin/bash}
+      changed_when: true
+    - name: Check for pending changes
+      ansible.builtin.shell: |
+        set -e
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+          echo CHANGES
+        else
+          echo CLEAN
+        fi
+      register: git_dirty
+      changed_when: false
+    - name: Commit changes when present
+      ansible.builtin.shell: |
+        set -e
+        git add -A
+        git commit -m "chore: bootstrap media-stack repo, add standards and CI" || true
+      when: git_dirty.stdout.strip() == 'CHANGES'
+      changed_when: true
+    - name: Create temporary askpass script
+      ansible.builtin.copy:
+        dest: /tmp/git_askpass_media_stack.sh
+        mode: '0700'
+        content: |
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) echo "{{ github_owner }}" ;;
+            *Password*) echo "{{ github_pat }}" ;;
+            *) echo ;;
+          esac
+      no_log: true
+    - name: Push to origin
+      ansible.builtin.shell: |
+        set -e
+        export GIT_ASKPASS=/tmp/git_askpass_media_stack.sh
+        git push -u origin $(git rev-parse --abbrev-ref HEAD)
+      args: {executable: /bin/bash}
+      changed_when: true
+    - name: Cleanup askpass script
+      ansible.builtin.file:
+        path: /tmp/git_askpass_media_stack.sh
+        state: absent

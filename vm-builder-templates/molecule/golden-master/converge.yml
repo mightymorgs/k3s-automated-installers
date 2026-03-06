@@ -1,0 +1,89 @@
+---
+# converge.yml — Golden master molecule validation
+#
+# Discovers all app directories under apps/, validates each against
+# golden master rules, and generates a summary report.
+#
+# Usage:
+#   Full scan:   ansible-playbook molecule/golden-master/converge.yml
+#   Single app:  ansible-playbook molecule/golden-master/converge.yml \
+#                  -e '{"apps_to_check": ["apps/_golden-master"]}'
+#   Multiple:    ansible-playbook molecule/golden-master/converge.yml \
+#                  -e '{"apps_to_check": ["apps/grafana", "apps/vault"]}'
+
+- name: Golden Master Validation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/rules.yml
+
+  vars:
+    # Base path for app directories (relative to playbook dir's grandparent)
+    templates_base: "{{ playbook_dir | dirname | dirname }}"
+    apps_dir: "{{ templates_base }}/apps"
+    # Override to validate specific apps only
+    apps_to_check: []
+
+  tasks:
+
+    # ================================================================
+    # 1. INITIALIZE
+    # ================================================================
+
+    - name: Initialize validation results
+      ansible.builtin.set_fact:
+        validation_results: []
+
+    # ================================================================
+    # 2. DISCOVER APPS
+    # ================================================================
+
+    - name: Discover all app directories
+      ansible.builtin.find:
+        paths: "{{ apps_dir }}"
+        file_type: directory
+        recurse: false
+      register: discovered_apps
+      when: apps_to_check | length == 0
+
+    - name: Build app path list (auto-discovered)
+      ansible.builtin.set_fact:
+        app_paths: >-
+          {{ discovered_apps.files
+             | map(attribute='path')
+             | reject('search', '_golden-master')
+             | sort
+             | list }}
+      when: apps_to_check | length == 0
+
+    - name: Build app path list (explicit)
+      ansible.builtin.set_fact:
+        app_paths: >-
+          {{ apps_to_check
+             | map('regex_replace', '^(?!/)(.*)$', templates_base ~ '/' ~ '\1')
+             | list }}
+      when: apps_to_check | length > 0
+
+    - name: Display apps to validate
+      ansible.builtin.debug:
+        msg: "Validating {{ app_paths | length }} app(s): {{ app_paths | map('basename') | join(', ') }}"
+
+    # ================================================================
+    # 3. VALIDATE EACH APP
+    # ================================================================
+
+    - name: "Validate app"
+      ansible.builtin.include_tasks: tasks/validate-app.yml
+      loop: "{{ app_paths }}"
+      loop_control:
+        loop_var: app_path
+        label: "{{ app_path | basename }}"
+
+    # ================================================================
+    # 4. GENERATE REPORT
+    # ================================================================
+
+    - name: Generate validation report
+      ansible.builtin.include_tasks: tasks/generate-report.yml

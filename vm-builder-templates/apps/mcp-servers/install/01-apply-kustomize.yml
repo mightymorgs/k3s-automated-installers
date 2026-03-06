@@ -1,0 +1,593 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/mcp-servers/01-apply-kustomize"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/mcp-servers/install/01-apply-kustomize.yml"
+#     category: "apps"
+#     subsystem: "mcp-servers"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "mcp-servers"
+#       supported_versions: ["1.0.x"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#       vault: ">=1.15.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - mcp_servers: "1.0.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-04"
+#         notes: "Pending functional test on target infrastructure"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_server_installed", "vault_ready"]
+#   provides: ["mcp_manifests_applied", "mcp_namespace_ready"]
+#   tags: ["mcp", "ai-operations", "automation", "kustomize", "golden-master"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Apply MCP Server Kustomize manifests for AI-augmented operations
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.apps.installed"
+#         purpose: "Check which backend apps are available"
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for vault-mcp-server backend"
+#       - path: "_state.apps.awx.url"
+#         purpose: "AWX endpoint for awx-mcp-server backend"
+#       - path: "_state.apps.teleport.url"
+#         purpose: "Teleport endpoint for teleport-mcp-server backend"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.vault_mcp.status"
+#         example: "ready"
+#       - path: "_state.apps.vault_mcp.url"
+#         example: "http://vault-mcp-server.mcp-tools.svc:8080"
+#       - path: "_state.apps.awx_mcp.status"
+#         example: "ready"
+#       - path: "_state.apps.awx_mcp.url"
+#         example: "http://awx-mcp-server.mcp-tools.svc:8080"
+#       - path: "_state.apps.teleport_mcp.status"
+#         example: "ready"
+#       - path: "_state.apps.teleport_mcp.url"
+#         example: "http://teleport-mcp-server.mcp-tools.svc:8080"
+#       - path: "_state.apps.k8s_rag_mcp.status"
+#         example: "ready"
+#       - path: "_state.apps.k8s_rag_mcp.url"
+#         example: "http://k8s-rag-mcp-server.mcp-tools.svc:8080"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "mcp"
+#     service_name: "mcp-servers"
+#     service_port: 8080
+#     namespace: "ai-ops"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#     bypass_paths:
+#       - "/api"
+#       - "/health"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "MCP Servers"
+#     icon: "cpu"
+#     category: "AI Operations"
+#     description: "Model Context Protocol servers for AI tool integration"
+#     docs_url: "https://modelcontextprotocol.io/"
+#     port: 8080
+#     nodeport: 30880
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     mcp_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace for MCP servers"
+#       type: "string"
+#       default: "mcp-servers"
+#
+#     # ---------- Vault MCP Server ----------
+#     vault_mcp_image:
+#       label: "Vault MCP Image"
+#       description: "Docker image for Vault MCP server"
+#       type: "string"
+#       default: "ghcr.io/mightymorgs/vault-mcp:latest"
+#     vault_mcp_image_pull_policy:
+#       label: "Vault MCP Pull Policy"
+#       description: "Image pull policy for Vault MCP"
+#       type: "choice"
+#       default: "Always"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     vault_mcp_replicas:
+#       label: "Vault MCP Replicas"
+#       description: "Number of Vault MCP replicas"
+#       type: "integer"
+#       default: 1
+#     vault_mcp_port:
+#       label: "Vault MCP Port"
+#       description: "Container port for Vault MCP"
+#       type: "integer"
+#       default: 8080
+#     vault_mcp_service_type:
+#       label: "Vault MCP Service Type"
+#       description: "Kubernetes service type for Vault MCP"
+#       type: "choice"
+#       default: "ClusterIP"
+#       options: ["ClusterIP", "NodePort"]
+#     vault_mcp_nodeport:
+#       label: "Vault MCP NodePort"
+#       description: "External port for Vault MCP"
+#       type: "integer"
+#       default: 30180
+#     vault_mcp_vault_addr:
+#       label: "Vault Address"
+#       description: "Vault server endpoint URL"
+#       type: "string"
+#       default: "http://vault.vault.svc.cluster.local:8200"
+#     vault_mcp_secret_name:
+#       label: "Vault MCP Secret"
+#       description: "Kubernetes Secret for Vault MCP credentials"
+#       type: "string"
+#       default: "vault-mcp-credentials"
+#     vault_mcp_cpu_request:
+#       label: "Vault MCP CPU Request"
+#       description: "Minimum CPU for Vault MCP"
+#       type: "string"
+#       default: "100m"
+#     vault_mcp_memory_request:
+#       label: "Vault MCP Memory Request"
+#       description: "Minimum memory for Vault MCP"
+#       type: "string"
+#       default: "128Mi"
+#     vault_mcp_cpu_limit:
+#       label: "Vault MCP CPU Limit"
+#       description: "Maximum CPU for Vault MCP"
+#       type: "string"
+#       default: "500m"
+#     vault_mcp_memory_limit:
+#       label: "Vault MCP Memory Limit"
+#       description: "Maximum memory for Vault MCP"
+#       type: "string"
+#       default: "256Mi"
+#     vault_mcp_liveness_initial_delay:
+#       label: "Vault MCP Liveness Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "integer"
+#       default: 10
+#     vault_mcp_readiness_initial_delay:
+#       label: "Vault MCP Readiness Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "integer"
+#       default: 5
+#
+#     # ---------- AWX MCP Server ----------
+#     awx_mcp_image:
+#       label: "AWX MCP Image"
+#       description: "Docker image for AWX MCP server"
+#       type: "string"
+#       default: "ghcr.io/mightymorgs/awx-mcp:latest"
+#     awx_mcp_image_pull_policy:
+#       label: "AWX MCP Pull Policy"
+#       description: "Image pull policy for AWX MCP"
+#       type: "choice"
+#       default: "Always"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     awx_mcp_replicas:
+#       label: "AWX MCP Replicas"
+#       description: "Number of AWX MCP replicas"
+#       type: "integer"
+#       default: 1
+#     awx_mcp_port:
+#       label: "AWX MCP Port"
+#       description: "Container port for AWX MCP"
+#       type: "integer"
+#       default: 8080
+#     awx_mcp_service_type:
+#       label: "AWX MCP Service Type"
+#       description: "Kubernetes service type for AWX MCP"
+#       type: "choice"
+#       default: "ClusterIP"
+#       options: ["ClusterIP", "NodePort"]
+#     awx_mcp_nodeport:
+#       label: "AWX MCP NodePort"
+#       description: "External port for AWX MCP"
+#       type: "integer"
+#       default: 30181
+#     awx_mcp_awx_host:
+#       label: "AWX Host"
+#       description: "AWX server endpoint URL"
+#       type: "string"
+#       default: "http://awx-service.awx.svc.cluster.local"
+#     awx_mcp_secret_name:
+#       label: "AWX MCP Secret"
+#       description: "Kubernetes Secret for AWX MCP credentials"
+#       type: "string"
+#       default: "awx-mcp-credentials"
+#     awx_mcp_cpu_request:
+#       label: "AWX MCP CPU Request"
+#       description: "Minimum CPU for AWX MCP"
+#       type: "string"
+#       default: "100m"
+#     awx_mcp_memory_request:
+#       label: "AWX MCP Memory Request"
+#       description: "Minimum memory for AWX MCP"
+#       type: "string"
+#       default: "128Mi"
+#     awx_mcp_cpu_limit:
+#       label: "AWX MCP CPU Limit"
+#       description: "Maximum CPU for AWX MCP"
+#       type: "string"
+#       default: "500m"
+#     awx_mcp_memory_limit:
+#       label: "AWX MCP Memory Limit"
+#       description: "Maximum memory for AWX MCP"
+#       type: "string"
+#       default: "256Mi"
+#     awx_mcp_liveness_initial_delay:
+#       label: "AWX MCP Liveness Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "integer"
+#       default: 10
+#     awx_mcp_readiness_initial_delay:
+#       label: "AWX MCP Readiness Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "integer"
+#       default: 5
+#
+#     # ---------- Teleport MCP Server ----------
+#     teleport_mcp_image:
+#       label: "Teleport MCP Image"
+#       description: "Docker image for Teleport MCP server"
+#       type: "string"
+#       default: "ghcr.io/mightymorgs/teleport-mcp:latest"
+#     teleport_mcp_image_pull_policy:
+#       label: "Teleport MCP Pull Policy"
+#       description: "Image pull policy for Teleport MCP"
+#       type: "choice"
+#       default: "Always"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     teleport_mcp_replicas:
+#       label: "Teleport MCP Replicas"
+#       description: "Number of Teleport MCP replicas"
+#       type: "integer"
+#       default: 1
+#     teleport_mcp_port:
+#       label: "Teleport MCP Port"
+#       description: "Container port for Teleport MCP"
+#       type: "integer"
+#       default: 8080
+#     teleport_mcp_service_type:
+#       label: "Teleport MCP Service Type"
+#       description: "Kubernetes service type for Teleport MCP"
+#       type: "choice"
+#       default: "ClusterIP"
+#       options: ["ClusterIP", "NodePort"]
+#     teleport_mcp_nodeport:
+#       label: "Teleport MCP NodePort"
+#       description: "External port for Teleport MCP"
+#       type: "integer"
+#       default: 30182
+#     teleport_mcp_proxy:
+#       label: "Teleport Proxy"
+#       description: "Teleport proxy address"
+#       type: "string"
+#       default: "teleport.teleport.svc.cluster.local:3080"
+#     teleport_mcp_identity_path:
+#       label: "Teleport Identity Path"
+#       description: "Path to Teleport identity file in container"
+#       type: "string"
+#       default: "/etc/teleport/identity"
+#     teleport_mcp_identity_secret:
+#       label: "Teleport Identity Secret"
+#       description: "Kubernetes Secret containing Teleport identity"
+#       type: "string"
+#       default: "teleport-mcp-identity"
+#     teleport_mcp_cpu_request:
+#       label: "Teleport MCP CPU Request"
+#       description: "Minimum CPU for Teleport MCP"
+#       type: "string"
+#       default: "100m"
+#     teleport_mcp_memory_request:
+#       label: "Teleport MCP Memory Request"
+#       description: "Minimum memory for Teleport MCP"
+#       type: "string"
+#       default: "128Mi"
+#     teleport_mcp_cpu_limit:
+#       label: "Teleport MCP CPU Limit"
+#       description: "Maximum CPU for Teleport MCP"
+#       type: "string"
+#       default: "500m"
+#     teleport_mcp_memory_limit:
+#       label: "Teleport MCP Memory Limit"
+#       description: "Maximum memory for Teleport MCP"
+#       type: "string"
+#       default: "256Mi"
+#     teleport_mcp_liveness_initial_delay:
+#       label: "Teleport MCP Liveness Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "integer"
+#       default: 10
+#     teleport_mcp_readiness_initial_delay:
+#       label: "Teleport MCP Readiness Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "integer"
+#       default: 5
+#
+#     # ---------- K8s RAG MCP Server ----------
+#     k8s_rag_mcp_image:
+#       label: "K8s RAG MCP Image"
+#       description: "Docker image for K8s RAG MCP server"
+#       type: "string"
+#       default: "ghcr.io/mightymorgs/k8s-rag-mcp:latest"
+#     k8s_rag_mcp_image_pull_policy:
+#       label: "K8s RAG MCP Pull Policy"
+#       description: "Image pull policy for K8s RAG MCP"
+#       type: "choice"
+#       default: "Always"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     k8s_rag_mcp_replicas:
+#       label: "K8s RAG MCP Replicas"
+#       description: "Number of K8s RAG MCP replicas"
+#       type: "integer"
+#       default: 1
+#     k8s_rag_mcp_port:
+#       label: "K8s RAG MCP Port"
+#       description: "Container port for K8s RAG MCP"
+#       type: "integer"
+#       default: 8080
+#     k8s_rag_mcp_service_type:
+#       label: "K8s RAG MCP Service Type"
+#       description: "Kubernetes service type for K8s RAG MCP"
+#       type: "choice"
+#       default: "ClusterIP"
+#       options: ["ClusterIP", "NodePort"]
+#     k8s_rag_mcp_nodeport:
+#       label: "K8s RAG MCP NodePort"
+#       description: "External port for K8s RAG MCP"
+#       type: "integer"
+#       default: 30183
+#     k8s_rag_mcp_ollama_url:
+#       label: "Ollama URL"
+#       description: "Ollama server endpoint for embeddings"
+#       type: "string"
+#       default: "http://ollama.ollama.svc.cluster.local:11434"
+#     k8s_rag_mcp_embed_model:
+#       label: "Embedding Model"
+#       description: "Ollama model for text embeddings"
+#       type: "string"
+#       default: "mxbai-embed-large"
+#     k8s_rag_mcp_index_path:
+#       label: "Index Path"
+#       description: "Path to index file inside container"
+#       type: "string"
+#       default: "/data/index.jsonl"
+#     k8s_rag_mcp_pvc_name:
+#       label: "K8s RAG PVC Name"
+#       description: "PersistentVolumeClaim name for K8s RAG index"
+#       type: "string"
+#       default: "k8s-rag-mcp-data"
+#     k8s_rag_mcp_storage_class:
+#       label: "K8s RAG Storage Class"
+#       description: "StorageClass for K8s RAG PVC"
+#       type: "string"
+#       default: "longhorn"
+#     k8s_rag_mcp_storage_size:
+#       label: "K8s RAG Storage"
+#       description: "Persistent volume size for K8s RAG MCP index"
+#       type: "string"
+#       default: "5Gi"
+#     k8s_rag_mcp_cpu_request:
+#       label: "K8s RAG MCP CPU Request"
+#       description: "Minimum CPU for K8s RAG MCP"
+#       type: "string"
+#       default: "200m"
+#     k8s_rag_mcp_memory_request:
+#       label: "K8s RAG MCP Memory Request"
+#       description: "Minimum memory for K8s RAG MCP"
+#       type: "string"
+#       default: "256Mi"
+#     k8s_rag_mcp_cpu_limit:
+#       label: "K8s RAG MCP CPU Limit"
+#       description: "Maximum CPU for K8s RAG MCP"
+#       type: "string"
+#       default: "1000m"
+#     k8s_rag_mcp_memory_limit:
+#       label: "K8s RAG MCP Memory Limit"
+#       description: "Maximum memory for K8s RAG MCP"
+#       type: "string"
+#       default: "512Mi"
+#     k8s_rag_mcp_liveness_initial_delay:
+#       label: "K8s RAG MCP Liveness Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "integer"
+#       default: 30
+#     k8s_rag_mcp_readiness_initial_delay:
+#       label: "K8s RAG MCP Readiness Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "integer"
+#       default: 15
+
+- name: Deploy MCP Servers
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    mcp_namespace: mcp-servers
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: /tmp/mcp-servers-manifests
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+    # List of all J2 templates to render (namespace excluded — handled by "Ensure namespace exists" task)
+    mcp_templates:
+      - vault-mcp-deployment.yaml.j2
+      - vault-mcp-service.yaml.j2
+      - awx-mcp-deployment.yaml.j2
+      - awx-mcp-service.yaml.j2
+      - teleport-mcp-deployment.yaml.j2
+      - teleport-mcp-service.yaml.j2
+      - k8s-rag-mcp-deployment.yaml.j2
+      - k8s-rag-mcp-service.yaml.j2
+    # Deployments to wait on (label selector uses app.kubernetes.io/name)
+    mcp_deployments:
+      - name: vault-mcp
+        label: vault-mcp
+      - name: awx-mcp
+        label: awx-mcp
+      - name: teleport-mcp
+        label: teleport-mcp
+      - name: k8s-rag-mcp
+        label: k8s-rag-mcp
+
+  tasks:
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: nodes_check.rc == 0
+
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render all J2 templates
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/{{ item }}"
+        dest: "{{ render_dir }}/{{ item | replace('.j2', '') }}"
+        mode: '0644'
+      loop: "{{ mcp_templates }}"
+
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ mcp_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Wait for MCP deployments to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ mcp_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name={{ item.label }}
+        --timeout=600s
+      register: pod_wait
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 10
+      until: pod_wait.rc == 0
+      loop: "{{ mcp_deployments }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "MCP Servers Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ mcp_namespace }}"
+          - ""
+          - "MCP Servers Status:"
+          - "  vault-mcp:    {{ 'Ready' if pod_wait.results[0].rc | default(1) == 0 else 'Not ready' }}"
+          - "  awx-mcp:      {{ 'Ready' if pod_wait.results[1].rc | default(1) == 0 else 'Not ready' }}"
+          - "  teleport-mcp: {{ 'Ready' if pod_wait.results[2].rc | default(1) == 0 else 'Not ready' }}"
+          - "  k8s-rag-mcp:  {{ 'Ready' if pod_wait.results[3].rc | default(1) == 0 else 'Not ready' }}"
+          - ""
+          - "Tailscale IP: {{ tailscale_ip.stdout | default('N/A') }}"
+          - "=========================================="
+
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

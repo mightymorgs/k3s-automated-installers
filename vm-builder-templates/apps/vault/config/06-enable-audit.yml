@@ -1,0 +1,136 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/06-enable-audit"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/config/06-enable-audit.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["vault_deployed", "vault_initialized"]
+#   provides: ["vault_audit_enabled"]
+#   tags: ["vault", "audit", "security", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Vault file audit device writing to stdout. Audit logs written
+#     to stdout are collected automatically by Alloy (DaemonSet) from
+#     /var/log/pods, so no persistent volume is required. Uses the Vault
+#     HTTP API with the root token to enable the audit device. Idempotent:
+#     checks if an audit device is already enabled before creating one.
+#   requires_apps: ["vault"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.vault.root_token"
+
+- name: Enable Vault Audit Device (stdout)
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    # vault_url: from BWS _state via Phase 4 extra-vars
+    vault_api_url: "{{ vault_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== ENSURE VAULT IS UNSEALED ==========
+    - name: Ensure Vault is unsealed
+      ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+
+    - name: Validate vault_root_token is set
+      ansible.builtin.fail:
+        msg: "VAULT_TOKEN environment variable is not set. Set it or pass vault_root_token as extra-var."
+      when: vault_root_token | length == 0
+
+    # ========== CHECK IF AUDIT DEVICE ALREADY ENABLED ==========
+    - name: List current audit devices
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/audit"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        status_code: [200]
+        return_content: true
+      register: audit_list
+      failed_when: false
+
+    - name: Set audit_already_enabled fact
+      ansible.builtin.set_fact:
+        audit_already_enabled: >-
+          {{
+            audit_list.status is defined and
+            audit_list.status == 200 and
+            audit_list.json is defined and
+            (audit_list.json | length > 0) and
+            (audit_list.json.keys() | list | length > 0)
+          }}
+
+    - name: Note audit device already enabled
+      ansible.builtin.debug:
+        msg: "Vault audit device already enabled: {{ audit_list.json.keys() | list | default([]) }}"
+      when: audit_already_enabled
+
+    # ========== ENABLE STDOUT AUDIT DEVICE ==========
+    # Using stdout as the audit log path means audit events are written
+    # to the container's stdout stream. Alloy (DaemonSet) collects all
+    # pod logs from /var/log/pods, so audit logs flow automatically
+    # into Loki without requiring a persistent volume mount.
+    - name: Enable file audit device (stdout)
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/audit/stdout"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          type: "file"
+          options:
+            file_path: "stdout"
+        status_code: [200, 204]
+      register: audit_enable
+      when: not audit_already_enabled
+
+    # ========== VERIFY AUDIT DEVICE IS ACTIVE ==========
+    - name: Verify audit device is now listed
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/audit"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        status_code: [200]
+        return_content: true
+      register: audit_verify
+
+    - name: Fail if no audit devices found after enable
+      ansible.builtin.fail:
+        msg: "No audit devices found after enable attempt. Response: {{ audit_verify.json | default({}) }}"
+      when: >-
+        audit_verify.json is not defined or
+        (audit_verify.json.keys() | list | length == 0)
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display audit configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Audit Device Configuration"
+          - "=========================================="
+          - ""
+          - "Status: {{ 'Already enabled' if audit_already_enabled else 'Enabled' }}"
+          - "Audit Device: stdout/"
+          - "Type: file"
+          - "File Path: stdout"
+          - ""
+          - "Active Audit Devices: {{ audit_verify.json.keys() | list }}"
+          - ""
+          - "Audit logs are written to Vault container stdout."
+          - "Alloy DaemonSet collects from /var/log/pods automatically."
+          - "Logs available in Loki with label: namespace=vault, app=vault"
+          - "=========================================="

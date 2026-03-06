@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: awx
+  labels:
+    app.kubernetes.io/name: awx
+    app.kubernetes.io/part-of: awx
+    platform.austerit.com/component: automation

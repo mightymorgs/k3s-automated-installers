@@ -1,0 +1,251 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/verification/02-verify-nfs-mounts"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/verification/02-verify-nfs-mounts.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5+k3s1"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-10"
+#         notes: "Tests NFS PV/PVC status, pod mounts, and read/write access"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "nfs_pv_created", "media_stack_deployed"]
+#   provides: ["nfs_mount_verified"]
+#   tags: ["k3s", "nfs", "verification", "storage"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify NFS mounts are accessible from media-stack pods
+- name: Verify NFS Mount Functionality in K3s Pods
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    media_namespace: media-stack
+    nfs_server_ip: "{{ inventory_json.network.nfs_server | default('192.168.0.103') }}"
+    nfs_export_path: /volume2/NAS
+    test_pods:
+      - name: sonarr-0
+        mounts:
+          - path: /media
+            expected_subpath: media
+          - path: /downloads
+            expected_subpath: downloads
+      - name: radarr-0
+        mounts:
+          - path: /media
+            expected_subpath: media
+          - path: /downloads
+            expected_subpath: downloads
+      - name: qbittorrent-0
+        mounts:
+          - path: /downloads
+            expected_subpath: downloads
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display verification information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Verifying NFS Mount Functionality
+          - ==========================================
+          - 'Namespace: {{ media_namespace }}'
+          - 'NFS Server: {{ nfs_server_ip }}:{{ nfs_export_path }}'
+          - ''
+          - 'Test Strategy:'
+          - '  1. Verify NFS PV/PVC status'
+          - '  2. Check pod mount points'
+          - '  3. Test read/write access'
+          - '  4. Verify NFS server accessibility'
+          - ==========================================
+    - name: Check if namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: '{{ media_namespace }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: ns_check
+      failed_when: false
+    - name: Fail if namespace doesn't exist
+      ansible.builtin.fail:
+        msg: Namespace {{ media_namespace }} not found. Deploy media stack first.
+      when: ns_check.resources | length == 0
+    - name: Get NFS PV status
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolume
+        name: nfs-media-pv
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: nfs_pv
+      failed_when: false
+    - name: Display NFS PV status
+      ansible.builtin.debug:
+        msg:
+          - "NFS PV Status: {{ nfs_pv.resources[0].status.phase if nfs_pv.resources | length > 0 else 'NOT FOUND' }}"
+          - "Capacity: {{ nfs_pv.resources[0].spec.capacity.storage if nfs_pv.resources | length > 0 else 'N/A' }}"
+          - "Server: {{ nfs_pv.resources[0].spec.nfs.server if nfs_pv.resources | length > 0 else 'N/A' }}"
+          - "Path: {{ nfs_pv.resources[0].spec.nfs.path if nfs_pv.resources | length > 0 else 'N/A' }}"
+    - name: Get NFS PVC status
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: nfs-media-pvc
+        namespace: '{{ media_namespace }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: nfs_pvc
+      failed_when: false
+    - name: Display NFS PVC status
+      ansible.builtin.debug:
+        msg:
+          - "NFS PVC Status: {{ nfs_pvc.resources[0].status.phase if nfs_pvc.resources | length > 0 else 'NOT FOUND' }}"
+          - "Bound Volume: {{ nfs_pvc.resources[0].spec.volumeName if nfs_pvc.resources | length > 0 else 'N/A' }}"
+    - name: Verify NFS server is reachable from VM
+      ansible.builtin.command: ping -c 3 {{ nfs_server_ip }}
+      register: nfs_ping
+      changed_when: false
+      failed_when: false
+    - name: Display NFS server reachability
+      ansible.builtin.debug:
+        msg: "NFS Server {{ nfs_server_ip }}: {{ 'REACHABLE' if nfs_ping.rc == 0 else 'UNREACHABLE' }}"
+    - name: Test NFS mount on VM host
+      ansible.builtin.command: showmount -e {{ nfs_server_ip }}
+      register: showmount_result
+      changed_when: false
+      failed_when: false
+    - name: Display NFS exports
+      ansible.builtin.debug:
+        msg: '{{ showmount_result.stdout_lines }}'
+      when: showmount_result.rc == 0
+    - name: Check if /mnt/media exists on VM
+      ansible.builtin.stat:
+        path: /mnt/media
+      register: media_mount
+      become: true
+    - name: Display VM mount status
+      ansible.builtin.debug:
+        msg:
+          - '/mnt/media exists: {{ media_mount.stat.exists }}'
+          - 'Is mount: {{ media_mount.stat.ismount | default(false) }}'
+    - name: List pods in media-stack namespace
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: pods_list
+    - name: Verify pod mounts exist
+      kubernetes.core.k8s_exec:
+        api_version: v1
+        kind: Pod
+        name: '{{ item.name }}'
+        namespace: '{{ media_namespace }}'
+        command: ls -ld {{ item.mounts | map(attribute='path') | join(' ') }}
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: pod_mount_check
+      failed_when: false
+      loop: '{{ test_pods }}'
+      when: pods_list.resources | selectattr('metadata.name', 'equalto', item.name)
+        | list | length > 0
+    - name: Display pod mount verification results
+      ansible.builtin.debug:
+        msg:
+          - 'Pod: {{ item.item.name }}'
+          - "Status: {{ 'MOUNTED' if item.return_code == 0 else 'FAILED' }}"
+          - '{{ item.stdout_lines if item.return_code == 0 else item.stderr }}'
+      loop: '{{ pod_mount_check.results }}'
+      when: item is not skipped
+    - name: Test NFS write access from Sonarr pod
+      kubernetes.core.k8s_exec:
+        api_version: v1
+        kind: Pod
+        name: sonarr-0
+        namespace: '{{ media_namespace }}'
+        command: /bin/sh -c 'echo "NFS write test $(date)" > /media/nfs-test-$(date
+          +%s).txt && echo SUCCESS'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: nfs_write_test
+      failed_when: false
+      when: pods_list.resources | selectattr('metadata.name', 'equalto', 'sonarr-0')
+        | list | length > 0
+    - name: Display write test result
+      ansible.builtin.debug:
+        msg: "NFS Write Test: {{ 'PASSED' if nfs_write_test.return_code == 0 else 'FAILED' }}"
+      when: nfs_write_test is defined
+    - name: Get pod mount details for Sonarr
+      kubernetes.core.k8s_exec:
+        api_version: v1
+        kind: Pod
+        name: sonarr-0
+        namespace: '{{ media_namespace }}'
+        command: df -h
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: sonarr_mounts_raw
+      failed_when: false
+      when: pods_list.resources | selectattr('metadata.name', 'equalto', 'sonarr-0')
+        | list | length > 0
+    - name: Filter mount details
+      ansible.builtin.set_fact:
+        sonarr_mounts:
+          stdout_lines: "{{ sonarr_mounts_raw.stdout_lines | select('search', 'Filesystem|/media|/downloads') | list }}"
+          rc: '{{ sonarr_mounts_raw.return_code }}'
+      when: sonarr_mounts_raw is defined
+    - name: Display mount details
+      ansible.builtin.debug:
+        msg: '{{ sonarr_mounts.stdout_lines }}'
+      when: sonarr_mounts is defined and sonarr_mounts.rc == 0
+    - name: Summary of NFS verification
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - NFS Mount Verification Summary
+          - ==========================================
+          - "NFS PV: {{ 'Available' if nfs_pv.resources | length > 0 else 'NOT FOUND' }}"
+          - >-
+            NFS PVC:
+            {{
+              'Bound'
+              if nfs_pvc.resources | length > 0 and nfs_pvc.resources[0].status.phase
+            == 'Bound'
+              else 'NOT BOUND'
+            }}
+          - "NFS Server Reachable: {{ 'YES' if nfs_ping.rc == 0 else 'NO' }}"
+          - "NFS Exports Visible: {{ 'YES' if showmount_result.rc == 0 else 'NO' }}"
+          - >-
+            Write Test:
+            {{
+              'PASSED'
+              if (nfs_write_test is defined and nfs_write_test.return_code == 0)
+              else 'SKIPPED/FAILED'
+            }}
+          - ''
+          - 'Next Steps:'
+          - '  - If NFS PV/PVC not found: Deploy media stack first'
+          - '  - If server unreachable: Check network/firewall'
+          - '  - If write test failed: Check NFS permissions (UID/GID 1000)'
+          - '  - Verify mounts using kubernetes.core.k8s_exec module'
+          - ==========================================

@@ -1,0 +1,119 @@
+---
+# playbook_metadata:
+#   id: "orchestration/vm-bootstrap-golden-master"
+#   type: "orchestration"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "vm-bootstrap-golden-master.yml"
+#     category: "orchestration"
+#     subsystem: "vm-bootstrap"
+#     version_folder: "n/a"
+#     deployment_method: "ansible"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vm-bootstrap"
+#       folder_version: "n/a"
+#       supported_versions: ["2.5.0"]
+#       last_tested: "2025-11-14"
+#
+#     requires:
+#       bws:
+#         minimum: "1.0.0"
+#       gh:
+#         minimum: "2.0.0"
+#       ansible:
+#         minimum: "2.16.0"
+#       tailscale:
+#         minimum: "1.50.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         tested: ["24.04"]
+#
+#     tested_combinations:
+#       - os: "ubuntu-24.04"
+#         bws: "1.0.0"
+#         gh: "2.82.1"
+#         ansible: "2.19.3"
+#         tailscale: "1.90.6"
+#         result: "success"
+#         test_date: "2025-11-14"
+#         notes: "Complete bootstrap orchestration with Ansible install, Tailscale join, verification, writeback"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20251114_vm_bootstrap_rebuild"
+#   dependencies: ["github_runner_installed", "python3_installed"]
+#   provides: ["vm_golden_master_bootstrap_ready"]
+#   tags: ["vm", "bootstrap", "golden-master", "orchestration", "phase-2.5"]
+#   estimated_duration: 360
+#   parallel_safe: false
+#   can_run_with: []
+#   idempotent: true
+#   description: Bootstrap VM to golden master state (Phase 2.5) - install tools, join Tailscale, verify
+
+# ========================================
+# PHASE 1: Install Bootstrap Tools
+# ========================================
+- name: PHASE 1.1 - Install BWS CLI
+  ansible.builtin.import_playbook: ../atomic/tools/bws/01-install-cli.yml
+  vars:
+    target_hosts: localhost
+
+- name: PHASE 1.2 - Install GitHub CLI
+  ansible.builtin.import_playbook: ../atomic/tools/github/01-install-gh-cli.yml
+  vars:
+    target_hosts: localhost
+
+- name: PHASE 1.3 - Install Ansible
+  ansible.builtin.import_playbook: ../atomic/tools/ansible/01-install-ansible.yml
+  vars:
+    target_hosts: localhost
+
+# ========================================
+# PHASE 2: Configure Networking
+# ========================================
+- name: PHASE 2 - Join Tailscale Network with Auto-Derived Tags
+  ansible.builtin.import_playbook: ../atomic/networking/tailscale/host/01-join-via-oauth.yml
+  vars:
+    target_hosts: localhost
+    ansible_connection: local
+
+# ========================================
+# PHASE 3: Verify Bootstrap Components
+# ========================================
+- name: PHASE 3.1 - Verify Bootstrap Tools
+  ansible.builtin.import_playbook: ../atomic/verification/vm-bootstrap/01-verify-tools.yml
+  vars:
+    target_hosts: localhost
+
+- name: PHASE 3.2 - Verify Network Connectivity
+  ansible.builtin.import_playbook: ../atomic/verification/vm-bootstrap/02-verify-network.yml
+  vars:
+    target_hosts: localhost
+
+# ========================================
+# PHASE 4: Write Back Bootstrap State to BWS
+# ========================================
+- name: PHASE 4 - Write Back Bootstrap State to BWS
+  ansible.builtin.import_playbook: ../atomic/tools/secrets/06-write-back-bootstrap-state.yml
+  vars:
+    inventory_secret_name: "{{ inventory_secret_name | default('inventory/' ~ ansible_hostname) }}"
+
+# ========================================
+# PHASE 5: Cleanup Temporary Files
+# ========================================
+- name: PHASE 5 - Cleanup Temporary Files and Caches
+  ansible.builtin.import_playbook: ../atomic/platform/ubuntu/common/cleanup/01-remove-temp-files.yml
+  vars:
+    target_hosts: localhost
+
+# ========================================
+# PHASE 6: Display Golden Master Bootstrap Summary
+# ========================================
+- name: PHASE 6 - Display Golden Master Bootstrap Summary
+  ansible.builtin.import_playbook: ../atomic/verification/vmbootstrap/03-display-summary.yml
+  vars:
+    target_hosts: localhost
+    ansible_connection: local

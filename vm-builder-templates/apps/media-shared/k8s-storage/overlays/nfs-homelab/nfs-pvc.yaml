@@ -1,0 +1,21 @@
+---
+# NFS Persistent Volume Claim for Homelab NAS
+# Binds to the NFS PV for shared media storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-shared-pvc
+  namespace: media-stack
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+    storage-type: nfs
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: media-shared-nfs-pv
+  resources:
+    requests:
+      storage: 1Ti

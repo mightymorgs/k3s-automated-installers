@@ -1,0 +1,321 @@
+---
+# playbook_metadata:
+#   id: "atomic/networking/tailscale/host/01-join-via-oauth"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/networking/tailscale/host/01-join-via-oauth.yml"
+#     category: "networking"
+#     subsystem: "tailscale"
+#     role: "host"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "tailscale"
+#       folder_version: null
+#       supported_versions: ["1.x"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#       bws: ">=0.5.0"
+#
+#     tested_combinations:
+#       - tailscale: "1.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-12"
+#         notes: >-
+#           Verified via workflow usage in phase0/phase2/serverless-deploy,
+#           idempotent checks working, OAuth ephemeral keys with dynamic tags functional
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: []
+#   provides: ["tailscale_host_joined"]
+#   tags: ["tailscale", "oauth", "join", "host", "networking"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Install Tailscale and join target host to tailnet using OAuth-generated ephemeral
+#     key with dynamic tags.
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "inventory/shared/secrets/tailscale/oauthclientid"
+#         purpose: "OAuth client ID for Tailscale API authentication"
+#       - path: "inventory/shared/secrets/tailscale/oauthclientsecret"
+#         purpose: "OAuth client secret for Tailscale API authentication"
+#       - path: "inventory/shared/secrets/tailscale/tailnet"
+#         purpose: "Tailnet name for device registration"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.tailscale.device_id"
+#         example: "12345678901234567890"
+#       - path: "_state.tailscale.device_hostname"
+#         example: "homelab-k3s-master-prod-platform-libvirt-latest"
+#       - path: "_state.tailscale.tailscale_ip"
+#         example: "100.64.0.1"
+#       - path: "_state.tailscale.tailscale_ipv6"
+#         example: "fd7a:115c:a1e0::1"
+#       - path: "_state.tailscale.tags"
+#         example: ["tag:homelab", "tag:prod", "tag:service-ssh", "tag:k8s-master"]
+#       - path: "_state.tailscale.join_timestamp"
+#         example: "2026-01-23T16:45:00Z"
+#       - path: "_state.tailscale.status"
+#         example: "running"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   # NOTE: Tailscale provides network connectivity, not HTTP ingress for apps
+#   ingress:
+#     enabled: false
+#     reason: "Network layer connectivity, not HTTP ingress"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: false
+#     reason: "Host-level networking, no user-facing UI"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Tailscale"
+#     icon: "network-wired"
+#     category: "Networking"
+#     description: "Zero-config VPN for secure private networking"
+#     docs_url: "https://tailscale.com/kb/"
+
+- name: Join host to Tailscale via OAuth ephemeral key
+  hosts: "{{ target_hosts | default('vm_hosts') }}"
+  gather_facts: true
+  become: true
+  vars:
+    # Bitwarden keys for OAuth + tailnet
+    bws_oauth_client_id_key: >-
+      {{ tailscale_oauth_id_key | default('inventory/shared/secrets/tailscale/oauthclientid') }}
+    bws_oauth_client_secret_key: >-
+      {{ tailscale_oauth_secret_key | default('inventory/shared/secrets/tailscale/oauthclientsecret') }}
+    bws_tailnet_key: "{{ tailscale_tailnet_key | default('inventory/shared/secrets/tailscale/tailnet') }}"
+    bws_access_token: "{{ lookup('env','BWS_ACCESS_TOKEN') }}"
+    ts_api_url: https://api.tailscale.com/api/v2
+  pre_tasks:
+    - name: Check if already logged into Tailscale
+      ansible.builtin.command: tailscale status --json
+      register: ts_status
+      changed_when: false
+      failed_when: false
+    - name: Skip join when already logged in (unless force_rejoin)
+      ansible.builtin.meta: end_play
+      when: >-
+        (ts_status.rc == 0
+         and (ts_status.stdout | length) > 0
+         and (ts_status.stdout | from_json).BackendState | default('') == 'Running')
+        and not (force_rejoin | default(false) | bool)
+    - name: Logout existing Tailscale session when forcing rejoin
+      ansible.builtin.command: tailscale logout
+      when: force_rejoin | default(false) | bool
+      changed_when: true
+      failed_when: false
+  tasks:
+    - name: Install Tailscale (Debian/Ubuntu)
+      ansible.builtin.shell: |
+        set -eo pipefail
+        curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: ansible_os_family | lower == 'debian'
+    - name: Install Tailscale (RHEL family)
+      ansible.builtin.shell: |
+        set -eo pipefail
+        curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: ansible_os_family | lower == 'redhat'
+    - name: List BWS secrets to get IDs
+      ansible.builtin.command: bws secret list --output json
+      register: bws_secret_list
+      environment: {BWS_ACCESS_TOKEN: '{{ bws_access_token }}'}
+      changed_when: false
+      no_log: true
+    - name: Extract secret IDs from list
+      ansible.builtin.set_fact:
+        bws_oauth_id_uuid: >-
+          {{ (bws_secret_list.stdout | from_json)
+             | selectattr('key', 'equalto', bws_oauth_client_id_key)
+             | map(attribute='id') | first | default('') }}
+        bws_oauth_secret_uuid: >-
+          {{ (bws_secret_list.stdout | from_json)
+             | selectattr('key', 'equalto', bws_oauth_client_secret_key)
+             | map(attribute='id') | first | default('') }}
+        bws_tailnet_uuid: >-
+          {{ (bws_secret_list.stdout | from_json)
+             | selectattr('key', 'equalto', bws_tailnet_key)
+             | map(attribute='id') | first | default('') }}
+    - name: Fetch OAuth client id from BW
+      ansible.builtin.command: bws secret get {{ bws_oauth_id_uuid }} --output json
+      register: bws_oauth_id
+      environment: {BWS_ACCESS_TOKEN: '{{ bws_access_token }}'}
+      changed_when: false
+      no_log: true
+    - name: Fetch OAuth client secret from BW
+      ansible.builtin.command: bws secret get {{ bws_oauth_secret_uuid }} --output json
+      register: bws_oauth_secret
+      environment: {BWS_ACCESS_TOKEN: '{{ bws_access_token }}'}
+      changed_when: false
+      no_log: true
+    - name: Fetch tailnet key from BW
+      ansible.builtin.command: bws secret get {{ bws_tailnet_uuid }} --output json
+      register: bws_tailnet
+      environment: {BWS_ACCESS_TOKEN: '{{ bws_access_token }}'}
+      changed_when: false
+      no_log: true
+    - name: Set OAuth facts
+      ansible.builtin.set_fact:
+        ts_oauth_id: '{{ (bws_oauth_id.stdout | from_json).value }}'
+        ts_oauth_secret: '{{ (bws_oauth_secret.stdout | from_json).value }}'
+        ts_tailnet: '{{ (bws_tailnet.stdout | from_json).value }}'
+      no_log: true
+    # ==================== TAG DERIVATION FROM 7-COMPONENT NAME ====================
+    # VM naming convention: {client}-{vmtype}-{subtype}-{state}-{purpose}-{platform}-{version}
+    # Example: homelab-k3s-master-prod-mediastack-libvirt-latest
+    # Tags derived: tag:{client}, tag:{state}, tag:service-ssh, plus role-based tags
+    # See: .claude/skills/naming-vms/SKILL.md for full documentation
+
+    - name: Parse VM hostname into components
+      ansible.builtin.set_fact:
+        vm_name_parts: "{{ ansible_hostname.split('-') }}"
+      when: (tailscale_join_tags | default([])) | length == 0
+
+    - name: Validate 7-component naming convention
+      ansible.builtin.fail:
+        msg: |
+          VM hostname '{{ ansible_hostname }}' does not follow 7-component naming convention.
+          Expected format: {client}-{vmtype}-{subtype}-{state}-{purpose}-{platform}-{version}
+          Example: homelab-k3s-master-prod-mediastack-libvirt-latest
+          Got {{ vm_name_parts | length }} components instead of 7.
+          See: .claude/skills/naming-vms/SKILL.md
+      when:
+        - (tailscale_join_tags | default([])) | length == 0
+        - vm_name_parts | length != 7
+
+    - name: Derive base tags from VM name (client + state + service-ssh)
+      ansible.builtin.set_fact:
+        # All VMs get: tag:{client}, tag:{state}, tag:service-ssh
+        # NOTE: Platform (vm_name_parts[5]) and purpose (vm_name_parts[4]) are NOT tags
+        # They are metadata stored in BWS inventory, not ACL dimensions
+        derived_tags:
+          - "tag:{{ vm_name_parts[0] }}"
+          - "tag:{{ vm_name_parts[3] }}"
+          - "tag:service-ssh"
+      when:
+        - (tailscale_join_tags | default([])) | length == 0
+        - vm_name_parts | length == 7
+
+    - name: Add role-specific tags for k3s-master
+      ansible.builtin.set_fact:
+        derived_tags: "{{ derived_tags + ['tag:k8s-master', 'tag:service-cluster'] }}"
+      when:
+        - (tailscale_join_tags | default([])) | length == 0
+        - vm_name_parts | length == 7
+        - vm_name_parts[1] == 'k3s'
+        - vm_name_parts[2] == 'master'
+
+    - name: Add role-specific tags for k3s-worker
+      ansible.builtin.set_fact:
+        derived_tags: "{{ derived_tags + ['tag:k8s-worker', 'tag:service-cluster'] }}"
+      when:
+        - (tailscale_join_tags | default([])) | length == 0
+        - vm_name_parts | length == 7
+        - vm_name_parts[1] == 'k3s'
+        - vm_name_parts[2] == 'worker'
+
+    - name: Compose tags for this host
+      ansible.builtin.set_fact:
+        ts_tags: >-
+          {{ ((tailscale_join_tags | default([])) | length > 0)
+             | ternary(tailscale_join_tags, derived_tags) }}
+    - name: Request OAuth access token
+      ansible.builtin.uri:
+        url: '{{ ts_api_url }}/oauth/token'
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          scope: all
+        user: '{{ ts_oauth_id }}'
+        password: '{{ ts_oauth_secret }}'
+        force_basic_auth: true
+        status_code: 200
+      register: oauth_response
+      no_log: true
+    - name: List devices in tailnet to find duplicates
+      ansible.builtin.uri:
+        url: '{{ ts_api_url }}/tailnet/-/devices'
+        method: GET
+        headers:
+          Authorization: Bearer {{ oauth_response.json.access_token }}
+        status_code: 200
+      register: devices_list
+    - name: Find devices matching this hostname
+      ansible.builtin.set_fact:
+        matching_devices: >-
+          {{ devices_list.json.devices
+             | selectattr('hostname', 'equalto', ansible_hostname)
+             | map(attribute='id') | list }}
+    - name: Delete old devices with same hostname
+      ansible.builtin.uri:
+        url: '{{ ts_api_url }}/device/{{ item }}'
+        method: DELETE
+        headers:
+          Authorization: Bearer {{ oauth_response.json.access_token }}
+        status_code: [200, 404]
+      loop: '{{ matching_devices }}'
+      when: matching_devices | length > 0
+    - name: Create ephemeral auth key
+      ansible.builtin.uri:
+        url: '{{ ts_api_url }}/tailnet/{{ ts_tailnet }}/keys'
+        method: POST
+        headers:
+          Authorization: Bearer {{ oauth_response.json.access_token }}
+          Content-Type: application/json
+        body:
+          capabilities:
+            devices:
+              create:
+                reusable: false
+                ephemeral: true
+                preauthorized: true
+                tags: '{{ ts_tags }}'
+        body_format: json
+        status_code: 200
+      register: auth_key
+      no_log: true
+    - name: Bring up Tailscale with auth key
+      ansible.builtin.command: >-
+        tailscale up --authkey {{ auth_key.json.key }} --ssh=true
+      register: ts_up
+      changed_when: "'Logged in' in (ts_up.stderr | default('')) or ts_up.rc ==\
+        \ 0"
+    - name: Show tailscale status
+      ansible.builtin.command: tailscale status --json
+      register: ts_now
+      changed_when: false
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - 'Tailscale joined: {{ (ts_now.stdout | from_json).Self.HostName | default(inventory_hostname) }}'
+          - 'VM Name: {{ ansible_hostname }}'
+          - 'Tags Applied: {{ ts_tags }}'
+          - >-
+            Tag Derivation: {{ "Auto-derived from VM name"
+            if (tailscale_join_tags | default([])) | length == 0
+            else "User-provided" }}

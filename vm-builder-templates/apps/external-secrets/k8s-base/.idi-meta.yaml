@@ -1,0 +1,31 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  clustersecretstore.yaml:
+    summary: 'K8s ClusterSecretStore: clustersecretstore.yaml'
+    source: inferred
+    confidence: medium
+  eso-deployment.yaml:
+    summary: 'K8s Deployment: eso-deployment.yaml'
+    source: inferred
+    confidence: medium
+  eso-rbac.yaml:
+    summary: 'K8s ServiceAccount: eso-rbac.yaml'
+    source: inferred
+    confidence: medium
+  eso-webhook.yaml:
+    summary: 'K8s Service: eso-webhook.yaml'
+    source: inferred
+    confidence: medium
+  examples/example-externalsecret.yaml:
+    summary: 'K8s ExternalSecret: example-externalsecret.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium

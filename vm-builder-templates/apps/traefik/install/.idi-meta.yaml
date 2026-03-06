@@ -1,0 +1,28 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Traefik v3 ingress controller via J2 templates. Replaces K3s bundled
+      Traefik with standalone kustomize-based install. Includes CRDs, RBAC, middlewares,
+      TLS options, and dashboard. Accessible via NodePort 30080 (HTTP) / 30443 (HTTPS).
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ crds_url }}'
+    uses_files:
+    - '{{ templates_dir }}/serviceaccount.yaml.j2'
+    - '{{ templates_dir }}/rbac.yaml.j2'
+    - '{{ templates_dir }}/deployment.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+    - '{{ templates_dir }}/middlewares.yaml.j2'
+    - '{{ templates_dir }}/tlsoptions.yaml.j2'
+    - '{{ templates_dir }}/servertransports.yaml.j2'
+    - '{{ templates_dir }}/dashboard-ingressroute.yaml.j2'
+    references_services:
+    - crds
+  02-verify.yml:
+    summary: Verify Traefik deployment and configuration is healthy
+    source: inferred
+    confidence: medium
+depends_on_apps:
+- crds

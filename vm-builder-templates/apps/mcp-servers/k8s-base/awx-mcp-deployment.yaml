@@ -1,0 +1,61 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: awx-mcp
+  namespace: mcp-servers
+  labels:
+    app.kubernetes.io/name: awx-mcp
+    app.kubernetes.io/component: ai-operations
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: awx-mcp
+      app.kubernetes.io/component: ai-operations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: awx-mcp
+        app.kubernetes.io/component: ai-operations
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      containers:
+        - name: awx-mcp
+          image: ghcr.io/mightymorgs/awx-mcp:v1.0.0
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+          env:
+            - name: AWX_HOST
+              value: "http://awx-service.awx.svc.cluster.local"
+            - name: AWX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: awx-mcp-credentials
+                  key: token
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10

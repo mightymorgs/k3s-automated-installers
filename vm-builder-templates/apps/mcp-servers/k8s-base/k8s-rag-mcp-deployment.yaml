@@ -1,0 +1,83 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-rag-mcp
+  namespace: mcp-servers
+  labels:
+    app.kubernetes.io/name: k8s-rag-mcp
+    app.kubernetes.io/component: ai-operations
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8s-rag-mcp
+      app.kubernetes.io/component: ai-operations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8s-rag-mcp
+        app.kubernetes.io/component: ai-operations
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      containers:
+        - name: k8s-rag-mcp
+          image: ghcr.io/mightymorgs/k8s-rag-mcp:v1.0.0
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+          env:
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama.ollama.svc.cluster.local:11434"
+            - name: EMBED_MODEL
+              value: "mxbai-embed-large"
+            - name: INDEX_PATH
+              value: "/data/index.jsonl"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: k8s-rag-mcp-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k8s-rag-mcp-data
+  namespace: mcp-servers
+  labels:
+    app.kubernetes.io/name: k8s-rag-mcp
+    app.kubernetes.io/component: ai-operations
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

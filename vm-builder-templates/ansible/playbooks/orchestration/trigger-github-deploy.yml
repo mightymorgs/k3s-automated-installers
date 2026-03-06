@@ -1,0 +1,51 @@
+---
+# playbook_metadata:
+#   id: "orchestration/trigger-github-deploy"
+#   type: "orchestration"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "orchestration/trigger-github-deploy.yml"
+#     category: "orchestration"
+#     subsystem: "github"
+#     deployment_method: "ansible"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "github-cli"
+#       folder_version: null
+#       supported_versions: ["2.x"]
+#       version_range: ">=2.0.0"
+#
+#     requires:
+#       gh: ">=2.0.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - gh: "2.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-13"
+#         notes: "Dispatches GitHub Actions workflow and waits for completion"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: []
+#   provides: ["github_deploy_run_triggered"]
+#   tags: ["github", "deploy", "actions", "orchestration"]
+#   estimated_duration: 900
+#   parallel_safe: false
+#   idempotent: true
+#   description: Dispatch the GitHub Actions deploy workflow and wait for completion
+- name: PHASE 1 - Dispatch deploy workflow
+  ansible.builtin.import_playbook: ../atomic/tools/github/04-dispatch-workflow.yml
+  vars:
+    target_repo_name: "{{ target_repo_name | default('media-stack') }}"
+    target_ref: "{{ target_ref | default('main') }}"
+- name: PHASE 2 - Wait for completion
+  ansible.builtin.import_playbook: ../atomic/tools/github/05-wait-workflow-complete.yml
+  vars:
+    target_repo_name: "{{ target_repo_name | default('media-stack') }}"
+    target_run_id: "{{ hostvars['localhost'].dispatched_run_id | default('') }}"

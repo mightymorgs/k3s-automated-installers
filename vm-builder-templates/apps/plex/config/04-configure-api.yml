@@ -1,0 +1,210 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/plex/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/plex/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "plex"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["plex_deployed"]
+#   provides: ["plex_api_configured"]
+#   tags: ["plex", "api", "configuration", "zero-touch"]
+#   estimated_duration: 90
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Plex network settings for Tailscale Ingress mode.
+#     Sets ALLOWED_NETWORKS to include Tailscale CGNAT range (100.64.0.0/10)
+#     and pod/service CIDRs so Plex treats tailnet clients as local.
+#     Plex requires Plex.tv account auth which cannot be bypassed;
+#     this ensures the network layer recognises Tailscale traffic.
+#   requires_apps: ["plex"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.plex.configured"
+#         example: true
+#       - path: "_state.apps.plex.api_key"
+#         example: "xxxxxxxxxxxxxxxxxxxx"
+
+- name: Configure Plex network settings for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    plex_namespace: "plex"
+    app_namespace: "{{ plex_namespace }}"
+    # plex_url: from BWS _state via Phase 4 extra-vars
+    # k3s_pod_cidr, k3s_service_cidr: from BWS _state.k3s via Phase 4 extra-vars
+    # Pod CIDR, Service CIDR, and Tailscale CGNAT range
+    allowed_networks: "{{ k3s_pod_cidr | default('10.42.0.0/16') }},{{ k3s_service_cidr | default('10.43.0.0/16') }},100.64.0.0/10"
+
+  tasks:
+    # ========== CHECK IF PLEX IS DEPLOYED ==========
+    - name: Check if Plex pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=plex --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: plex_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Plex not deployed
+      ansible.builtin.debug:
+        msg: "Plex not deployed - skipping API configuration"
+      when: plex_pod_check.rc != 0 or plex_pod_check.stdout | length == 0
+
+    - name: End play if Plex not available
+      ansible.builtin.meta: end_play
+      when: plex_pod_check.rc != 0 or plex_pod_check.stdout | length == 0
+
+    # ========== SET ALLOWED_NETWORKS ENV VAR ==========
+    # Plex uses Plex.tv account-based auth which cannot be fully bypassed.
+    # Instead, configure ALLOWED_NETWORKS so Plex recognises Tailscale
+    # clients as "local" — disabling the sign-in requirement for LAN access.
+    - name: Set ALLOWED_NETWORKS to include Tailscale and cluster CIDRs
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env statefulset/plex -n {{ app_namespace }}
+          ALLOWED_NETWORKS={{ allowed_networks }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: env_patch_result
+      changed_when: "'updated' in env_patch_result.stdout"
+
+    # ========== ENSURE PLEX_CLAIM PERSISTS ==========
+    # PLEX_CLAIM is set at install time to link the server to a Plex.tv
+    # account. The kubectl set env above preserves existing env vars, so
+    # PLEX_CLAIM remains intact. Verify it is still present.
+    - name: Verify PLEX_CLAIM env var is still set
+      ansible.builtin.shell: >-
+        kubectl get statefulset/plex -n {{ app_namespace }}
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PLEX_CLAIM")].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: plex_claim_check
+      changed_when: false
+      failed_when: false
+
+    - name: Warn if PLEX_CLAIM is not set
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: PLEX_CLAIM env var is not set on the statefulset.
+          The server may not be linked to a Plex.tv account.
+          Set it manually if needed: kubectl set env statefulset/plex -n plex PLEX_CLAIM=<claim-token>
+      when: plex_claim_check.stdout != "PLEX_CLAIM"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Plex rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/plex -n {{ app_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== EXTRACT PLEX AUTH TOKEN ==========
+    # Plex stores its authentication token in Preferences.xml after the
+    # server is claimed (linked to a Plex.tv account via PLEX_CLAIM).
+    # Downstream playbooks need this as plex_api_key (BWS _state.apps.plex.api_key).
+    - name: Get Plex pod name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ app_namespace }} -l app=plex
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: plex_pod_raw
+      changed_when: false
+
+    - name: Set plex_pod fact
+      ansible.builtin.set_fact:
+        plex_pod: "{{ plex_pod_raw.stdout }}"
+
+    - name: Extract Plex authentication token from Preferences.xml
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ plex_pod }} -- \
+          cat "/config/Library/Application Support/Plex Media Server/Preferences.xml" | \
+          grep -oP 'PlexOnlineToken="\K[^"]+' || \
+          grep -oP 'OldestPreviousVersion=.*PlexOnlineToken="\K[^"]+'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: plex_token_raw
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Set plex_api_key from extracted token
+      ansible.builtin.set_fact:
+        plex_api_key: "{{ plex_token_raw.stdout | trim }}"
+      no_log: true
+      when: plex_token_raw.rc == 0 and plex_token_raw.stdout | trim | length > 0
+
+    - name: Write plex_api_key to BWS inventory
+      ansible.builtin.shell: |
+        set -eu
+        INVENTORY_KEY="{{ inventory_secret_name }}"
+        SECRET_ID=$(bws secret list --output json | jq -r --arg k "$INVENTORY_KEY" '.[] | select(.key==$k) | .id')
+        if [ -z "$SECRET_ID" ]; then
+          echo "ERROR: BWS secret '$INVENTORY_KEY' not found" >&2
+          exit 1
+        fi
+        CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+        UPDATED=$(echo "$CURRENT" | jq --arg key "{{ plex_api_key }}" '._state.apps.plex.api_key = $key')
+        bws secret edit --value "$UPDATED" "$SECRET_ID"
+        echo "Written plex_api_key to BWS"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      no_log: true
+      register: bws_write
+      changed_when: "'Written' in bws_write.stdout"
+      when: plex_api_key is defined and plex_api_key | length > 0
+
+    - name: Warn if Plex token not found
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: No Plex authentication token found in Preferences.xml.
+          Plex may not be claimed yet. Run: kubectl set env statefulset/plex -n {{ app_namespace }} PLEX_CLAIM=<claim-token>
+          Then restart the pod. Downstream playbooks (05-configure-libraries, 06-deploy-exporter, wire-plex) will skip.
+      when: plex_api_key is not defined or plex_api_key | length == 0
+
+    # ========== VERIFY PLEX IS ACCESSIBLE ==========
+    # The /identity endpoint returns XML and does not require authentication.
+    - name: Verify Plex health via /identity endpoint
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/identity"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Plex not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Plex not accessible after rollout (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Plex Network Configuration Complete"
+          - "=========================================="
+          - "ALLOWED_NETWORKS: {{ allowed_networks }}"
+          - "PLEX_CLAIM: {{ 'present' if plex_claim_check.stdout == 'PLEX_CLAIM' else 'NOT SET' }}"
+          - "Plex Token: {{ (plex_api_key[:8] + '...') if plex_api_key is defined and plex_api_key | length > 0 else 'NOT FOUND — server may not be claimed' }}"
+          - "BWS writeback: {{ 'Success' if bws_write.changed | default(false) else 'Skipped (no token)' }}"
+          - "Auth layer: Plex.tv account (cannot be bypassed)"
+          - "Network trust: Tailscale CGNAT + pod/service CIDRs"
+          - "Health Check: {{ plex_url }}/identity ({{ health_check.status }})"
+          - "=========================================="

@@ -1,0 +1,294 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/_golden-master/02-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/_golden-master/config/02-configure-api.yml"
+#     category: "apps"
+#     subsystem: "_golden-master"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["golden_master_deployed"]
+#   provides: ["golden_master_api_configured"]
+#   tags: ["golden-master", "api", "configuration", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Canonical Phase 4 config playbook. Demonstrates two patterns:
+#     (A) Single-app API configuration with dynamic pod discovery.
+#     (B) Cross-app wiring that connects two apps via their APIs.
+#     All variables come from BWS extra-vars — no kubectl/curl discovery.
+#   requires_apps: ["golden-master"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   # Phase 4 playbooks are PURE CONSUMERS of BWS state.
+#   # The variable pipeline:
+#   #   1. Phase 3 install writes credentials/URLs to BWS _state.apps.{app}
+#   #   2. Phase 4 workflow reads BWS, flattens _state.apps.{app}.{field}
+#   #      into {app}_{field} extra-vars in /tmp/bws-app-state.json
+#   #   3. This playbook receives vars via -e @/tmp/bws-app-state.json
+#   #   4. Results are written back to BWS _state after completion
+#   #
+#   # If a variable is missing, the fix belongs in Phase 3 (write-back),
+#   # NOT in this playbook (no kubectl exec / curl discovery here).
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.golden_master.api_key"
+#       - path: "_state.apps.golden_master.url"
+#       - path: "_state.apps.other_app.api_key"
+#         description: "For cross-app wiring example"
+#       - path: "_state.apps.other_app.url"
+#         description: "For cross-app wiring example"
+#     writes:
+#       - path: "_state.apps.golden_master.configured"
+#         example: true
+
+# ==============================================================================
+# GOLDEN MASTER: Canonical Phase 4 Config Playbook
+# ==============================================================================
+#
+# This playbook demonstrates the canonical patterns for Phase 4 configuration:
+#
+# 1. DYNAMIC POD DISCOVERY — kubectl get pods with label selector and
+#    --field-selector=status.phase=Running. NEVER hardcode pod names like
+#    "app-0" or use hardcoded pod name patterns.
+#
+# 2. BWS EXTRA-VARS ONLY — all credentials, URLs, API keys, and connection
+#    strings come from Phase 4 extra-vars (flattened BWS _state). No kubectl
+#    exec to extract values, no curl to discover endpoints.
+#
+# 3. app_namespace VARIABLE — always use {{ app_namespace }}, NEVER
+#    {{ app_name }}_namespace (e.g., never sonarr_namespace, grafana_namespace).
+#
+# 4. NO KUBECONFIG BLOCKS — do not set KUBECONFIG in environment: blocks.
+#    The default kubeconfig (/etc/rancher/k3s/k3s.yaml) is already configured
+#    on the runner.
+#
+# 5. IDEMPOTENT API CALLS — check existing state before creating, accept
+#    409 (already exists) as success, use retries on connectivity checks.
+#
+# 6. CROSS-APP WIRING — when connecting App A to App B, both apps' credentials
+#    come from BWS extra-vars. Skip gracefully if the other app is not installed.
+# ==============================================================================
+
+- name: Configure golden-master via API
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: "golden-master"
+    app_namespace: "golden-master"
+    # All vars below come from BWS _state via Phase 4 extra-vars:
+    #   golden_master_api_key  — from _state.apps.golden_master.api_key
+    #   golden_master_url      — from _state.apps.golden_master.url
+    #   other_app_api_key      — from _state.apps.other_app.api_key (cross-app wiring)
+    #   other_app_url          — from _state.apps.other_app.url (cross-app wiring)
+
+  tasks:
+    # ========== 1. VALIDATE REQUIRED BWS VARS ==========
+    # Phase 4 playbooks fail fast if BWS extra-vars are missing.
+    # The fix for missing vars is ALWAYS in Phase 3 (write-back), not here.
+
+    - name: Fail if API key not provided by Phase 4 extra-vars
+      ansible.builtin.fail:
+        msg: >-
+          golden_master_api_key not provided by Phase 4 extra-vars.
+          Phase 3 install may not have written _state.apps.golden_master.api_key to BWS.
+          Fix: ensure Phase 3 extracts and writes the API key back to BWS.
+      when: golden_master_api_key is not defined or golden_master_api_key | length == 0
+
+    - name: Fail if app URL not provided by Phase 4 extra-vars
+      ansible.builtin.fail:
+        msg: >-
+          golden_master_url not provided by Phase 4 extra-vars.
+          Phase 3 install may not have written _state.apps.golden_master.url to BWS.
+          Fix: ensure Phase 3 writes the NodePort/ClusterIP URL to BWS.
+      when: golden_master_url is not defined or golden_master_url | length == 0
+
+    # ========== 2. CHECK IF APP IS DEPLOYED ==========
+
+    - name: Check if app pod is running
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pods -n {{ app_namespace }}
+          -l app.kubernetes.io/name={{ app_name }}
+          --field-selector=status.phase=Running
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if app not deployed
+      ansible.builtin.debug:
+        msg: "{{ app_name }} not deployed — skipping API configuration"
+      when: app_pod_check.rc != 0 or app_pod_check.stdout | length == 0
+
+    - name: End play if app not available
+      ansible.builtin.meta: end_play
+      when: app_pod_check.rc != 0 or app_pod_check.stdout | length == 0
+
+    # ========== 3. DYNAMIC POD DISCOVERY ==========
+    # NEVER hardcode pod names. NEVER use hardcoded pod name defaults.
+    # Use label selector + field-selector for Running pods.
+
+    - name: Get running pod name via label selector
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pods -n {{ app_namespace }}
+          -l app.kubernetes.io/name={{ app_name }}
+          --field-selector=status.phase=Running
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 4. VERIFY API CONNECTIVITY ==========
+    # Use the URL from BWS extra-vars. Retries handle transient failures.
+
+    - name: Verify app API is accessible
+      ansible.builtin.uri:
+        url: "{{ golden_master_url }}/api/v1/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ golden_master_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+      no_log: true
+
+    - name: Fail if API not accessible after retries
+      ansible.builtin.fail:
+        msg: >-
+          {{ app_name }} API not accessible at {{ golden_master_url }}
+          after retries (last status: {{ api_status.status | default('no response') }}).
+          Check that Phase 3 deployed the app and wrote the correct URL to BWS.
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== 5. EXAMPLE: SINGLE-APP API CONFIGURATION ==========
+    # Pattern A: Configure the app's own settings via its API.
+    # Check existing state before modifying (idempotent).
+
+    - name: Get existing configuration
+      ansible.builtin.uri:
+        url: "{{ golden_master_url }}/api/v1/config/settings"
+        method: GET
+        headers:
+          X-Api-Key: "{{ golden_master_api_key }}"
+        status_code: [200]
+      register: current_config
+
+    - name: Apply configuration changes
+      ansible.builtin.uri:
+        url: "{{ golden_master_url }}/api/v1/config/settings"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ golden_master_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: >-
+          {{ current_config.json | combine({
+            'settingA': 'value_from_bws',
+            'settingB': true
+          }) }}
+        status_code: [200, 202]
+      register: config_update
+      changed_when: config_update.status == 200
+      when: >-
+        current_config.json.settingA != 'value_from_bws' or
+        not current_config.json.settingB | default(false)
+
+    # ========== 6. EXAMPLE: kubectl exec FOR IN-POD COMMANDS ==========
+    # When you need to run commands inside the pod, use the dynamically
+    # discovered pod name (app_pod.stdout), never a hardcoded name.
+
+    - name: Ensure data directory exists in pod
+      ansible.builtin.command:
+        cmd: >-
+          kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} --
+          mkdir -p /data/config
+      changed_when: false
+
+    # ========== 7. EXAMPLE: CROSS-APP WIRING ==========
+    # Pattern B: Connect this app to another app.
+    # Both apps' credentials come from BWS extra-vars.
+    # Skip gracefully if the other app is not installed.
+
+    - name: Skip wiring if other_app is not installed
+      when: other_app_api_key is not defined
+      block:
+        - name: "other_app not installed — skipping cross-app wiring"
+          ansible.builtin.debug:
+            msg: >-
+              other_app is not installed on this VM
+              (no other_app_api_key in BWS state) — skipping wiring
+        - name: Set wiring skipped flag
+          ansible.builtin.set_fact:
+            wiring_skipped: true
+
+    - name: Wire other_app into golden-master
+      when: other_app_api_key is defined and not (wiring_skipped | default(false))
+      block:
+        - name: Validate other_app credentials
+          ansible.builtin.fail:
+            msg: "other_app_api_key is empty — cannot wire"
+          when: other_app_api_key | length == 0
+
+        - name: Get existing integrations
+          ansible.builtin.uri:
+            url: "{{ golden_master_url }}/api/v1/integrations"
+            method: GET
+            headers:
+              X-Api-Key: "{{ golden_master_api_key }}"
+            status_code: [200]
+          register: existing_integrations
+
+        - name: Check if other_app integration already exists
+          ansible.builtin.set_fact:
+            other_app_exists: >-
+              {{ (existing_integrations.json
+                  | selectattr('name', 'equalto', 'OtherApp')
+                  | list | length) > 0 }}
+
+        - name: Add other_app integration
+          ansible.builtin.uri:
+            url: "{{ golden_master_url }}/api/v1/integrations"
+            method: POST
+            headers:
+              X-Api-Key: "{{ golden_master_api_key }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              name: "OtherApp"
+              type: "external"
+              baseUrl: "{{ other_app_url }}"
+              apiKey: "{{ other_app_api_key }}"
+            status_code: [200, 201]
+          register: add_integration
+          changed_when: add_integration.status in [200, 201]
+          no_log: true
+          when: not other_app_exists
+
+        - name: Other app already wired
+          ansible.builtin.debug:
+            msg: "OtherApp integration already exists — skipping"
+          when: other_app_exists
+
+    # ========== 8. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name }} API Configuration Complete"
+          - "=========================================="
+          - "Config: {{ 'Updated' if config_update is changed | default(false) else 'No changes needed' }}"
+          - "Wiring: {{ 'Skipped (other_app not installed)' if wiring_skipped | default(false) else 'Complete' }}"
+          - "=========================================="

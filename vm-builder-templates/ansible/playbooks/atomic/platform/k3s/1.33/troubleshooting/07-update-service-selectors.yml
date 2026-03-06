@@ -1,0 +1,93 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/troubleshooting/07-update-service-selectors"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/troubleshooting/07-update-service-selectors.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "troubleshooting"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.33.x"]
+#       version_range: ">=1.33.0"
+#
+#     requires:
+#       k3s: ">=1.33.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "Fixes Service selectors to match StatefulSet pod labels after migration"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "media_stack_deployed"]
+#   provides: ["service_selectors_updated"]
+#   tags: ["troubleshooting", "kubernetes", "service", "statefulset", "media-stack"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Apply updated Service manifests with corrected selectors to match StatefulSet pod labels
+
+# NOTE: This playbook uses kubectl commands which violates CODING_STANDARDS.md
+# TODO: Refactor to use kubernetes.core.k8s module instead of kubectl shell commands
+- name: Update Service Selectors for StatefulSets
+  hosts: k3s_masters
+  gather_facts: false
+  vars:
+    project_root: /home/morgs/GitRepo/media-stack
+    k8s_namespace: media-stack
+  tasks:
+    - name: Apply updated Service manifests
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ project_root }}/k8s/media-stack/base/{{ item }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      loop:
+        - service-radarr.yaml
+        - service-qbittorrent.yaml
+        - service-overseerr.yaml
+        - service-tautulli.yaml
+      register: service_result
+    - name: Display Service apply results
+      ansible.builtin.debug:
+        msg: Service {{ item.item }} updated
+      loop: '{{ service_result.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+    - name: Wait for endpoints to populate
+      ansible.builtin.pause:
+        seconds: 5
+    - name: Verify endpoints are populated
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Endpoints
+        name: '{{ item }}'
+        namespace: '{{ k8s_namespace }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      loop: [radarr, qbittorrent, overseerr, tautulli]
+      register: endpoints_result
+    - name: Display endpoint status
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item }}:
+          {{ item.resources[0].subsets[0].addresses | length
+          if (item.resources | length > 0 and item.resources[0].subsets is defined
+          and
+          item.resources[0].subsets | length > 0) else 0 }}
+          endpoint(s)
+      loop: '{{ endpoints_result.results }}'
+      loop_control:
+        label: '{{ item.item }}'

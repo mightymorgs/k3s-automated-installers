@@ -1,0 +1,17 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-auth.yml:
+    summary: Configure qBittorrent WebUI auth bypass for pod/service networks
+    source: inferred
+    confidence: medium
+  05-deploy-exporter.yml:
+    summary: Deploy qbittorrent-exporter sidecar container to qBittorrent StatefulSet
+      for Prometheus metrics scraping. Uses the martabal/qbittorrent-exporter image
+      on port 8090 and adds prometheus.io annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- prometheus

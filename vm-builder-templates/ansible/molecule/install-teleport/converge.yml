@@ -1,0 +1,20 @@
+---
+- name: "Create Kind cluster"
+  ansible.builtin.import_playbook: ../shared/create-kind.yml
+
+- name: "Prepare namespaces"
+  ansible.builtin.import_playbook: ../shared/prepare-namespaces.yml
+
+- name: "Ensure teleport namespace"
+  hosts: localhost
+  gather_facts: false
+  environment:
+    KUBECONFIG: /tmp/molecule-kubeconfig
+  tasks:
+    - name: Create teleport namespace
+      ansible.builtin.shell: >-
+        kubectl create namespace teleport --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+- name: "Deploy teleport"
+  ansible.builtin.import_playbook: ../../../apps/teleport/install/01-apply-kustomize.yml

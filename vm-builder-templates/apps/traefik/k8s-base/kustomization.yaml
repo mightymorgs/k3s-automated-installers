@@ -1,0 +1,23 @@
+---
+# Traefik Kustomize Base
+# Customizes K3s bundled Traefik with enterprise patterns
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kube-system
+
+resources:
+  - dashboard-ingressroute.yaml
+  - middlewares.yaml
+  - tlsoptions.yaml
+  - servertransports.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+      platform/component: ingress
+    includeSelectors: false
+
+commonAnnotations:
+  platform.enterprise-k8s/tier: platform
+  platform.enterprise-k8s/component: traefik

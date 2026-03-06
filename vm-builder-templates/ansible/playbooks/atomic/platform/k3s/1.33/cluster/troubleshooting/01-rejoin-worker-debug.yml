@@ -1,0 +1,128 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/cluster/troubleshooting/01-rejoin-worker-debug"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/cluster/troubleshooting/01-rejoin-worker-debug.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "cluster"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         kernel: "6.8.0-85"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Troubleshooting playbook for worker rejoin issues"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_token"]
+#   provides: ["worker_debug_rejoin"]
+#   tags: ["k3s", "debug", "worker"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Debug worker join issues and attempt rejoin
+- name: Get K3s token from master
+  hosts: k3s_masters
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Read K3s join token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_raw
+    - name: Parse token
+      ansible.builtin.set_fact:
+        k3s_join_token: '{{ k3s_token_raw.content | b64decode | trim }}'
+    - name: Share token with localhost
+      ansible.builtin.set_fact:
+        k3s_master_url: https://{{ ansible_default_ipv4.address }}:6443
+        k3s_master_token: '{{ k3s_join_token }}'
+      delegate_to: localhost
+      delegate_facts: true
+- name: Debug and rejoin worker
+  hosts: k3s_workers
+  gather_facts: true
+  become: true
+  vars:
+    k3s_master_url: "{{ hostvars['localhost']['k3s_master_url'] }}"
+    k3s_master_token: "{{ hostvars['localhost']['k3s_master_token'] }}"
+  tasks:
+    - name: Test connectivity to master API
+      ansible.builtin.uri:
+        url: '{{ k3s_master_url }}'
+        validate_certs: false
+        status_code: [200, 401, 403]
+        timeout: 10
+      register: api_test
+      ignore_errors: true
+    - name: Display connectivity result
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - 'Master API connectivity test:'
+          - 'URL: {{ k3s_master_url }}'
+          - "Result: {{ 'SUCCESS' if api_test.status is defined else 'FAILED' }}"
+          - "Status: {{ api_test.status | default('N/A') }}"
+          - "Error: {{ api_test.msg | default('None') }}"
+          - ==========================================
+    - name: Download K3s install script
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+    - name: Install K3s as agent with verbose output
+      ansible.builtin.command: /tmp/k3s-install.sh
+      environment:
+        K3S_URL: '{{ k3s_master_url }}'
+        K3S_TOKEN: '{{ k3s_master_token }}'
+        INSTALL_K3S_CHANNEL: stable
+      register: k3s_install_output
+      changed_when: true
+      failed_when: false
+    - name: Display install output
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - 'K3s Install Output:'
+          - ==========================================
+          - '{{ k3s_install_output.stdout_lines }}'
+          - ==========================================
+          - 'Errors (if any):'
+          - '{{ k3s_install_output.stderr_lines | default([]) }}'
+          - ==========================================
+          - 'Return code: {{ k3s_install_output.rc }}'
+          - ==========================================
+    - name: Check K3s agent service status
+      ansible.builtin.systemd:
+        name: k3s-agent
+      register: agent_status
+      ignore_errors: true
+    - name: Display service status
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - 'K3s Agent Service Status:'
+          - "Active: {{ agent_status.status.ActiveState | default('unknown') }}"
+          - "Loaded: {{ agent_status.status.LoadState | default('unknown') }}"
+          - ==========================================

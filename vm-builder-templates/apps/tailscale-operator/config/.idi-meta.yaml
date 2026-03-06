@@ -1,0 +1,17 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-create-certs.yml:
+    summary: Create Tailscale certificates for apps with ingress.tailscale.cert configuration.
+      Reads registry.json to find apps requiring certificates, generates certs via
+      tailscale cert command, stores in K8s Secrets, and writes metadata to BWS._state.
+    source: inferred
+    confidence: medium
+  create_single_cert.yml:
+    summary: 'Playbook: create_single_cert.yml'
+    source: inferred
+    confidence: medium
+  create_single_cert.yml.j2:
+    summary: 'Jinja2 template: create_single_cert.yml.j2'
+    source: inferred
+    confidence: medium

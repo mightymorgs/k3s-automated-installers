@@ -1,0 +1,115 @@
+---
+# Molecule validation: config playbooks
+#
+# Rules checked:
+#   - no-hardcoded-pod-names (CRITICAL): No default('app-0') patterns
+#   - consistent-config-namespace-var (WARNING): Uses app_namespace not {app}_namespace
+
+# ============================================================
+# DISCOVER CONFIG PLAYBOOKS
+# ============================================================
+
+- name: "Find config playbooks for {{ app_path | basename }}"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/config"
+    patterns: "*.yml"
+    file_type: file
+  register: config_playbooks
+
+- name: "Skip — no config playbooks for {{ app_path | basename }}"
+  ansible.builtin.debug:
+    msg: "No config playbooks found — skipping config validation"
+  when: config_playbooks.files | length == 0
+
+- name: "Validate config playbooks for {{ app_path | basename }}"
+  when: config_playbooks.files | length > 0
+  block:
+
+    - name: "Read config playbooks for {{ app_path | basename }}"
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      register: config_contents
+      loop: "{{ config_playbooks.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    # ================================================================
+    # RULE: no-hardcoded-pod-names (CRITICAL)
+    #
+    # Config playbooks must use dynamic pod lookup via kubectl get pods
+    # with label selectors, never hardcoded pod names like app-0.
+    # StatefulSet pod names change with scaling and are not guaranteed.
+    # ================================================================
+
+    - name: "CRITICAL [no-hardcoded-pod-names] {{ app_path | basename }}"
+      ansible.builtin.assert:
+        that:
+          - "'default(''' ~ app_path | basename ~ '-0' ~ ''')' not in (item.content | b64decode)"
+          - "\"default('\" ~ app_path | basename ~ \"-0')\" not in (item.content | b64decode)"
+          - item.content | b64decode is not regex("default\\('[a-z]+-0'\\)")
+        fail_msg: >-
+          {{ item.source | basename }} uses hardcoded pod name pattern default('...-0').
+          Use dynamic pod discovery via kubectl get pods with label selectors instead.
+        success_msg: "PASS: {{ item.source | basename }}"
+      loop: "{{ config_contents.results }}"
+      loop_control:
+        label: "{{ item.source | basename }}"
+      register: rule_no_hardcoded_pod_names
+      failed_when: false
+
+    - name: "Record no-hardcoded-pod-names results"
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+            'app': app_path | basename,
+            'rule': 'no-hardcoded-pod-names',
+            'category': 'config',
+            'severity': 'critical',
+            'files_checked': config_contents.results | length,
+            'failures': rule_no_hardcoded_pod_names.results
+              | selectattr('evaluated_to', 'defined')
+              | selectattr('evaluated_to', 'equalto', false)
+              | list | length,
+            'passed': (rule_no_hardcoded_pod_names.results
+              | selectattr('evaluated_to', 'defined')
+              | selectattr('evaluated_to', 'equalto', false)
+              | list | length) == 0
+          }] }}
+
+    # ================================================================
+    # RULE: consistent-config-namespace-var (WARNING)
+    #
+    # Config playbooks must use app_namespace, not app-specific
+    # namespace variables. Phase 4 extra-vars use app_namespace.
+    # ================================================================
+
+    - name: "WARNING [consistent-config-namespace-var] {{ app_path | basename }}"
+      ansible.builtin.assert:
+        that:
+          - "'app_namespace' in (item.content | b64decode)"
+        fail_msg: >-
+          {{ item.source | basename }} does not use app_namespace variable.
+          Phase 4 extra-vars inject app_namespace for all apps uniformly.
+        success_msg: "PASS: {{ item.source | basename }}"
+      loop: "{{ config_contents.results }}"
+      loop_control:
+        label: "{{ item.source | basename }}"
+      register: rule_config_namespace_var
+      failed_when: false
+
+    - name: "Record consistent-config-namespace-var results"
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+            'app': app_path | basename,
+            'rule': 'consistent-config-namespace-var',
+            'category': 'config',
+            'severity': 'warning',
+            'files_checked': config_contents.results | length,
+            'failures': rule_config_namespace_var.results
+              | selectattr('failed', 'equalto', true)
+              | list | length,
+            'passed': rule_config_namespace_var.results
+              | selectattr('failed', 'equalto', false)
+              | list | length == rule_config_namespace_var.results | length
+          }] }}

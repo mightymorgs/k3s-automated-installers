@@ -1,0 +1,20 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Sonarr TV show PVR to K3s cluster via J2 templates. Requires shared
+      media storage. Accessible via NodePort 30989.
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ templates_dir }}/statefulset.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+  02-verify.yml:
+    summary: Verify Sonarr deployment is healthy
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from: []
+      writes_to:
+      - app: sonarr
+        field: verified

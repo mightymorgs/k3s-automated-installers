@@ -1,0 +1,388 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/neo4j/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/neo4j/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "neo4j"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "neo4j"
+#       supported_versions: ["5.24.x", "5.25.x", "5.26.x"]
+#       version_range: ">=5.24.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#       longhorn: ">=1.5.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - neo4j: "5.26.1"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-04"
+#         notes: "Graph database with APOC + vector search"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260224_neo4j_refactor"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["neo4j_deployed"]
+#   tags: ["neo4j", "graph-database", "graphrag", "vector-search"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Neo4j graph database to K3s cluster via J2 templates.
+#     Provides graph storage with APOC and vector search for GraphRAG.
+#     Accessible via NodePort 30474.
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   credentials:
+#     secret_name: "neo4j-auth"
+#     fields:
+#       NEO4J_AUTH:
+#         bws_field: "admin_password"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.vault.url"
+#         purpose: "Vault endpoint for credential management"
+#     writes:
+#       - path: "_state.apps.neo4j.status"
+#         example: "ready"
+#       - path: "_state.apps.neo4j.url"
+#         example: "http://neo4j.neo4j.svc:7474"
+#       - path: "_state.apps.neo4j.bolt_url"
+#         example: "bolt://neo4j.neo4j.svc:7687"
+#       - path: "_state.apps.neo4j.password"
+#         example: "extracted-from-env-secret"
+#       - path: "_state.apps.neo4j.nodeport"
+#         example: 30474
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "neo4j"
+#     service_name: "neo4j"
+#     service_port: 7474
+#     namespace: "neo4j"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#     bypass_paths:
+#       - "/db/neo4j/tx/commit"
+#       - "/browser/ping"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Neo4j"
+#     icon: "database"
+#     category: "Data"
+#     description: "Graph database with vector search for GraphRAG"
+#     docs_url: "https://neo4j.com/docs/"
+#     port: 7474
+#     nodeport: 30474
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for Neo4j"
+#       type: "string"
+#       default: "neo4j:5.26.1-community"
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of Neo4j replicas"
+#       type: "integer"
+#       default: 1
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "string"
+#       default: "ClusterIP"
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "500m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "1Gi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "2000m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "4Gi"
+#     data_storage_size:
+#       label: "Data Storage"
+#       description: "Persistent volume size for graph data"
+#       type: "string"
+#       default: "10Gi"
+#     logs_storage_size:
+#       label: "Logs Storage"
+#       description: "Persistent volume size for logs"
+#       type: "string"
+#       default: "2Gi"
+#     heap_initial_size:
+#       label: "Heap Initial Size"
+#       description: "JVM initial heap size"
+#       type: "string"
+#       default: "512m"
+#     heap_max_size:
+#       label: "Heap Max Size"
+#       description: "JVM maximum heap size"
+#       type: "string"
+#       default: "2G"
+#     pagecache_size:
+#       label: "Page Cache Size"
+#       description: "Neo4j page cache size"
+#       type: "string"
+#       default: "1G"
+#     neo4j_plugins:
+#       label: "Plugins"
+#       description: "Neo4j plugins to install (JSON array)"
+#       type: "string"
+#       default: '["apoc"]'
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "string"
+#       default: "30474"
+
+- name: Deploy Neo4j
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: neo4j
+    app_namespace: "neo4j"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/neo4j-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    container_port: 7474
+    bolt_port: 7687
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+  tasks:
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: nodes_check.rc == 0
+
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check if neo4j auth secret already exists
+      ansible.builtin.command: >-
+        kubectl get secret {{ secret_name | default('neo4j-auth') }}
+        -n {{ app_namespace }} -o jsonpath='{.data.NEO4J_AUTH}'
+      register: existing_secret
+      changed_when: false
+      failed_when: false
+
+    # Use _resolved_ prefix to avoid Ansible extra-var precedence collision.
+    # Extra-vars (priority 22) always override set_fact (priority 19), so if BWS
+    # passes neo4j_password="" as extra-var, set_fact can never override it.
+    - name: Decode existing neo4j password
+      ansible.builtin.set_fact:
+        _resolved_neo4j_password: "{{ (existing_secret.stdout | b64decode).split('/')[1] }}"
+        existing_secret_found: true
+      when:
+        - existing_secret.rc == 0
+        - existing_secret.stdout | default('') | length > 0
+        - (existing_secret.stdout | b64decode).split('/') | length > 1
+        - (existing_secret.stdout | b64decode).split('/')[1] | length > 0
+
+    - name: Generate neo4j password if not preserved
+      ansible.builtin.set_fact:
+        _resolved_neo4j_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=24') }}"
+        existing_secret_found: false
+      when: _resolved_neo4j_password is not defined or _resolved_neo4j_password | default('') | length == 0
+
+    - name: Set neo4j_password from resolved value
+      ansible.builtin.set_fact:
+        neo4j_password: "{{ _resolved_neo4j_password }}"
+
+    - name: Guard against empty neo4j password
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to deploy -- credential field 'neo4j_password' is empty.
+          This means neither preservation from an existing K8s Secret nor generation
+          produced a value. Check that the Secret exists or that the password lookup works.
+      when: _resolved_neo4j_password is not defined or _resolved_neo4j_password | default('') | length == 0
+
+    - name: Render secrets template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/secrets.yaml.j2"
+        dest: "{{ render_dir }}/secrets.yaml"
+        mode: '0644'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/statefulset.yaml.j2"
+        dest: "{{ render_dir }}/statefulset.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Render ConfigMap template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/configmap-schemas.yaml.j2"
+        dest: "{{ render_dir }}/configmap-schemas.yaml"
+        mode: '0644'
+
+    - name: Render PushSecret template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/pushsecret.yaml.j2"
+        dest: "{{ render_dir }}/pushsecret.yaml"
+        mode: '0644'
+
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Apply secrets (always idempotent, never replace --force)
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ render_dir }}/secrets.yaml
+      register: secrets_apply
+      changed_when: "'created' in secrets_apply.stdout or 'configured' in secrets_apply.stdout"
+
+    - name: Apply PushSecret (always idempotent)
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ render_dir }}/pushsecret.yaml
+      register: pushsecret_apply
+      changed_when: "'created' in pushsecret_apply.stdout or 'configured' in pushsecret_apply.stdout"
+
+    - name: Apply remaining manifests
+      ansible.builtin.command:
+        cmd: >-
+          kubectl {{ kubectl_action }}
+          -f {{ render_dir }}/configmap-schemas.yaml
+          -f {{ render_dir }}/statefulset.yaml
+          -f {{ render_dir }}/service.yaml
+      register: manifests_apply
+      changed_when: "'created' in manifests_apply.stdout or 'configured' in manifests_apply.stdout"
+
+    - name: Wait for pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name={{ app_name }}
+        --timeout=600s
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: pod_wait.rc == 0
+
+    - name: Wait for Neo4j to accept connections
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} exec neo4j-0 --
+        /bin/sh -c "NEO4J_PASS=$(echo \"$NEO4J_AUTH\" | cut -d/ -f2-); cypher-shell -u neo4j -p \"${NEO4J_PASS:-neo4j}\" 'RETURN 1 AS health'"
+      register: health_check
+      retries: 10
+      delay: 15
+      until: health_check.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Load schemas from ConfigMap
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} exec neo4j-0 --
+        /bin/sh -c "NEO4J_PASS=$(echo \"$NEO4J_AUTH\" | cut -d/ -f2-); cypher-shell -u neo4j -p \"${NEO4J_PASS:-neo4j}\" -f /opt/neo4j-schemas/mcp-core.cypher"
+      register: schema_load
+      changed_when: false
+      when: health_check.rc == 0
+      failed_when: false
+
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Neo4j Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ image | default('neo4j:5.26.1-community') }}"
+          - "Browser: http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30474) }}"
+          - "Bolt: bolt://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ bolt_nodeport | default(30687) }}"
+          - "Health: {{ 'OK' if health_check.rc == 0 else 'Pending' }}"
+          - "Schemas: {{ 'Loaded' if schema_load is defined and schema_load.rc == 0 else 'Pending' }}"
+          - "=========================================="
+
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

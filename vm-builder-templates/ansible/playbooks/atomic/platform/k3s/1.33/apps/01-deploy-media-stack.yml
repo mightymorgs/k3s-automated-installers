@@ -1,0 +1,258 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/apps/01-deploy-media-stack"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/apps/01-deploy-media-stack.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "apps"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.7.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         longhorn: "1.7.2"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "Deploys 8 media-stack apps as StatefulSets with Longhorn and NFS storage"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "longhorn_installed"]
+#   provides: ["media_stack_apps_deployed"]
+#   tags: ["k3s", "media-stack", "statefulsets", "apps"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: Deploy media stack applications as StatefulSets using kubernetes.core.k8s
+- name: Deploy Media Stack Applications
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    # Media stack configuration
+    media_puid: '1000'
+    media_pgid: '1000'
+    media_timezone: Australia/Sydney
+
+    # NFS configuration
+    nfs_server: "{{ inventory_json.network.nfs_server | default('192.168.0.103') }}"
+    nfs_path: /volume2/NAS
+    nfs_storage_capacity: 10Ti
+
+    # Authentik configuration (must be provided via extra vars or inventory)
+    # SECURITY: These values MUST be resolved from BWS at runtime
+    # DO NOT hardcode secrets here - use BWS inventory or --extra-vars
+    authentik_secret_key: "{{ inventory_json.authentik.secret_key | default('MISSING') }}"
+    authentik_postgres_password: "{{ inventory_json.authentik.postgres_password | default('MISSING') }}"
+    authentik_bootstrap_password: "{{ inventory_json.authentik.bootstrap_password | default('MISSING') }}"
+    authentik_bootstrap_email: >-
+      {{ inventory_json.authentik.bootstrap_email
+      | default('admin@' ~ (domain | default('example.local'))) }}
+    authentik_host: >-
+      {{ inventory_json.authentik.host
+      | default('https://auth.' ~ (domain | default('example.local'))) }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Deploying Media Stack Applications
+          - ==========================================
+          - 'Apps: Sonarr, Radarr, Prowlarr, SABnzbd,'
+          - '      qBittorrent, Overseerr, Tautulli, Authentik'
+          - 'Storage: Longhorn (config), NFS (media/downloads)'
+          - 'Namespace: media-stack'
+          - ==========================================
+    - name: Check if kubernetes.core collection is available
+      ansible.builtin.command: ansible-galaxy collection list kubernetes.core
+      register: k8s_collection_check
+      changed_when: false
+      failed_when: false
+    - name: Install kubernetes.core collection if missing
+      ansible.builtin.command: ansible-galaxy collection install kubernetes.core
+      when: k8s_collection_check.rc != 0
+      changed_when: true
+    - name: Ensure Python kubernetes library is installed
+      ansible.builtin.pip:
+        name: [kubernetes, PyYAML]
+        state: present
+      become: true
+    - name: Create temporary directory for rendered manifests
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .media-stack-deploy
+      register: temp_manifest_dir
+      changed_when: false
+    - name: Render namespace manifest
+      ansible.builtin.template:
+        src: '{{ playbook_dir }}/../../../../../templates/k3s/apps/media-stack/namespace.yml.j2'
+        dest: '{{ temp_manifest_dir.path }}/namespace.yml'
+        mode: '0644'
+      changed_when: false
+    - name: Render NFS storage manifest
+      ansible.builtin.template:
+        src: '{{ playbook_dir }}/../../../../../templates/k3s/apps/media-stack/nfs-storage.yml.j2'
+        dest: '{{ temp_manifest_dir.path }}/nfs-storage.yml'
+        mode: '0644'
+      changed_when: false
+    - name: Render StatefulSet manifests
+      ansible.builtin.template:
+        src: '{{ playbook_dir }}/../../../../../templates/k3s/apps/media-stack/{{
+          item }}-statefulset.yml.j2'
+        dest: '{{ temp_manifest_dir.path }}/{{ item }}-statefulset.yml'
+        mode: '0644'
+      loop:
+        - sonarr
+        - radarr
+        - prowlarr
+        - sabnzbd
+        - qbittorrent
+        - overseerr
+        - tautulli
+        - authentik
+      changed_when: false
+    - name: Deploy namespace
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ temp_manifest_dir.path }}/namespace.yml'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: namespace_result
+    - name: Deploy NFS storage
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ temp_manifest_dir.path }}/nfs-storage.yml'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: nfs_result
+    - name: Deploy media stack applications
+      kubernetes.core.k8s:
+        state: present
+        src: '{{ temp_manifest_dir.path }}/{{ item }}-statefulset.yml'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      loop:
+        - sonarr
+        - radarr
+        - prowlarr
+        - sabnzbd
+        - qbittorrent
+        - overseerr
+        - tautulli
+        - authentik
+      register: app_deploy_results
+    - name: Wait for StatefulSets to be ready
+      kubernetes.core.k8s_info:
+        kind: StatefulSet
+        namespace: media-stack
+        name: '{{ item }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: statefulset_info
+      until: >
+        statefulset_info.resources | length > 0 and
+        statefulset_info.resources[0].status.readyReplicas | default(0) >= 1
+      retries: 30
+      delay: 10
+      loop:
+        - sonarr
+        - radarr
+        - prowlarr
+        - sabnzbd
+        - qbittorrent
+        - overseerr
+        - tautulli
+        - authentik-server
+    - name: Get all pods in media-stack namespace
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: media_stack_pods
+      changed_when: false
+    - name: Get all StatefulSets in media-stack namespace
+      kubernetes.core.k8s_info:
+        kind: StatefulSet
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: media_stack_statefulsets
+      changed_when: false
+    - name: Get all Services in media-stack namespace
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: media-stack
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: media_stack_services
+      changed_when: false
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Media Stack Deployment Complete!
+          - ==========================================
+          - ''
+          - 'StatefulSets Deployed:'
+          - "{{ media_stack_statefulsets.resources | map(attribute='metadata.name') | list }}"
+          - ''
+          - 'Services Created:'
+          - "{{ media_stack_services.resources | map(attribute='metadata.name') | list }}"
+          - ''
+          - 'Pods Status:'
+          - "{{ media_stack_pods.resources | map(attribute='metadata.name') | list }}"
+          - ''
+          - ==========================================
+          - 'Access URLs (via ClusterIP):'
+          - >-
+            Sonarr:
+            {{ sonarr_internal_url
+            | default('http://sonarr.media-stack.svc:8989') }}
+          - >-
+            Radarr:
+            {{ radarr_internal_url
+            | default('http://radarr.media-stack.svc:7878') }}
+          - >-
+            Prowlarr:
+            {{ prowlarr_internal_url
+            | default('http://prowlarr.media-stack.svc:9696') }}
+          - >-
+            SABnzbd:
+            {{ sabnzbd_internal_url
+            | default('http://sabnzbd.media-stack.svc:8080') }}
+          - >-
+            qBittorrent:
+            {{ qbittorrent_internal_url
+            | default('http://qbittorrent.media-stack.svc:8080') }}
+          - >-
+            Overseerr:
+            {{ overseerr_internal_url
+            | default('http://overseerr.media-stack.svc:5055') }}
+          - >-
+            Tautulli:
+            {{ tautulli_internal_url
+            | default('http://tautulli.media-stack.svc:8181') }}
+          - >-
+            Authentik:
+            {{ authentik_internal_url
+            | default('http://authentik.media-stack.svc:9000') }}
+          - ==========================================
+    - name: Clean up temporary manifest directory
+      ansible.builtin.file:
+        path: '{{ temp_manifest_dir.path }}'
+        state: absent
+      changed_when: false

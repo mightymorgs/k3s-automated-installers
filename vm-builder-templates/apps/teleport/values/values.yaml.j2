@@ -1,0 +1,62 @@
+# Helm values for Teleport OSS deployment (standalone with PVC on the configured storage class)
+
+clusterName: {{ teleport_domain }}
+publicAddr:
+  - {{ teleport_domain }}:443
+proxyListenerMode: multiplex
+validateConfigOnDeploy: true
+
+acme: false
+tls:
+  existingSecretName: teleport-custom-tls
+
+log:
+  level: INFO
+  output: stderr
+  format: text
+  extraFields:
+    - timestamp
+    - level
+    - component
+
+persistence:
+  enabled: true
+  existingClaimName: teleport-data
+  volumeSize: {{ teleport_data_storage_size }}
+
+service:
+  type: ClusterIP
+  spec: {}
+
+ingress:
+  enabled: true
+  useExisting: true
+  suppressAutomaticWildcards: false
+  spec:
+    ingressClassName: traefik
+
+proxy:
+  annotations:
+    ingress:
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/service.serversscheme: https
+      traefik.ingress.kubernetes.io/router.tls: "true"
+      traefik.ingress.kubernetes.io/service.serverstransport: teleport-insecure@kubernetescrd
+  ingress:
+    enabled: true
+    useExisting: true
+    spec:
+      ingressClassName: traefik
+      tls:
+        - hosts:
+            - {{ teleport_domain }}
+            - "*.teleport.{{ base_domain }}"
+          secretName: teleport-custom-tls
+  service:
+    type: ClusterIP
+
+extraLabels:
+  ingress:
+    app.kubernetes.io/part-of: central-secure-stack
+  deployment:
+    app.kubernetes.io/part-of: central-secure-stack

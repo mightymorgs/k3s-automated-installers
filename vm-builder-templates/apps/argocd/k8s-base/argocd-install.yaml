@@ -1,0 +1,15 @@
+# ArgoCD Installation Manifest
+# This file references the official ArgoCD installation manifest.
+# The Ansible playbook will download and apply this manifest during deployment.
+#
+# Source: https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# Version: v2.9+ (stable)
+#
+# To manually download and inspect:
+# curl -o argocd-install-full.yaml https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+#
+# The playbook apps/argocd/install/01-install-server.yml
+# will fetch and apply this manifest using kubernetes.core.k8s module.
+#
+# This approach ensures we always use the latest stable version while
+# maintaining compatibility with our GitOps workflow.

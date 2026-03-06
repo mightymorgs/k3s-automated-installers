@@ -1,0 +1,288 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/operations/role-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "teleport.roles.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/operations/role-create.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "teleport"
+#       supported_versions: ["15.x", "16.x"]
+#       version_range: ">=15.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - teleport: "16.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Teleport API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_teleport_operations"
+#   dependencies: ["teleport_deployed", "teleport_admin_token_available"]
+#   provides: ["teleport_role_created"]
+#   tags: ["teleport", "roles", "rbac", "access-control", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an RBAC role in Teleport. Roles define what resources users can access
+#     and what actions they can perform. This operation is idempotent - if the role
+#     exists, it will be skipped. Supports SSH, Kubernetes, database, and app access.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.teleport.admin_token"
+#         purpose: "Teleport API admin token for authentication"
+#       - path: "_state.apps.teleport.proxy_url"
+#         purpose: "Teleport proxy URL for API calls"
+#
+#     writes:
+#       - path: "_state.apps.teleport.roles.{role_name}.created"
+#         example: true
+#       - path: "_state.apps.teleport.roles.{role_name}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+
+- name: Teleport - Create RBAC Role
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    teleport_base_url: "{{ teleport_proxy_url }}"
+    teleport_api_base: "{{ teleport_base_url }}/v1"
+    endpoint: "/roles"
+
+    # Role configuration defaults
+    role_version: "v7"
+    max_session_ttl: "{{ max_session_ttl_input | default('8h') }}"
+    forward_agent: "{{ forward_agent_input | default(false) }}"
+    port_forwarding: "{{ port_forwarding_input | default(true) }}"
+    ssh_file_copy: "{{ ssh_file_copy_input | default(true) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - role_name is defined and role_name | length > 0
+        fail_msg: >-
+          Required input: role_name (string).
+          Optional: allow_logins, allow_node_labels, allow_kubernetes_groups,
+          allow_kubernetes_labels, allow_app_labels, allow_db_names, allow_db_users
+        success_msg: "Required input validated: role_name={{ role_name }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Teleport Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Teleport admin token
+      ansible.builtin.set_fact:
+        teleport_token: "{{ inventory._state.apps.teleport.admin_token }}"
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        teleport_base_url: "{{ inventory._state.apps.teleport.proxy_url }}"
+        teleport_api_base: "{{ inventory._state.apps.teleport.proxy_url }}/v1"
+      when: inventory._state.apps.teleport.proxy_url is defined
+
+    - name: Validate Teleport token is available
+      ansible.builtin.assert:
+        that:
+          - teleport_token | length > 0
+        fail_msg: "Teleport admin token not found in BWS _state. Ensure Teleport is configured."
+        success_msg: "Teleport admin token retrieved from BWS _state"
+
+    # ===== STEP 4: Check if Role Already Exists (Idempotency) =====
+    - name: Check if role already exists
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ role_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_role
+      failed_when: false
+      no_log: false
+
+    - name: Determine if role exists
+      ansible.builtin.set_fact:
+        role_exists: "{{ existing_role.status == 200 }}"
+
+    - name: Skip creation if role exists
+      ansible.builtin.debug:
+        msg: "Role '{{ role_name }}' already exists - skipping creation"
+      when: role_exists
+
+    # ===== STEP 5: Build Role Payload =====
+    - name: Build role spec.allow section
+      ansible.builtin.set_fact:
+        role_allow:
+          logins: "{{ allow_logins | default(['{{internal.logins}}']) }}"
+          node_labels: "{{ allow_node_labels | default({'*': '*'}) }}"
+          kubernetes_groups: "{{ allow_kubernetes_groups | default(omit) }}"
+          kubernetes_users: "{{ allow_kubernetes_users | default(omit) }}"
+          kubernetes_labels: "{{ allow_kubernetes_labels | default(omit) }}"
+          kubernetes_resources: "{{ allow_kubernetes_resources | default(omit) }}"
+          app_labels: "{{ allow_app_labels | default({'*': '*'}) }}"
+          db_labels: "{{ allow_db_labels | default(omit) }}"
+          db_names: "{{ allow_db_names | default(omit) }}"
+          db_users: "{{ allow_db_users | default(omit) }}"
+          rules: "{{ allow_rules | default(omit) }}"
+      when: not role_exists
+
+    - name: Build role spec.deny section
+      ansible.builtin.set_fact:
+        role_deny:
+          logins: "{{ deny_logins | default(omit) }}"
+          node_labels: "{{ deny_node_labels | default(omit) }}"
+      when: not role_exists
+
+    - name: Build role creation payload
+      ansible.builtin.set_fact:
+        role_payload:
+          kind: "role"
+          version: "{{ role_version }}"
+          metadata:
+            name: "{{ role_name }}"
+            description: "{{ role_description | default('Created via IDI automation') }}"
+            labels: "{{ role_labels | default({}) }}"
+          spec:
+            options:
+              max_session_ttl: "{{ max_session_ttl }}"
+              forward_agent: "{{ forward_agent }}"
+              port_forwarding: "{{ port_forwarding }}"
+              ssh_file_copy: "{{ ssh_file_copy }}"
+              client_idle_timeout: "0"
+              require_session_mfa: "{{ require_session_mfa | default(false) }}"
+            allow: "{{ role_allow | dict2items | rejectattr('value', 'undefined') | items2dict }}"
+            deny: "{{ role_deny | dict2items | rejectattr('value', 'undefined') | items2dict }}"
+      when: not role_exists
+      no_log: false
+
+    # ===== STEP 6: Create Role =====
+    - name: Create role in Teleport
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ role_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not role_exists
+
+    - name: Role creation completed
+      ansible.builtin.debug:
+        msg: "Role '{{ role_name }}' created successfully"
+      when: not role_exists and create_result is defined
+
+    # ===== STEP 7: Verify Role Was Created =====
+    - name: Verify role exists after creation
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ role_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: verify_role
+      when: not role_exists
+      no_log: false
+
+    - name: Assert role verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_role.status == 200
+        fail_msg: "Failed to verify role '{{ role_name }}' after creation"
+        success_msg: "Role '{{ role_name }}' verified successfully"
+      when: not role_exists
+
+    # ===== STEP 8: Write Role Status to BWS._state =====
+    - name: Update BWS inventory with role status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.teleport.roles.{role_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ role_name }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.teleport == null then ._state.apps.teleport = {} else . end |
+          if ._state.apps.teleport.roles == null then ._state.apps.teleport.roles = {} else . end |
+          ._state.apps.teleport.roles[$name] = {
+            "created": $created,
+            "created_timestamp": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not role_exists
+
+    # ===== STEP 9: Output Result =====
+    - name: Display role creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if role_exists else 'created' }}"
+          role_name: "{{ role_name }}"
+          message: >-
+            Role '{{ role_name }}' {{ 'already exists' if role_exists else 'created successfully' }}.
+            {{ 'Status recorded in BWS _state.' if not role_exists else '' }}

@@ -1,0 +1,142 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/kibana/05-wire-elastic"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/kibana/config/05-wire-elastic.yml"
+#     category: "apps"
+#     subsystem: "kibana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["kibana_deployed", "elastic_deployed"]
+#   provides: ["kibana_elastic_wired"]
+#   tags: ["kibana", "elastic", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Kibana to connect to Elasticsearch. Kibana uses the
+#     ELASTICSEARCH_HOSTS environment variable (or kibana.yml config) to
+#     locate Elasticsearch. This playbook patches the Kibana deployment
+#     to set the correct internal K8s DNS URL for Elasticsearch, then
+#     waits for rollout and verifies connectivity.
+#   requires_apps: ["kibana", "elastic"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Wire Elasticsearch into Kibana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    kibana_namespace: "kibana"
+    elastic_namespace: "elastic"
+    # kibana_url: from BWS _state via Phase 4 extra-vars
+    # elastic_url: from BWS _state via Phase 4 extra-vars
+    elastic_internal_url: "{{ elastic_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF KIBANA IS DEPLOYED ==========
+    - name: Check if Kibana pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ kibana_namespace }} -l app=kibana --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: kibana_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Kibana not deployed
+      ansible.builtin.meta: end_play
+      when: kibana_pod_check.rc != 0 or kibana_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ELASTICSEARCH IS DEPLOYED ==========
+    - name: Check if Elasticsearch pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ elastic_namespace }} -l app.kubernetes.io/name=elasticsearch --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: elastic_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Elasticsearch not deployed
+      ansible.builtin.meta: end_play
+      when: elastic_pod_check.rc != 0 or elastic_pod_check.stdout | length == 0
+
+    # ========== CHECK CURRENT ELASTICSEARCH_HOSTS VALUE ==========
+    - name: Get current ELASTICSEARCH_HOSTS env var from Kibana deployment
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment kibana -n {{ kibana_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ELASTICSEARCH_HOSTS")].value}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_es_hosts
+      changed_when: false
+      failed_when: false
+
+    - name: Check if Elasticsearch URL already configured correctly
+      ansible.builtin.set_fact:
+        elastic_already_wired: "{{ current_es_hosts.stdout == elastic_internal_url }}"
+
+    - name: Note Elasticsearch already wired
+      ansible.builtin.debug:
+        msg: "Kibana already configured with correct Elasticsearch URL - skipping"
+      when: elastic_already_wired
+
+    # ========== PATCH KIBANA DEPLOYMENT ==========
+    - name: Set ELASTICSEARCH_HOSTS environment variable on Kibana deployment
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env deployment/kibana -n {{ kibana_namespace }}
+          ELASTICSEARCH_HOSTS={{ elastic_internal_url }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: env_patch_result
+      changed_when: "'updated' in env_patch_result.stdout"
+      when: not elastic_already_wired
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Kibana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/kibana -n {{ kibana_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not elastic_already_wired
+
+    # ========== VERIFY KIBANA IS ACCESSIBLE ==========
+    - name: Verify Kibana health endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ kibana_url }}/api/status"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 15
+      delay: 10
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Kibana not accessible after wiring
+      ansible.builtin.fail:
+        msg: "Kibana not accessible after Elasticsearch wiring (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Kibana <-> Elasticsearch Wiring Complete"
+          - "=========================================="
+          - "Elasticsearch URL: {{ elastic_internal_url }}"
+          - "Config Method: ELASTICSEARCH_HOSTS env var on deployment"
+          - "Status: {{ 'Already configured' if elastic_already_wired else 'Patched and restarted' }}"
+          - "Health Check: {{ kibana_url }}/api/status ({{ health_check.status }})"
+          - "=========================================="

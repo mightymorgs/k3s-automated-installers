@@ -1,0 +1,258 @@
+---
+# playbook_metadata:
+#   id: "atomic/networking/cloudflare/tunnel/00-create-tunnel-via-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/networking/cloudflare/tunnel/00-create-tunnel-via-api.yml"
+#     category: "networking"
+#     subsystem: "cloudflare"
+#     role: "tunnel"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflare-tunnel"
+#       folder_version: null
+#       supported_versions: ["api-v4"]
+#       version_range: ">=2024.0.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - cloudflare_api: "v4"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-13"
+#         notes: "API-based tunnel creation, runs on localhost against Cloudflare API"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: []
+#   provides: ["cloudflare_tunnel_created", "dns_records_configured"]
+#   tags: ["cloudflare", "tunnel", "api", "dns", "multi-client", "networking"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create Cloudflare Tunnel and DNS records via API.
+#     Multi-client support via {{ client }} and {{ client_domain }} variables.
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.cloudflare.tunnel_id"
+#         example: "8e343b13-a087-48ea-825f-9783931ff2a5"
+#       - path: "_state.cloudflare.tunnel_name"
+#         example: "media-stack"
+#       - path: "_state.cloudflare.tunnel_token"
+#         example: "eyJhIjoiNzk4..."
+#       - path: "_state.cloudflare.dns_records"
+#         example: ["sonarr.example.com", "radarr.example.com"]
+#       - path: "_state.cloudflare.status"
+#         example: "created"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   # NOTE: This playbook creates the tunnel infrastructure, not ingress for a specific app.
+#   # Individual apps will configure their ingress to use this tunnel.
+#   ingress:
+#     enabled: false
+#     reason: "Creates tunnel infrastructure, not app-specific ingress"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: false
+#     reason: "Infrastructure playbook, no SSO needed"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Cloudflare Tunnel"
+#     icon: "cloud-arrow-up"
+#     category: "Networking"
+#     description: "Secure tunnel for public HTTPS access without port forwarding"
+#     docs_url: "https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/"
+
+- name: Create Cloudflare Tunnel via API
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Multi-client support: override these via extra-vars or inventory
+    client: "{{ client_name | default('homelab') }}"
+    client_domain: "{{ ingress_domain }}"
+    secrets_file: /home/morgs/GitRepo/ansible-neo4j-memory/secrets/secrets.json
+    tunnel_name: media-stack
+    backend_service: "{{ traefik_backend_url }}"
+    hostnames:
+      - sonarr
+      - radarr
+      - nzb
+      - qbit
+      - prowl
+      - req
+      - pstat
+      - auth
+  tasks:
+    # ========== FAIL-FAST: REQUIRED BWS VARS ==========
+    - name: Fail if ingress_domain not provided by BWS
+      ansible.builtin.fail:
+        msg: "ingress_domain must be provided via BWS extra-vars — no fake defaults"
+      when: ingress_domain is not defined or ingress_domain | length == 0
+
+    - name: Fail if traefik_backend_url not provided by BWS
+      ansible.builtin.fail:
+        msg: "traefik_backend_url must be provided via BWS extra-vars — no fake defaults"
+      when: traefik_backend_url is not defined or traefik_backend_url | length == 0
+
+    - name: Load secrets from JSON file
+      ansible.builtin.include_vars:
+        file: '{{ secrets_file }}'
+        name: secrets
+    - name: List existing tunnels
+      ansible.builtin.uri:
+        url: >-
+          https://api.cloudflare.com/client/v4/accounts/{{ secrets.cloudflare.account_id }}/cfd_tunnel?name={{
+            tunnel_name
+          }}
+        method: GET
+        headers:
+          Authorization: Bearer {{ secrets.cloudflare.tunnel_token }}
+        status_code: 200
+      register: tunnel_list
+    - name: Check if tunnel already exists
+      ansible.builtin.set_fact:
+        tunnel_exists: '{{ tunnel_list.json.result | length > 0 }}'
+        existing_tunnel: '{{ tunnel_list.json.result[0] if tunnel_list.json.result | length > 0 else {} }}'
+    - name: Display existing tunnel info
+      ansible.builtin.debug:
+        msg: "Tunnel '{{ tunnel_name }}' already exists with ID: {{ existing_tunnel.id }}"
+      when: tunnel_exists
+    - name: Use existing tunnel ID
+      ansible.builtin.set_fact:
+        tunnel_id: '{{ existing_tunnel.id }}'
+      when: tunnel_exists
+    - name: Display tunnel information
+      ansible.builtin.debug:
+        msg:
+          - Using existing tunnel!
+          - 'Tunnel ID: {{ tunnel_id }}'
+          - 'Tunnel Name: {{ tunnel_name }}'
+    - name: Configure tunnel ingress rules
+      ansible.builtin.uri:
+        url: >-
+          https://api.cloudflare.com/client/v4/accounts/{{
+            secrets.cloudflare.account_id
+          }}/cfd_tunnel/{{ tunnel_id }}/configurations
+        method: PUT
+        headers:
+          Authorization: Bearer {{ secrets.cloudflare.tunnel_token }}
+          Content-Type: application/json
+        body_format: json
+        body:
+          config:
+            ingress:
+              - hostname: sonarr.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: radarr.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: nzb.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: qbit.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: prowl.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: req.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: pstat.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - hostname: auth.{{ client_domain }}
+                service: '{{ backend_service }}'
+              - service: http_status:404
+        status_code: 200
+      register: tunnel_config
+    - name: Create DNS CNAME records for each hostname
+      ansible.builtin.uri:
+        url: https://api.cloudflare.com/client/v4/zones/{{ secrets.cloudflare.zone_id }}/dns_records
+        method: POST
+        headers:
+          Authorization: Bearer {{ secrets.cloudflare.tunnel_token }}
+          Content-Type: application/json
+        body_format: json
+        body:
+          type: CNAME
+          name: '{{ item }}'
+          content: '{{ tunnel_id }}.cfargotunnel.com'
+          ttl: 1
+          proxied: true
+        status_code: [200, 400]
+      loop: '{{ hostnames }}'
+      register: dns_create
+      changed_when: dns_create.status == 200
+      failed_when: false
+    - name: Get tunnel token from Cloudflare API
+      ansible.builtin.uri:
+        url: >-
+          https: >-
+            //api.cloudflare.com/client/v4/accounts/{{ secrets.cloudflare.account_id }}/cfd_tunnel/{{
+          tunnel_id }}/token
+        method: GET
+        headers:
+          Authorization: Bearer {{ secrets.cloudflare.tunnel_token }}
+        status_code: 200
+      register: tunnel_token_response
+    - name: Extract tunnel run token
+      ansible.builtin.set_fact:
+        tunnel_run_token: '{{ tunnel_token_response.json.result }}'
+    - name: Save tunnel info to secrets file
+      ansible.builtin.copy:
+        content: |
+          {
+            "cloudflare": {
+              "tunnel_token": "{{ secrets.cloudflare.tunnel_token }}",
+              "zone_id": "{{ secrets.cloudflare.zone_id }}",
+              "account_id": "{{ secrets.cloudflare.account_id }}",
+              "tunnel_id": "{{ tunnel_id }}",
+              "tunnel_run_token": "{{ tunnel_run_token }}"
+            },
+            "media_stack": {{ secrets.media_stack | to_nice_json }}
+          }
+        dest: '{{ secrets_file }}'
+        mode: '0600'
+      delegate_to: localhost
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Cloudflare Tunnel Created for {{ client }}!
+          - ==========================================
+          - 'Client: {{ client }}'
+          - 'Domain: {{ client_domain }}'
+          - 'Tunnel Name: {{ tunnel_name }}'
+          - 'Tunnel ID: {{ tunnel_id }}'
+          - ''
+          - 'DNS Records Created:'
+          - '  - sonarr.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - radarr.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - nzb.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - qbit.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - prowl.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - req.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - pstat.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - '  - auth.{{ client_domain }} → {{ tunnel_id }}.cfargotunnel.com'
+          - ''
+          - 'Ingress Rules:'
+          - '  All hostnames → {{ backend_service }}'
+          - ''
+          - 'Tunnel Token saved to: {{ secrets_file }}'
+          - ''
+          - 'Next Step:'
+          - '  Deploy cloudflared with:'
+          - >-
+            ansible-playbook
+            playbooks/atomic/networking/cloudflare/tunnel/01-deploy-cloudflared.yml
+            -e client_name={{ client }} -e domain={{ client_domain }}
+          - ==========================================

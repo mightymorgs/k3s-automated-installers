@@ -1,0 +1,84 @@
+{#
+  Vault Services (Headless, UI, NodePort)
+
+  Variables:
+    - namespace: Kubernetes namespace (default: "vault")
+    - vault_api_port: Vault API port (default: 8200)
+    - vault_cluster_port: Vault cluster port (default: 8201)
+    - vault_nodeport: NodePort for external access (default: 30820)
+    - vault_enable_nodeport: Create NodePort service (default: true)
+
+  Usage:
+    ansible.builtin.template:
+      src: templates/service.yaml.j2
+      dest: /tmp/vault-service.yaml
+#}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: {{ vault_namespace | default('vault') }}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+    app.kubernetes.io/part-of: golden-master
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+  ports:
+  - name: api
+    port: {{ vault_api_port | default(8200) }}
+    targetPort: {{ vault_api_port | default(8200) }}
+    protocol: TCP
+  - name: cluster
+    port: {{ vault_cluster_port | default(8201) }}
+    targetPort: {{ vault_cluster_port | default(8201) }}
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-ui
+  namespace: {{ vault_namespace | default('vault') }}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+    app.kubernetes.io/part-of: golden-master
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+  ports:
+  - name: http
+    port: {{ vault_api_port | default(8200) }}
+    targetPort: {{ vault_api_port | default(8200) }}
+    protocol: TCP
+{% if vault_enable_nodeport | default(true) %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-nodeport
+  namespace: {{ vault_namespace | default('vault') }}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+    app.kubernetes.io/part-of: golden-master
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+  ports:
+  - name: api
+    port: {{ vault_api_port | default(8200) }}
+    targetPort: {{ vault_api_port | default(8200) }}
+    nodePort: {{ vault_nodeport | default(30820) }}
+    protocol: TCP
+{% endif %}

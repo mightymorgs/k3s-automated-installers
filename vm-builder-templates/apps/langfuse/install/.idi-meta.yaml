@@ -1,0 +1,19 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Langfuse LLM observability platform to K3s cluster. Tracks token
+      usage, traces, and provides analytics for AI workloads. Accessible via Tailscale
+      on NodePort 30901.
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ templates_dir }}/secrets.yaml.j2'
+    - '{{ templates_dir }}/postgres-statefulset.yaml.j2'
+    - '{{ templates_dir }}/postgres-service.yaml.j2'
+    - '{{ templates_dir }}/deployment.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+  02-verify.yml:
+    summary: Verify Langfuse deployment is healthy
+    source: inferred
+    confidence: medium

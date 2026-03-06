@@ -1,0 +1,39 @@
+---
+# Loki ConfigMap (J2 template)
+# Defaults match k8s-base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ configmap_name | default('loki-config') }}
+  namespace: {{ app_namespace | default('observability') }}
+  labels:
+    app: {{ app_name | default('loki') }}
+    app.kubernetes.io/name: {{ app_name | default('loki') }}
+    app.kubernetes.io/part-of: observability
+data:
+  loki.yaml: |
+    auth_enabled: {{ auth_enabled | default(false) | lower }}
+    server:
+      http_listen_port: {{ container_port | default(3100) }}
+    common:
+      path_prefix: {{ data_mount_path | default('/loki') }}
+      storage:
+        filesystem:
+          chunks_directory: {{ data_mount_path | default('/loki') }}/chunks
+          rules_directory: {{ data_mount_path | default('/loki') }}/rules
+      replication_factor: {{ replication_factor | default(1) }}
+      ring:
+        kvstore:
+          store: {{ kvstore_type | default('inmemory') }}
+    schema_config:
+      configs:
+        - from: {{ schema_from_date | default('2020-10-24') }}
+          store: {{ schema_store | default('tsdb') }}
+          object_store: {{ schema_object_store | default('filesystem') }}
+          schema: {{ schema_version | default('v13') }}
+          index:
+            prefix: {{ schema_index_prefix | default('index_') }}
+            period: {{ schema_index_period | default('24h') }}
+    storage_config:
+      filesystem:
+        directory: {{ data_mount_path | default('/loki') }}/storage

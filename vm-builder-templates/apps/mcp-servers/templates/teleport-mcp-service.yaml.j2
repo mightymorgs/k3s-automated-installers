@@ -1,0 +1,24 @@
+---
+# Teleport MCP Server Service (J2 template)
+# Defaults match k8s-base/teleport-mcp-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: teleport-mcp
+  namespace: {{ mcp_namespace | default('mcp-servers') }}
+  labels:
+    app.kubernetes.io/name: teleport-mcp
+    app.kubernetes.io/component: ai-operations
+spec:
+  type: {{ teleport_mcp_service_type | default('ClusterIP') }}
+  selector:
+    app.kubernetes.io/name: teleport-mcp
+    app.kubernetes.io/component: ai-operations
+  ports:
+    - name: http
+      port: {{ teleport_mcp_port | default(8080) }}
+      targetPort: http
+{% if teleport_mcp_service_type | default('ClusterIP') == 'NodePort' %}
+      nodePort: {{ teleport_mcp_nodeport | default(30182) }}
+{% endif %}
+      protocol: TCP

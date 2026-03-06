@@ -1,0 +1,19 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: qbittorrent
+  namespace: media-stack
+  labels:
+    app: qbittorrent
+    app.kubernetes.io/name: qbittorrent
+    app.kubernetes.io/component: torrent-client
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`qbittorrent.local`) || PathPrefix(`/qbittorrent`)
+      kind: Rule
+      services:
+        - name: qbittorrent
+          port: 8081

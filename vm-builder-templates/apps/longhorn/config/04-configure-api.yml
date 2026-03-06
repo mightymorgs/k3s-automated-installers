@@ -1,0 +1,114 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "longhorn"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: []
+#   provides: ["longhorn_api_configured"]
+#   tags: ["longhorn", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Verify Longhorn UI accessibility for Tailscale Ingress mode.
+#     Longhorn UI has no built-in authentication — auth is handled at
+#     the ingress/network level (Tailscale). This playbook ensures the
+#     UI pod is running, the manager backend is reachable, and the
+#     dashboard is accessible via the Tailscale network.
+#   requires_apps: ["longhorn"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.longhorn.configured"
+#         example: true
+
+- name: Configure Longhorn dashboard access for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    longhorn_namespace: "longhorn-system"
+    app_namespace: "{{ longhorn_namespace }}"
+    # longhorn_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== 1. CHECK IF LONGHORN UI IS DEPLOYED ==========
+    - name: Check if Longhorn UI pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=longhorn --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: longhorn_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Longhorn not deployed
+      ansible.builtin.debug:
+        msg: "Longhorn not deployed - skipping API configuration"
+      when: longhorn_pod_check.rc != 0 or longhorn_pod_check.stdout | length == 0
+
+    - name: End play if Longhorn not available
+      ansible.builtin.meta: end_play
+      when: longhorn_pod_check.rc != 0 or longhorn_pod_check.stdout | length == 0
+
+    # ========== 2. VERIFY LONGHORN MANAGER IS REACHABLE ==========
+    # The UI communicates with the Longhorn manager backend service.
+    # Ensure the manager service endpoint exists and is healthy before
+    # verifying external dashboard access.
+    - name: Check Longhorn manager service endpoint
+      ansible.builtin.command:
+        cmd: kubectl get endpoints -n {{ app_namespace }} longhorn --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: manager_endpoint_check
+      changed_when: false
+      failed_when: false
+
+    - name: Warn if Longhorn manager endpoint not ready
+      ansible.builtin.debug:
+        msg: "WARNING: Longhorn manager endpoint not found or has no addresses"
+      when: manager_endpoint_check.rc != 0 or '<none>' in (manager_endpoint_check.stdout | default(''))
+
+    # ========== 3. VERIFY LONGHORN UI IS ACCESSIBLE VIA TAILSCALE ==========
+    # Longhorn UI has no built-in authentication — Tailscale provides
+    # the network-level auth layer. We only need to confirm the
+    # dashboard responds on the NodePort.
+    - name: Verify Longhorn dashboard is reachable via Tailscale
+      ansible.builtin.uri:
+        url: "{{ longhorn_url }}"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Longhorn dashboard not accessible
+      ansible.builtin.fail:
+        msg: "Longhorn dashboard not accessible via Tailscale (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== 4. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Longhorn API Configuration Complete"
+          - "=========================================="
+          - "Built-in Auth: None (no login page to bypass)"
+          - "Auth Layer: Tailscale (network-level access control)"
+          - "Manager Endpoint: {{ 'Ready' if manager_endpoint_check.rc == 0 and '<none>' not in (manager_endpoint_check.stdout | default('')) else 'Pending' }}"
+          - "Dashboard URL: {{ longhorn_url }}"
+          - "Health Check: {{ longhorn_url }} ({{ health_check.status }})"
+          - "=========================================="

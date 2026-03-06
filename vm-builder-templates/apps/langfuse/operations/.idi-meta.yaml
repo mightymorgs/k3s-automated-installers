@@ -1,0 +1,108 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  dataset-create.yml:
+    summary: Create an evaluation dataset in Langfuse. This operation is idempotent
+      - if a dataset with the same name exists, it will be skipped. Datasets are used
+      to store test cases for LLM evaluation. Langfuse uses Basic auth with public
+      key as username and secret key as password.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ langfuse_api_base }}{{ endpoint }}/{{ name | urlencode }}'
+    - '{{ langfuse_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: langfuse
+        field: public_key
+      - app: langfuse
+        field: secret_key
+      - app: langfuse
+        field: url
+      writes_to:
+      - app: langfuse
+        field: datasets
+      - app: langfuse
+        field: datasets
+      - app: langfuse
+        field: datasets
+  dataset-item-create.yml:
+    summary: Add an item to a Langfuse evaluation dataset. Dataset items contain input/output
+      pairs used for testing LLM applications. This operation supports idempotency
+      via custom item IDs. Langfuse uses Basic auth with public key as username and
+      secret key as password.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ langfuse_api_base }}{{ endpoint }}/{{ item_id | urlencode }}'
+    - '{{ langfuse_api_base }}{{ endpoint }}'
+    - '{{ langfuse_api_base }}/datasets/{{ dataset_name | urlencode }}'
+    wiring:
+      reads_from:
+      - app: langfuse
+        field: public_key
+      - app: langfuse
+        field: secret_key
+      - app: langfuse
+        field: url
+      - app: langfuse
+        field: datasets
+      writes_to:
+      - app: langfuse
+        field: datasets
+      - app: langfuse
+        field: datasets
+      - app: langfuse
+        field: datasets
+  prompt-create.yml:
+    summary: Create or update a prompt in Langfuse. This operation creates a new prompt
+      or a new version of an existing prompt. Langfuse uses Basic auth with public
+      key as username and secret key as password.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ langfuse_api_base }}{{ endpoint }}/{{ name | urlencode }}'
+    - '{{ langfuse_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: langfuse
+        field: public_key
+      - app: langfuse
+        field: secret_key
+      - app: langfuse
+        field: url
+      writes_to:
+      - app: langfuse
+        field: prompts
+      - app: langfuse
+        field: prompts
+      - app: langfuse
+        field: prompts
+      - app: langfuse
+        field: prompts
+  score-create.yml:
+    summary: Create a quality score for a trace or observation in Langfuse. Scores
+      are used to evaluate LLM outputs (e.g., accuracy, relevance, helpfulness). Supports
+      numeric, categorical, and boolean score types. This operation supports idempotency
+      via custom score IDs. Langfuse uses Basic auth with public key as username and
+      secret key as password.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ langfuse_api_base }}{{ endpoint }}/{{ score_id | urlencode }}'
+    - '{{ langfuse_api_base }}{{ endpoint }}'
+    wiring:
+      reads_from:
+      - app: langfuse
+        field: public_key
+      - app: langfuse
+        field: secret_key
+      - app: langfuse
+        field: url
+      writes_to:
+      - app: langfuse
+        field: scores
+      - app: langfuse
+        field: scores
+      - app: langfuse
+        field: scores

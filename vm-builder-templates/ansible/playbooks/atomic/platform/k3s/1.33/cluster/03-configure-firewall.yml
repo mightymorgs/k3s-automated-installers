@@ -1,0 +1,202 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/cluster/03-configure-firewall"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/cluster/03-configure-firewall.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "cluster"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         kernel: "6.8.0-85"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Tested on homelab k3s cluster with UFW"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "cluster_joined"]
+#   provides: ["k3s_firewall_configured"]
+#   tags: ["k3s", "firewall", "ufw", "security"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: Configure UFW firewall for K3s cluster with required ports
+- name: Configure UFW firewall for K3s cluster
+  hosts: k3s_masters:k3s_workers
+  gather_facts: true
+  become: true
+  vars:
+    # Common ports for all K3s nodes
+    k3s_common_ports:
+      - {port: 22, proto: tcp, comment: SSH}
+      - {port: 10250, proto: tcp, comment: Kubelet metrics}
+      - {port: 8472, proto: udp, comment: Flannel VXLAN}
+
+    # Master-only ports
+    k3s_master_ports:
+      - {port: 6443, proto: tcp, comment: Kubernetes API server}
+      - {port: 2379, proto: tcp, comment: etcd client}
+      - {port: 2380, proto: tcp, comment: etcd peer}
+
+    # Network ranges to allow (cluster internal)
+    k3s_allowed_networks:
+      - 192.168.0.0/24  # Local network
+      - 10.42.0.0/16  # K3s pod network (default)
+      - 10.43.0.0/16  # K3s service network (default)
+  tasks:
+    - name: Display firewall configuration intent
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Configuring UFW Firewall for K3s
+          - ==========================================
+          - 'Node: {{ inventory_hostname }}'
+          - "Role: {{ 'Master' if inventory_hostname in groups['k3s_masters'] else 'Worker' }}"
+          - 'IP: {{ ansible_default_ipv4.address }}'
+          - ==========================================
+    - name: Check if UFW is installed
+      ansible.builtin.command: which ufw
+      register: ufw_check
+      failed_when: false
+      changed_when: false
+    - name: Install UFW if not present
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+      when: ufw_check.rc != 0
+    - name: Check current UFW status
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+    - name: Set UFW default policies
+      ansible.builtin.command: ufw default {{ item }}
+      loop: [deny incoming, allow outgoing, deny routed]
+      when: "'Status: inactive' in ufw_status.stdout"
+      changed_when: true
+    - name: Allow SSH before enabling firewall (prevent lockout)
+      community.general.ufw:
+        rule: allow
+        port: 22
+        proto: tcp
+        comment: SSH - prevent lockout
+      when: "'Status: inactive' in ufw_status.stdout"
+    - name: Allow common K3s ports
+      community.general.ufw:
+        rule: allow
+        port: '{{ item.port }}'
+        proto: '{{ item.proto }}'
+        comment: '{{ item.comment }}'
+      loop: '{{ k3s_common_ports }}'
+    - name: Allow K3s master-specific ports
+      community.general.ufw:
+        rule: allow
+        port: '{{ item.port }}'
+        proto: '{{ item.proto }}'
+        comment: K3s Master - {{ item.comment }}
+      loop: '{{ k3s_master_ports }}'
+      when: inventory_hostname in groups['k3s_masters']
+    - name: Allow traffic from cluster networks
+      community.general.ufw:
+        rule: allow
+        from_ip: '{{ item }}'
+        comment: K3s cluster network
+      loop: '{{ k3s_allowed_networks }}'
+    - name: Enable UFW (if not already enabled)
+      community.general.ufw:
+        state: enabled
+      when: "'Status: inactive' in ufw_status.stdout"
+    - name: Reload UFW to apply all rules
+      community.general.ufw:
+        state: reloaded
+      when: "'Status: active' in ufw_status.stdout"
+    - name: Verify UFW is active
+      ansible.builtin.command: ufw status verbose
+      register: ufw_final_status
+      changed_when: false
+    - name: Display final firewall configuration (Master)
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - UFW Firewall Configuration Complete
+          - ==========================================
+          - '{{ ufw_final_status.stdout_lines }}'
+          - ==========================================
+          - 'Allowed Ports (Master):'
+          - '  - 22/tcp (SSH)'
+          - '  - 6443/tcp (Kubernetes API)'
+          - '  - 2379-2380/tcp (etcd)'
+          - '  - 10250/tcp (Kubelet)'
+          - '  - 8472/udp (Flannel VXLAN)'
+          - ==========================================
+          - 'Cluster Networks Allowed:'
+          - '  - 192.168.0.0/24 (Local)'
+          - '  - 10.42.0.0/16 (Pods)'
+          - '  - 10.43.0.0/16 (Services)'
+          - ==========================================
+      when: inventory_hostname in groups['k3s_masters']
+    - name: Display final firewall configuration (Worker)
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - UFW Firewall Configuration Complete
+          - ==========================================
+          - '{{ ufw_final_status.stdout_lines }}'
+          - ==========================================
+          - 'Allowed Ports (Worker):'
+          - '  - 22/tcp (SSH)'
+          - '  - 10250/tcp (Kubelet)'
+          - '  - 8472/udp (Flannel VXLAN)'
+          - ==========================================
+          - 'Cluster Networks Allowed:'
+          - '  - 192.168.0.0/24 (Local)'
+          - '  - 10.42.0.0/16 (Pods)'
+          - '  - 10.43.0.0/16 (Services)'
+          - ==========================================
+      when: inventory_hostname in groups['k3s_workers']
+    - name: Test cluster connectivity after firewall enable
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[groups['k3s_masters'][0]]['ansible_default_ipv4']['address'] }}"
+        port: 6443
+        timeout: 10
+      when: inventory_hostname in groups['k3s_workers']
+      ignore_errors: true
+      register: connectivity_test
+    - name: Display connectivity test result
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Connectivity Test Result
+          - ==========================================
+          - '{% if connectivity_test.failed is defined and connectivity_test.failed
+            %}'
+          - '❌ WARNING: Cannot reach master API server!'
+          - '   This may indicate firewall misconfiguration.'
+          - '   Check: ufw status verbose'
+          - '{% else %}'
+          - ✅ Cluster connectivity verified
+          - '{% endif %}'
+          - ==========================================
+      when: inventory_hostname in groups['k3s_workers']

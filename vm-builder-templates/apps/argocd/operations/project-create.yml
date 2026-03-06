@@ -1,0 +1,285 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/operations/project-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "argocd.projects.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/operations/project-create.yml"
+#     category: "platform"
+#     subsystem: "argocd"
+#     role: "operations"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "argocd"
+#       supported_versions: ["2.10.x", "2.11.x", "2.12.x", "2.13.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - argocd: "2.13.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from ArgoCD API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_argocd_operations"
+#   dependencies: ["argocd_deployed", "argocd_admin_token_available"]
+#   provides: ["argocd_project_created"]
+#   tags: ["argocd", "projects", "gitops", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an ArgoCD project with source/destination restrictions and RBAC.
+#     This operation is idempotent - if a project with the same name exists,
+#     it can be updated or skipped based on the upsert parameter.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.argocd.admin_token"
+#         purpose: "ArgoCD API token for authentication"
+#       - path: "_state.apps.argocd.url"
+#         purpose: "ArgoCD server URL"
+#
+#     writes:
+#       - path: "_state.apps.argocd.projects.{project_name}.name"
+#         example: "platform"
+#       - path: "_state.apps.argocd.projects.{project_name}.created_at"
+#         example: "2026-01-27T12:00:00Z"
+#       - path: "_state.apps.argocd.projects.{project_name}.source_repos"
+#         example: ["*"]
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     required:
+#       - name: project_name
+#         description: "Name of the ArgoCD project"
+#     optional:
+#       - name: description
+#         description: "Project description"
+#       - name: source_repos
+#         description: "Allowed source repositories (default: ['*'])"
+#       - name: destinations
+#         description: "Allowed deployment destinations"
+#       - name: cluster_resource_whitelist
+#         description: "Allowed cluster-scoped resources"
+#       - name: namespace_resource_whitelist
+#         description: "Allowed namespace-scoped resources"
+#       - name: upsert
+#         description: "Update existing project (default: false)"
+
+- name: ArgoCD - Create Project
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    argocd_namespace: "argocd"
+    argocd_base_url: "{{ argocd_url }}"
+    argocd_api_base: "{{ argocd_base_url }}/api/v1"
+    endpoint: "/projects"
+
+    # Required fields
+    # project_name: Project name (required)
+
+    # Optional fields with sensible defaults
+    description: "{{ description_input | default('') }}"
+    source_repos: "{{ source_repos_input | default(['*']) }}"
+    destinations: "{{ destinations_input | default([{'server': 'https://kubernetes.default.svc', 'namespace': '*'}]) }}"
+    cluster_resource_whitelist: "{{ cluster_resource_whitelist_input | default([{'group': '*', 'kind': '*'}]) }}"
+    namespace_resource_whitelist: "{{ namespace_resource_whitelist_input | default([{'group': '*', 'kind': '*'}]) }}"
+    roles: "{{ roles_input | default([]) }}"
+    sync_windows: "{{ sync_windows_input | default([]) }}"
+    upsert: "{{ upsert_input | default(false) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - project_name is defined and project_name | length > 0
+        fail_msg: "Required input missing: project_name"
+        success_msg: "All required inputs validated"
+
+    - name: Display playbook information
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD - Create Project"
+          - "=========================================="
+          - "Project Name: {{ project_name }}"
+          - "Description: {{ description | default('(none)') }}"
+          - "Source Repos: {{ source_repos | length }} entries"
+          - "Destinations: {{ destinations | length }} entries"
+          - "Upsert Mode: {{ upsert }}"
+          - "=========================================="
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract ArgoCD admin token
+      ansible.builtin.set_fact:
+        argocd_admin_token: >-
+          {{
+            inventory._state.apps.argocd.admin_token | default(argocd_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        argocd_base_url: "{{ inventory._state.apps.argocd.url }}"
+        argocd_api_base: "{{ inventory._state.apps.argocd.url }}/api/v1"
+      when: inventory._state.apps.argocd.url is defined
+
+    # ===== STEP 3: Check for Existing Project (Idempotency) =====
+    - name: Check if project already exists
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/projects/{{ project_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_project
+      no_log: false
+
+    - name: Set existing project fact
+      ansible.builtin.set_fact:
+        project_exists: "{{ existing_project.status == 200 }}"
+        existing_project_data: "{{ existing_project.json if existing_project.status == 200 else {} }}"
+
+    - name: Skip creation if project exists and upsert is false
+      ansible.builtin.debug:
+        msg: "Project '{{ project_name }}' already exists - skipping (upsert={{ upsert }})"
+      when: project_exists and not upsert | bool
+
+    # ===== STEP 4: Build Project Payload =====
+    - name: Build project creation payload
+      ansible.builtin.set_fact:
+        project_payload:
+          project:
+            metadata:
+              name: "{{ project_name }}"
+            spec:
+              description: "{{ description }}"
+              sourceRepos: "{{ source_repos }}"
+              destinations: "{{ destinations }}"
+              clusterResourceWhitelist: "{{ cluster_resource_whitelist }}"
+              namespaceResourceWhitelist: "{{ namespace_resource_whitelist }}"
+              roles: "{{ roles if roles | length > 0 else omit }}"
+              syncWindows: "{{ sync_windows if sync_windows | length > 0 else omit }}"
+      when: not project_exists or upsert | bool
+      no_log: true
+
+    # ===== STEP 5: Create Project =====
+    - name: Create project in ArgoCD
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif %}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ project_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not project_exists
+
+    - name: Update existing project in ArgoCD
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/projects/{{ project_name | urlencode }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ project_payload }}"
+        status_code: [200]
+        validate_certs: false
+      register: update_result
+      no_log: true
+      when: project_exists and upsert | bool
+
+    - name: Set project result
+      ansible.builtin.set_fact:
+        project_action: >-
+          {{ 'skipped' if project_exists and not upsert | bool else ('updated' if project_exists else 'created') }}
+
+    # ===== STEP 6: Verify Project =====
+    - name: Verify project exists after operation
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/projects/{{ project_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: project_verify
+      when: project_action != 'skipped'
+      no_log: false
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Update BWS inventory with project info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge project info into _state.apps.argocd.projects
+        UPDATED=$(echo "$CURRENT" | jq --arg proj "{{ project_name }}" \
+          --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson source_repos '{{ source_repos | to_json }}' \
+          '
+          if ._state.apps.argocd == null then ._state.apps.argocd = {} else . end |
+          if ._state.apps.argocd.projects == null then ._state.apps.argocd.projects = {} else . end |
+          if ._state.apps.argocd.projects[$proj] == null then ._state.apps.argocd.projects[$proj] = {} else . end |
+          ._state.apps.argocd.projects[$proj].name = $proj |
+          ._state.apps.argocd.projects[$proj].created_at = $created_at |
+          ._state.apps.argocd.projects[$proj].source_repos = $source_repos
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: project_action != 'skipped'
+
+    # ===== STEP 8: Output Result =====
+    - name: Display project creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ project_action }}"
+          project_name: "{{ project_name }}"
+          description: "{{ description }}"
+          source_repos_count: "{{ source_repos | length }}"
+          destinations_count: "{{ destinations | length }}"

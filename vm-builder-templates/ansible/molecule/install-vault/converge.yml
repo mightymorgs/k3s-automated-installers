@@ -1,0 +1,20 @@
+---
+- name: "Create Kind cluster"
+  ansible.builtin.import_playbook: ../shared/create-kind.yml
+
+- name: "Prepare namespaces"
+  ansible.builtin.import_playbook: ../shared/prepare-namespaces.yml
+
+- name: "Ensure vault namespace"
+  hosts: localhost
+  gather_facts: false
+  environment:
+    KUBECONFIG: /tmp/molecule-kubeconfig
+  tasks:
+    - name: Create vault namespace
+      ansible.builtin.shell: >-
+        kubectl create namespace vault --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+- name: "Deploy vault"
+  ansible.builtin.import_playbook: ../../../apps/vault/install/01-deploy-server.yml

@@ -1,0 +1,1 @@
+"""Atomic registry command handlers."""

@@ -1,0 +1,111 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/media-stack/02-wait-ready"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/media-stack/install/02-wait-ready.yml"
+#     category: "apps"
+#     subsystem: "media-stack"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "media-stack"
+#       supported_versions: ["latest"]
+#       version_range: "latest"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - media_stack: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-11"
+#         notes: "Awaiting functional test on GCP infrastructure"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["media_stack_deployed"]
+#   provides: ["media_stack_ready"]
+#   tags: ["media-stack", "verification", "readiness"]
+#   estimated_duration: 300
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Wait for all media stack pods to reach ready state and verify
+#     PersistentVolumeClaims are bound.
+
+- name: Wait for Media Stack Readiness
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    media_namespace: media-stack
+    apps:
+      - name: sonarr
+        port: 8989
+      - name: radarr
+        port: 7878
+      - name: sabnzbd
+        port: 8080
+      - name: prowlarr
+        port: 9696
+      - name: qbittorrent
+        port: 8081
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+
+  tasks:
+    - name: Wait for StatefulSet pods to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ media_namespace }} wait
+        --for=condition=ready pod
+        -l app={{ item.name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      loop: "{{ apps }}"
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_wait.rc == 0
+
+    - name: Check PVC status for each app
+      ansible.builtin.command: >-
+        kubectl -n {{ media_namespace }} get pvc
+        -l app={{ item.name }}
+        -o jsonpath='{.items[*].status.phase}'
+      loop: "{{ apps }}"
+      register: pvc_status
+      changed_when: false
+
+    - name: Verify all PVCs are bound
+      ansible.builtin.assert:
+        that:
+          - item.stdout == 'Bound' or item.stdout == ''
+        fail_msg: "PVC for {{ item.item.name }} is not bound: {{ item.stdout }}"
+      loop: "{{ pvc_status.results }}"
+      when: item.stdout | length > 0
+
+    - name: Get pod status summary
+      ansible.builtin.command: kubectl -n {{ media_namespace }} get pods -o wide
+      register: pod_summary
+      changed_when: false
+
+    - name: Display pod status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Media Stack Pod Status"
+          - "=========================================="
+          - "{{ pod_summary.stdout_lines }}"
+          - "=========================================="

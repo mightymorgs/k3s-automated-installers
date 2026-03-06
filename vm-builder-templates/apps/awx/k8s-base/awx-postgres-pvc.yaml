@@ -1,0 +1,33 @@
+---
+# NOTE: This PVC is automatically created by the AWX Operator
+# based on the postgres_storage_* specifications in awx-instance.yaml.
+# This file is provided as a reference for manual provisioning if needed.
+#
+# The operator creates a PVC named: awx-postgres-<postgres_version>
+# For example: awx-postgres-15
+#
+# Only use this file if you need to pre-provision the PVC with specific
+# settings that differ from the operator defaults.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: awx-postgres-15  # Name format: awx-postgres-<version>
+  namespace: awx
+  labels:
+    app.kubernetes.io/name: awx-postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: golden-master
+    app.kubernetes.io/managed-by: awx-operator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+
+# Additional notes:
+# - The AWX operator manages PostgreSQL lifecycle automatically
+# - Backups should be handled via AWX backup CRD or Longhorn snapshots
+# - For high availability, consider PostgreSQL clustering (future enhancement)

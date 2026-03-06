@@ -1,0 +1,113 @@
+---
+# ============================================================================
+# DEPRECATED: This playbook is scheduled for removal.
+# Use orchestration playbooks instead of grouped atomic playbooks.
+# Migration: ansible/playbooks/orchestration/deploy-k3s-cluster.yml
+# ============================================================================
+#
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/grouped/deploy-full-cluster"
+#   type: "grouped"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/grouped/deploy-full-cluster.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "grouped-deployment"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       helm: ">=3.0.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         helm: "3.19.0"
+#         longhorn: "1.7.2"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Orchestrates K3s server, Helm, and Longhorn installation"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["vm_provisioned", "network_configured"]
+#   provides: ["k3s_cluster_deployed", "helm_installed", "longhorn_installed"]
+#   tags: ["grouped", "k3s", "cluster", "helm", "longhorn"]
+#   estimated_duration: 600
+#   parallel_safe: false
+#   idempotent: true
+#   description: Complete K3s cluster deployment with tools and storage
+#
+#   # ========== INCLUDES ==========
+#   includes:
+#     - "../server/01-install.yml"
+#     - "../tools/01-install-helm.yml"
+#     - "../../../storage/longhorn/1.7/helm/01-install.yml"
+#     - "../cluster/01-get-token.yml"
+#     - "../cluster/02-join-worker.yml"
+
+# ============================================================================
+# GROUPED PLAYBOOK: Deploy Complete K3s Cluster
+# ============================================================================
+# Orchestrates atomic playbooks to deploy a full K3s cluster with tools
+#
+# Steps:
+#   1. Install K3s server on master
+#   2. Install Helm
+#   3. Install Longhorn storage
+#   4. Join worker nodes (if applicable)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     atomic/platform/k3s/1.33/grouped/deploy-full-cluster.yml
+# ============================================================================
+- name: 'Step 1: Install K3s on master node'
+  ansible.builtin.import_playbook: ../server/01-install.yml
+- name: 'Step 2: Install Helm package manager'
+  ansible.builtin.import_playbook: ../tools/01-install-helm.yml
+- name: 'Step 3: Install Longhorn distributed storage'
+  ansible.builtin.import_playbook: ../../../../atomic/storage/longhorn/1.7/helm/01-install.yml
+- name: Cluster Ready
+  hosts: k3s_masters
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Get cluster status
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: cluster_status_info
+    - name: Format cluster status
+      ansible.builtin.set_fact:
+        cluster_status:
+          stdout_lines: "{{ cluster_status_info.resources | map(attribute='metadata.name') | list }}"
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - K3s Cluster Deployment Complete
+          - ==========================================
+          - ✅ K3s server installed
+          - ✅ Helm installed
+          - ✅ Longhorn storage ready
+          - ==========================================
+          - 'Cluster Status:'
+          - '{{ cluster_status.stdout_lines }}'
+          - ==========================================
+          - 'Next: Join workers with cluster/02-join-worker.yml'
+          - ==========================================

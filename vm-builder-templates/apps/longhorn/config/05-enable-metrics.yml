@@ -1,0 +1,105 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/05-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/config/05-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "longhorn"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: []
+#   provides: ["longhorn_metrics_enabled"]
+#   tags: ["longhorn", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus scrape annotations to the Longhorn manager deployment.
+#     Longhorn manager natively exposes metrics on port 9500 at /metrics.
+#     This playbook adds pod-level annotations so Prometheus auto-discovers
+#     and scrapes the metrics endpoint via its kubernetes-pods scrape config.
+#   requires_apps: ["longhorn", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for Longhorn
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    longhorn_namespace: "longhorn-system"
+    app_namespace: "{{ longhorn_namespace }}"
+  tasks:
+    # ========== CHECK IF LONGHORN IS DEPLOYED ==========
+    - name: Check if Longhorn manager pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=longhorn-manager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: longhorn_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Longhorn not deployed
+      ansible.builtin.debug:
+        msg: "Longhorn manager not deployed - skipping metrics configuration"
+      when: longhorn_pod_check.rc != 0 or longhorn_pod_check.stdout | length == 0
+
+    - name: End play if Longhorn not available
+      ansible.builtin.meta: end_play
+      when: longhorn_pod_check.rc != 0 or longhorn_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ANNOTATIONS ALREADY PRESENT ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment longhorn-manager -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to longhorn-manager
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment longhorn-manager -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"9500","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    - name: Annotations already present
+      ansible.builtin.debug:
+        msg: "Prometheus scrape annotations already present on longhorn-manager - skipping"
+      when: current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for longhorn-manager rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/longhorn-manager -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: current_scrape.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Longhorn Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: deployment/longhorn-manager"
+          - "Namespace: {{ app_namespace }}"
+          - "Scrape Port: 9500"
+          - "Metrics Path: /metrics"
+          - "Status: {{ 'Annotations added' if current_scrape.stdout != 'true' else 'Already configured' }}"
+          - "=========================================="

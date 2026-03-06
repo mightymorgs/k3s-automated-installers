@@ -1,0 +1,347 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/00-init-unseal"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/config/00-init-unseal.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["vault_server_deployed"]
+#   provides: ["vault_initialized", "vault_unsealed", "vault_root_token_in_bws"]
+#   tags: ["vault", "init", "unseal", "bws", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Initialize and unseal Vault, write root token and unseal key to BWS inventory
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.vault.root_token"
+#         example: "hvs.xxxxx"
+#       - path: "_state.vault.unseal_key"
+#         example: "base64_key"
+#       - path: "_state.vault.initialized"
+#         example: true
+#       - path: "_state.vault.unsealed"
+#         example: true
+
+- name: Initialize and Unseal Vault
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  vars:
+    vault_namespace: "vault"
+    vault_api_url: "{{ vault_url | default('http://127.0.0.1:' ~ (vault_nodeport | default('30820'))) }}"
+    # BWS inventory secret name, passed via -e inventory_secret_name=...
+
+  tasks:
+    # ========================================
+    # VALIDATE PREREQUISITES
+    # ========================================
+    - name: Verify BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+
+    - name: Verify inventory_secret_name is provided
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name is defined
+          - inventory_secret_name | length > 0
+        fail_msg: "inventory_secret_name must be provided via -e inventory_secret_name=<key>"
+
+    # ========================================
+    # CHECK IF VAULT IS DEPLOYED
+    # ========================================
+    - name: Check if Vault pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ vault_namespace }} -l app.kubernetes.io/name=vault -o jsonpath='{.items[0].status.phase}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: vault_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set Vault pod availability fact
+      ansible.builtin.set_fact:
+        vault_pod_available: "{{ vault_pod_check.rc == 0 and vault_pod_check.stdout == 'Running' }}"
+
+    - name: Skip if Vault pod not running
+      ansible.builtin.debug:
+        msg: "Vault pod not running in namespace {{ vault_namespace }} - skipping init/unseal"
+      when: not vault_pod_available
+
+    - name: End play if Vault pod not available
+      ansible.builtin.meta: end_play
+      when: not vault_pod_available
+
+    # ========================================
+    # GET POD NAME DYNAMICALLY
+    # ========================================
+    - name: Get Vault pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app.kubernetes.io/name=vault \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app=vault \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ========================================
+    # CHECK VAULT SEAL STATUS
+    # ========================================
+    - name: Check Vault seal status
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/seal-status"
+        method: GET
+        status_code: [200, 503]
+        return_content: true
+      register: vault_seal_status
+      retries: 6
+      delay: 10
+      until: vault_seal_status.status in [200, 503]
+
+    - name: Set Vault state facts
+      ansible.builtin.set_fact:
+        vault_initialized: "{{ vault_seal_status.json.initialized | default(false) }}"
+        vault_sealed: "{{ vault_seal_status.json.sealed | default(true) }}"
+
+    - name: Display current Vault state
+      ansible.builtin.debug:
+        msg:
+          - "Vault seal-status:"
+          - "  Initialized: {{ vault_initialized }}"
+          - "  Sealed: {{ vault_sealed }}"
+
+    # ========================================
+    # INITIALIZE VAULT (if not initialized)
+    # ========================================
+    - name: Initialize Vault
+      when: not vault_initialized | bool
+      block:
+        - name: Run vault operator init
+          ansible.builtin.shell: |
+            kubectl exec -n {{ vault_namespace }} {{ app_pod.stdout }} -- \
+              vault operator init -key-shares=1 -key-threshold=1 -format=json
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+          register: vault_init_output
+          no_log: true
+
+        - name: Parse init output
+          ansible.builtin.set_fact:
+            vault_root_token: "{{ (vault_init_output.stdout | from_json).root_token }}"
+            vault_unseal_key: "{{ (vault_init_output.stdout | from_json).unseal_keys_b64[0] }}"
+          no_log: true
+
+        - name: Mark Vault as initialized
+          ansible.builtin.set_fact:
+            vault_initialized: true
+            vault_sealed: true
+            vault_just_initialized: true
+
+        - name: Display init result (redacted)
+          ansible.builtin.debug:
+            msg: "Vault initialized successfully. Root token and unseal key captured."
+
+    # ========================================
+    # UNSEAL VAULT (if sealed)
+    # ========================================
+    - name: Unseal Vault
+      when: vault_sealed | bool
+      block:
+        # If we did not just initialize, we need to retrieve the unseal key from BWS inventory
+        - name: Retrieve unseal key from BWS inventory (existing init)
+          when: vault_just_initialized is not defined or not vault_just_initialized | bool
+          block:
+            - name: Get BWS inventory secret ID
+              ansible.builtin.shell: |
+                bws secret list --output json | \
+                  jq -r --arg k "{{ inventory_secret_name }}" '.[] | select(.key==$k) | .id'
+              environment:
+                BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+              register: bws_inventory_id_lookup
+              changed_when: false
+              no_log: true
+
+            - name: Fail if BWS inventory secret not found
+              ansible.builtin.assert:
+                that:
+                  - bws_inventory_id_lookup.stdout | length > 0
+                fail_msg: >-
+                  BWS inventory secret '{{ inventory_secret_name }}' not found.
+                  Cannot retrieve unseal key for already-initialized Vault.
+
+            - name: Retrieve BWS inventory value
+              ansible.builtin.shell: |
+                bws secret get "{{ bws_inventory_id_lookup.stdout }}" --output json | jq -r '.value'
+              environment:
+                BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+              register: bws_inventory_value
+              changed_when: false
+              no_log: true
+
+            - name: Parse unseal key from inventory
+              ansible.builtin.set_fact:
+                vault_unseal_key: "{{ (bws_inventory_value.stdout | from_json)._state.vault.unseal_key }}"
+              no_log: true
+
+            - name: Fail if unseal key not found in inventory
+              ansible.builtin.assert:
+                that:
+                  - vault_unseal_key is defined
+                  - vault_unseal_key | length > 0
+                fail_msg: >-
+                  Unseal key not found in BWS inventory at _state.vault.unseal_key.
+                  Vault is initialized but sealed, and no unseal key is available.
+
+        - name: Run vault operator unseal
+          ansible.builtin.shell: |
+            kubectl exec -n {{ vault_namespace }} {{ app_pod.stdout }} -- \
+              vault operator unseal "{{ vault_unseal_key }}"
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+          register: vault_unseal_output
+          no_log: true
+
+        - name: Mark Vault as unsealed
+          ansible.builtin.set_fact:
+            vault_sealed: false
+
+        - name: Display unseal result
+          ansible.builtin.debug:
+            msg: "Vault unsealed successfully."
+
+    # ========================================
+    # VERIFY VAULT IS HEALTHY
+    # ========================================
+    - name: Verify Vault is healthy after init/unseal
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/seal-status"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: vault_health_check
+      retries: 3
+      delay: 5
+      until: >-
+        vault_health_check.status == 200 and
+        vault_health_check.json.initialized and
+        not vault_health_check.json.sealed
+
+    - name: Display Vault health
+      ansible.builtin.debug:
+        msg:
+          - "Vault health verified:"
+          - "  Initialized: {{ vault_health_check.json.initialized }}"
+          - "  Sealed: {{ vault_health_check.json.sealed }}"
+          - "  Version: {{ vault_health_check.json.version | default('unknown') }}"
+
+    # ========================================
+    # WRITE ROOT TOKEN AND UNSEAL KEY TO BWS INVENTORY
+    # Only runs after a fresh initialization
+    # ========================================
+    - name: Write Vault credentials to BWS inventory
+      when: vault_just_initialized | default(false) | bool
+      block:
+        - name: Get BWS inventory secret ID for write
+          ansible.builtin.shell: |
+            bws secret list --output json | \
+              jq -r --arg k "{{ inventory_secret_name }}" '.[] | select(.key==$k) | .id'
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_secret_id
+          changed_when: false
+          no_log: true
+
+        - name: Fail if BWS inventory secret not found for write
+          ansible.builtin.assert:
+            that:
+              - bws_secret_id.stdout | length > 0
+            fail_msg: "BWS inventory secret '{{ inventory_secret_name }}' not found. Cannot write Vault credentials."
+
+        - name: Read current BWS inventory value
+          ansible.builtin.shell: |
+            bws secret get "{{ bws_secret_id.stdout }}" --output json | jq -r '.value'
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_current_inventory
+          changed_when: false
+          no_log: true
+
+        - name: Update inventory with Vault credentials
+          ansible.builtin.shell: |
+            UPDATED=$(echo '{{ bws_current_inventory.stdout }}' | jq \
+              --arg token "{{ vault_root_token }}" \
+              --arg key "{{ vault_unseal_key }}" \
+              '
+                ._state.vault.root_token = $token |
+                ._state.vault.unseal_key = $key |
+                ._state.vault.initialized = true |
+                ._state.vault.unsealed = true
+              ')
+            bws secret edit --value "$UPDATED" "{{ bws_secret_id.stdout }}"
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_write_result
+          no_log: true
+
+        - name: Verify BWS inventory was updated
+          ansible.builtin.shell: |
+            bws secret get "{{ bws_secret_id.stdout }}" --output json | \
+              jq -r '.value' | jq '._state.vault.initialized'
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_verify
+          changed_when: false
+          no_log: true
+          failed_when: bws_verify.stdout != 'true'
+
+        - name: Display BWS write result
+          ansible.builtin.debug:
+            msg: "Vault root token and unseal key written to BWS inventory '{{ inventory_secret_name }}'"
+
+    # ========================================
+    # VERIFY ROOT TOKEN WORKS
+    # ========================================
+    - name: Verify root token authentication
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/health"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        status_code: 200
+        return_content: true
+      register: vault_auth_check
+      when: vault_root_token is defined
+      no_log: true
+
+    # ========================================
+    # DISPLAY SUMMARY
+    # ========================================
+    - name: Display init/unseal summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Init/Unseal Complete"
+          - "=========================================="
+          - "Namespace: {{ vault_namespace }}"
+          - "Pod: {{ app_pod.stdout }}"
+          - "API: {{ vault_api_url }}"
+          - "Initialized: {{ vault_health_check.json.initialized }}"
+          - "Sealed: {{ vault_health_check.json.sealed }}"
+          - "Version: {{ vault_health_check.json.version | default('unknown') }}"
+          - "BWS Updated: {{ vault_just_initialized | default(false) }}"
+          - "=========================================="
+          - ""
+          - "Next: Run 01-sync-from-bws.yml to sync secrets into Vault"

@@ -1,0 +1,17 @@
+---
+# Elastic ConfigMap (J2 template)
+# Defaults match k8s-base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ configmap_name | default('elastic-config') }}
+  namespace: {{ app_namespace | default('elastic') }}
+  labels:
+    app: {{ app_name | default('elastic') }}
+    app.kubernetes.io/name: {{ app_name | default('elastic') }}
+data:
+  APP_URL: "{{ app_url | default('http://localhost:' ~ (nodeport | default(30920)) | string) }}"
+  discovery.type: "{{ discovery_type | default('single-node') }}"
+  xpack.security.enabled: "{{ xpack_security_enabled | default('false') }}"
+  ES_JAVA_OPTS: "{{ java_opts | default('-Xms512m -Xmx512m') }}"
+  cluster.name: "{{ cluster_name | default('golden-master') }}"

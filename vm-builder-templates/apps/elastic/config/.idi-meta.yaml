@@ -1,0 +1,27 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-credentials.yml:
+    summary: Configure Elasticsearch credentials and optionally store in BWS
+    source: inferred
+    confidence: medium
+  04-configure-api.yml:
+    summary: Disable xpack security for Elasticsearch in Tailscale mode. Sets xpack.security.enabled=false
+      and xpack.security.http.ssl.enabled=false on the StatefulSet so the Elasticsearch
+      API is accessible without authentication or HTTPS. Tailscale provides the authentication
+      layer.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ elastic_url }}/_cluster/health'
+  05-deploy-exporter.yml:
+    summary: Deploy Prometheus elasticsearch-exporter sidecar container to the Elasticsearch
+      StatefulSet. Connects to localhost:9200 (no auth required when xpack security
+      is disabled via 04-configure-api). Exposes metrics on port 9114 and adds prometheus.io
+      annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- prometheus

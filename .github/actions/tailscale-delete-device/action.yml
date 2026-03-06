@@ -1,0 +1,79 @@
+name: Tailscale Delete Device
+description: Delete Tailscale devices matching a hostname (including suffixed variants)
+
+inputs:
+  hostname:
+    description: Device hostname to match
+    required: true
+  access_token:
+    description: Tailscale API access token
+    required: true
+  match_suffixed:
+    description: Also match hostname-1, hostname-2 Tailscale suffixes
+    required: false
+    default: 'true'
+
+outputs:
+  deleted_count:
+    description: Number of devices deleted
+    value: ${{ steps.delete.outputs.deleted_count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Delete matching Tailscale devices
+      id: delete
+      shell: bash
+      run: |
+        set -euo pipefail
+        HOSTNAME="${{ inputs.hostname }}"
+        AT="${{ inputs.access_token }}"
+        MATCH_SUFFIXED="${{ inputs.match_suffixed }}"
+
+        if [ -z "$HOSTNAME" ]; then
+          echo "No hostname provided, skipping device cleanup"
+          echo "deleted_count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        AUTH_HDR=(-H "Authorization: Bearer $AT")
+        HTTP_CODE=$(curl -sS -o /tmp/ts_devices.json -w "%{http_code}" \
+          "https://api.tailscale.com/api/v2/tailnet/-/devices" "${AUTH_HDR[@]}")
+        DEVICES=$(cat /tmp/ts_devices.json)
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "WARNING: Tailscale API returned HTTP $HTTP_CODE — skipping device cleanup"
+          echo "$DEVICES" | head -5
+          echo "deleted_count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "$MATCH_SUFFIXED" = "true" ]; then
+          MATCH_IDS=$(echo "$DEVICES" | jq -r --arg n "$HOSTNAME" '
+            (.devices // [])[] | select(
+              .hostname==$n or
+              (.hostname | startswith($n + "-")) or
+              (.dnsName//"" | startswith($n + ".")) or
+              (.dnsName//"" | startswith($n))
+            ) | .id')
+        else
+          MATCH_IDS=$(echo "$DEVICES" | jq -r --arg n "$HOSTNAME" '
+            (.devices // [])[] | select(.hostname==$n) | .id')
+        fi
+
+        DELETED=0
+        if [ -n "$MATCH_IDS" ]; then
+          echo "Found Tailscale devices matching '$HOSTNAME'; deleting..."
+          while read -r DID; do
+            [ -z "$DID" ] && continue
+            echo "  Deleting device: $DID"
+            curl -sS -o /dev/null -w "HTTP:%{http_code}\n" -X DELETE \
+              "https://api.tailscale.com/api/v2/device/$DID" "${AUTH_HDR[@]}" || true
+            DELETED=$((DELETED + 1))
+          done <<< "$MATCH_IDS"
+          echo "Deleted $DELETED device(s)"
+        else
+          echo "No Tailscale devices found matching '$HOSTNAME'"
+        fi
+
+        echo "deleted_count=$DELETED" >> "$GITHUB_OUTPUT"

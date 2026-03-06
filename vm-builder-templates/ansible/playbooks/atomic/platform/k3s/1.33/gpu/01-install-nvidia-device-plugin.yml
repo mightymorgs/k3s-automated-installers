@@ -1,0 +1,196 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/gpu/01-install-nvidia-device-plugin"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/gpu/01-install-nvidia-device-plugin.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "gpu-support"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "nvidia-device-plugin"
+#       folder_version: "0.17.0"
+#       supported_versions: ["0.15.0", "0.16.0", "0.17.0"]
+#       version_range: ">=0.15.0 <1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       nvidia_driver: ">=535.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - nvidia_device_plugin: "0.17.0"
+#         k3s: "1.33.5"
+#         nvidia_driver: "580.95.05"
+#         gpu: "RTX 3080 Mobile"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "NVIDIA Device Plugin exposes GPUs to k3s workloads"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "nvidia_driver_installed"]
+#   provides: ["nvidia_device_plugin_installed", "gpu_exposed_to_k8s"]
+#   tags: ["k3s", "nvidia", "gpu", "device-plugin", "daemonset"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Install NVIDIA Device Plugin to expose GPUs to K3s workloads
+- name: Install NVIDIA Device Plugin for K3s
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    kustomize_base: '{{ project_root }}/k8s/nvidia-device-plugin/base'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Installing NVIDIA Device Plugin for K3s
+          - ==========================================
+          - 'Purpose: Expose NVIDIA GPUs to Kubernetes workloads'
+          - 'Version: v0.17.0'
+          - 'Deployment: DaemonSet (runs on all GPU nodes)'
+          - 'Namespace: kube-system'
+          - ''
+          - 'What this enables:'
+          - '  - GPU resource requests (nvidia.com/gpu: 1)'
+          - '  - Automatic GPU scheduling'
+          - '  - Multi-GPU support'
+          - '  - GPU health monitoring'
+          - ==========================================
+    - name: Check if NVIDIA drivers are installed
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_check
+      failed_when: false
+      changed_when: false
+    - name: Display NVIDIA driver status
+      ansible.builtin.debug:
+        msg:
+          - >-
+            {{ 'NVIDIA drivers found ✓'
+            if nvidia_check.rc == 0
+            else 'WARNING: nvidia-smi not found - GPU will not be available!' }}
+          - '{{ nvidia_check.stdout_lines[0:3] if nvidia_check.rc == 0 else [] }}'
+    - name: Fail if NVIDIA drivers not found
+      ansible.builtin.fail:
+        msg: NVIDIA drivers not installed. Install drivers before deploying device
+          plugin.
+      when: nvidia_check.rc != 0
+    - name: Sync K8s manifests to node
+      ansible.posix.synchronize:
+        src: '{{ project_root }}/k8s/'
+        dest: /tmp/neo4j-k8s-deploy/
+        delete: false
+        recursive: true
+    - name: Check if device plugin is already installed
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        name: nvidia-device-plugin-daemonset
+        namespace: kube-system
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: plugin_check
+      failed_when: false
+    - name: Display existing installation status
+      ansible.builtin.debug:
+        msg: >-
+          Device plugin
+          {{ 'already installed - will update'
+          if plugin_check.resources | length > 0
+          else 'not installed - will install' }}
+      when: plugin_check.resources | length > 0
+    - name: Apply NVIDIA device plugin via Kustomize
+      kubernetes.core.k8s:
+        state: present
+        src: /tmp/neo4j-k8s-deploy/nvidia-device-plugin/base
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: kustomize_apply
+    - name: Wait for device plugin DaemonSet to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        name: nvidia-device-plugin-daemonset
+        namespace: kube-system
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        wait: true
+        wait_condition:
+          type: Ready
+        wait_timeout: 300
+      register: rollout_status
+    - name: Get device plugin pod status
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: kube-system
+        label_selectors: [app=nvidia-device-plugin]
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: pod_status_info
+    - name: Format pod status output
+      ansible.builtin.set_fact:
+        pod_status:
+          stdout_lines: "{{ pod_status_info.resources | map(attribute='metadata.name') | list }}"
+    - name: Get nodes with GPU capacity
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: nodes_info
+    - name: Format GPU capacity output
+      ansible.builtin.set_fact:
+        gpu_capacity:
+          stdout_lines: >-
+            {{ nodes_info.resources |
+            map('combine', {'name': 'metadata.name', 'gpu': 'status.capacity.nvidia.com/gpu'
+            }) |
+            list }}
+    - name: Get device plugin logs
+      kubernetes.core.k8s_log:
+        api_version: v1
+        kind: Pod
+        namespace: kube-system
+        label_selectors: [app=nvidia-device-plugin]
+        tail_lines: 20
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: plugin_logs
+      failed_when: false
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - NVIDIA Device Plugin Deployed Successfully!
+          - ==========================================
+          - ''
+          - 'DaemonSet Pods:'
+          - '{{ pod_status.stdout_lines }}'
+          - ''
+          - 'GPU Capacity on Nodes:'
+          - '{{ gpu_capacity.stdout_lines }}'
+          - ''
+          - ==========================================
+          - 'Verify GPU is available:'
+          - '  Check node capacity in status.capacity.nvidia.com/gpu'
+          - ''
+          - 'Test GPU workload:'
+          - '  Deploy a test pod with GPU resource limits'
+          - '  Image: nvidia/cuda:12.0.0-base-ubuntu22.04'
+          - '  Resource: nvidia.com/gpu: 1'
+          - ==========================================
+    - name: Display plugin logs
+      ansible.builtin.debug:
+        msg:
+          - 'Recent Device Plugin Logs:'
+          - "{{ plugin_logs.log if plugin_logs.log is defined else 'No logs available' }}"
+      when: plugin_logs.log is defined

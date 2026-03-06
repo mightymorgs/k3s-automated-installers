@@ -1,0 +1,82 @@
+---
+# K8s RAG MCP Server Deployment (J2 template)
+# Defaults match k8s-base/k8s-rag-mcp-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-rag-mcp
+  namespace: {{ mcp_namespace | default('mcp-servers') }}
+  labels:
+    app.kubernetes.io/name: k8s-rag-mcp
+    app.kubernetes.io/component: ai-operations
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: {{ k8s_rag_mcp_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8s-rag-mcp
+      app.kubernetes.io/component: ai-operations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8s-rag-mcp
+        app.kubernetes.io/component: ai-operations
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      containers:
+        - name: k8s-rag-mcp
+          image: {{ k8s_rag_mcp_image | default('ghcr.io/mightymorgs/k8s-rag-mcp:latest') }}
+          imagePullPolicy: {{ k8s_rag_mcp_image_pull_policy | default('Always') }}
+          env:
+            - name: OLLAMA_BASE_URL
+              value: "{{ k8s_rag_mcp_ollama_url }}"
+            - name: EMBED_MODEL
+              value: "{{ k8s_rag_mcp_embed_model | default('mxbai-embed-large') }}"
+            - name: INDEX_PATH
+              value: "{{ k8s_rag_mcp_index_path | default('/data/index.jsonl') }}"
+          ports:
+            - name: http
+              containerPort: {{ k8s_rag_mcp_port | default(8080) }}
+              protocol: TCP
+          resources:
+            requests:
+              memory: {{ k8s_rag_mcp_memory_request | default('256Mi') }}
+              cpu: {{ k8s_rag_mcp_cpu_request | default('200m') }}
+            limits:
+              memory: {{ k8s_rag_mcp_memory_limit | default('512Mi') }}
+              cpu: {{ k8s_rag_mcp_cpu_limit | default('1000m') }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ k8s_rag_mcp_port | default(8080) }}
+            initialDelaySeconds: {{ k8s_rag_mcp_liveness_initial_delay | default(30) }}
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ k8s_rag_mcp_port | default(8080) }}
+            initialDelaySeconds: {{ k8s_rag_mcp_readiness_initial_delay | default(15) }}
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ k8s_rag_mcp_pvc_name | default('k8s-rag-mcp-data') }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ k8s_rag_mcp_pvc_name | default('k8s-rag-mcp-data') }}
+  namespace: {{ mcp_namespace | default('mcp-servers') }}
+  labels:
+    app.kubernetes.io/name: k8s-rag-mcp
+    app.kubernetes.io/component: ai-operations
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ k8s_rag_mcp_storage_class | default('longhorn') }}
+  resources:
+    requests:
+      storage: {{ k8s_rag_mcp_storage_size | default('5Gi') }}

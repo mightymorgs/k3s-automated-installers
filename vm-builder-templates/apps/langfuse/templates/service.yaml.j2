@@ -1,0 +1,42 @@
+---
+# Langfuse ClusterIP Service (internal access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('langfuse') }}
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ app_name | default('langfuse') }}
+    app.kubernetes.io/name: {{ app_name | default('langfuse') }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ app_name | default('langfuse') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(3000) }}
+      targetPort: {{ container_port | default(3000) }}
+      protocol: TCP
+
+{% if service_type | default('NodePort') == 'NodePort' %}
+---
+# Langfuse NodePort Service (external access via Tailscale IP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('langfuse') }}-nodeport
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ app_name | default('langfuse') }}
+    app.kubernetes.io/name: {{ app_name | default('langfuse') }}
+spec:
+  type: NodePort
+  selector:
+    app: {{ app_name | default('langfuse') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(3000) }}
+      targetPort: {{ container_port | default(3000) }}
+      nodePort: {{ nodeport | default(30901) }}
+      protocol: TCP
+{% endif %}

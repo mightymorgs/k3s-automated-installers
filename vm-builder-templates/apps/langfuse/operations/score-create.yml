@@ -1,0 +1,250 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/langfuse/operations/score-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "langfuse.scores.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/langfuse/operations/score-create.yml"
+#     category: "platform"
+#     subsystem: "langfuse"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "langfuse"
+#       supported_versions: ["2.x", "3.x"]
+#       version_range: ">=2.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - langfuse: "3.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Langfuse API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_langfuse_operations"
+#   dependencies: ["langfuse_deployed", "langfuse_api_keys_available"]
+#   provides: ["langfuse_score_created"]
+#   tags: ["langfuse", "scores", "evaluation", "llm-observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a quality score for a trace or observation in Langfuse. Scores
+#     are used to evaluate LLM outputs (e.g., accuracy, relevance, helpfulness).
+#     Supports numeric, categorical, and boolean score types. This operation
+#     supports idempotency via custom score IDs. Langfuse uses Basic auth
+#     with public key as username and secret key as password.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.langfuse.public_key"
+#         purpose: "Langfuse public key for Basic auth username"
+#       - path: "_state.apps.langfuse.secret_key"
+#         purpose: "Langfuse secret key for Basic auth password"
+#       - path: "_state.apps.langfuse.url"
+#         purpose: "Langfuse base URL"
+#
+#     writes:
+#       - path: "_state.apps.langfuse.scores.total_count"
+#         example: 100
+#       - path: "_state.apps.langfuse.scores.last_score_id"
+#         example: "score-abc123"
+#       - path: "_state.apps.langfuse.scores.last_updated"
+#         example: "2026-01-27T12:00:00Z"
+
+- name: Langfuse - Create Score
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    langfuse_base_url: "{{ langfuse_url }}"
+    langfuse_api_base: "{{ langfuse_base_url }}/api/public"
+    endpoint: "/scores"
+
+    # Required fields (must be provided by caller)
+    # trace_id: Trace ID to score (required)
+    # score_name: Score name e.g. accuracy, relevance (required)
+    # value: Score value (required)
+
+    # Optional fields with defaults
+    score_id: "{{ score_id_input | default('') }}"
+    observation_id: "{{ observation_id_input | default('') }}"
+    comment: "{{ comment_input | default('') }}"
+    data_type: "{{ data_type_input | default('NUMERIC') }}"
+    config_id: "{{ config_id_input | default('') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - trace_id is defined and trace_id | length > 0
+          - score_name is defined and score_name | length > 0
+          - value is defined
+        fail_msg: "Required inputs missing: trace_id, score_name, value"
+        success_msg: "All required inputs validated"
+
+    - name: Validate data_type value
+      ansible.builtin.assert:
+        that:
+          - data_type in ['NUMERIC', 'CATEGORICAL', 'BOOLEAN']
+        fail_msg: "Invalid data_type: must be 'NUMERIC', 'CATEGORICAL', or 'BOOLEAN'"
+        success_msg: "Data type validated: {{ data_type }}"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Langfuse credentials
+      ansible.builtin.set_fact:
+        langfuse_public_key: >-
+          {{ inventory._state.apps.langfuse.public_key | default(langfuse_public_key) }}
+        langfuse_secret_key: >-
+          {{ inventory._state.apps.langfuse.secret_key | default(langfuse_secret_key) }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        langfuse_base_url: "{{ inventory._state.apps.langfuse.url }}"
+        langfuse_api_base: "{{ inventory._state.apps.langfuse.url }}/api/public"
+      when: inventory._state.apps.langfuse.url is defined
+
+    - name: Validate credentials are available
+      ansible.builtin.assert:
+        that:
+          - langfuse_public_key | length > 0
+          - langfuse_secret_key | length > 0
+        fail_msg: "Langfuse credentials not found in BWS _state or environment"
+        success_msg: "Langfuse credentials loaded"
+
+    # ===== STEP 3: Check for Existing Score (Idempotency if ID provided) =====
+    - name: Check if score already exists (when ID provided)
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}{{ endpoint }}/{{ score_id | urlencode }}"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_score
+      no_log: true
+      when: score_id | length > 0
+
+    - name: Set existing score fact
+      ansible.builtin.set_fact:
+        score_exists: "{{ (existing_score.status | default(404)) == 200 }}"
+        existing_score_data: "{{ existing_score.json if (existing_score.status | default(404)) == 200 else {} }}"
+      when: score_id | length > 0
+
+    - name: Set score_exists to false when no ID provided
+      ansible.builtin.set_fact:
+        score_exists: false
+        existing_score_data: {}
+      when: score_id | length == 0
+
+    - name: Skip creation if score exists
+      ansible.builtin.debug:
+        msg: "Score '{{ score_id }}' already exists for trace {{ trace_id }}"
+      when: score_exists
+
+    # ===== STEP 4: Build Score Payload =====
+    - name: Build score creation payload
+      ansible.builtin.set_fact:
+        score_payload:
+          traceId: "{{ trace_id }}"
+          name: "{{ score_name }}"
+          value: "{{ value }}"
+          id: "{{ score_id if score_id | length > 0 else omit }}"
+          observationId: "{{ observation_id if observation_id | length > 0 else omit }}"
+          comment: "{{ comment if comment | length > 0 else omit }}"
+          dataType: "{{ data_type }}"
+          configId: "{{ config_id if config_id | length > 0 else omit }}"
+      when: not score_exists
+      no_log: true
+
+    # ===== STEP 5: Create Score =====
+    - name: Create score in Langfuse
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}{{ endpoint }}"
+        method: POST
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        body_format: json
+        body: "{{ score_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not score_exists
+
+    - name: Set score result from creation or existing
+      ansible.builtin.set_fact:
+        created_score_id: >-
+          {{ existing_score_data.id if score_exists else create_result.json.id }}
+      no_log: false
+
+    # ===== STEP 6: Write Result to BWS._state =====
+    - name: Update BWS inventory with score info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Merge score info into _state.apps.langfuse.scores
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg score_id "{{ created_score_id }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.langfuse == null then ._state.apps.langfuse = {} else . end |
+          if ._state.apps.langfuse.scores == null then ._state.apps.langfuse.scores = {} else . end |
+          ._state.apps.langfuse.scores.last_score_id = $score_id |
+          ._state.apps.langfuse.scores.last_updated = $timestamp |
+          ._state.apps.langfuse.scores.total_count = (._state.apps.langfuse.scores.total_count // 0) + 1
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not score_exists
+
+    # ===== STEP 7: Output Result =====
+    - name: Display score creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if score_exists else 'created' }}"
+          score_id: "{{ created_score_id }}"
+          trace_id: "{{ trace_id }}"
+          score_name: "{{ score_name }}"
+          value: "{{ value }}"
+          data_type: "{{ data_type }}"
+          observation_id: "{{ observation_id if observation_id | length > 0 else 'N/A' }}"

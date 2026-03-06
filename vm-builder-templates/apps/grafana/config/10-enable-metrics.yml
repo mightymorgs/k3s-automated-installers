@@ -1,0 +1,119 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/10-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/10-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["grafana_deployed"]
+#   provides: ["grafana_metrics_enabled"]
+#   tags: ["grafana", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Prometheus metrics scraping for Grafana. Sets the
+#     GF_METRICS_ENABLED=true environment variable to activate the
+#     built-in /metrics endpoint on port 3000, then adds pod-level
+#     Prometheus scrape annotations so Prometheus auto-discovers and
+#     scrapes the metrics endpoint via its kubernetes-pods scrape config.
+#   requires_apps: ["grafana", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+  tasks:
+    # ========== CHECK IF GRAFANA IS DEPLOYED ==========
+    - name: Check if Grafana pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=grafana --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: grafana_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Grafana not deployed
+      ansible.builtin.debug:
+        msg: "Grafana not deployed - skipping metrics configuration"
+      when: grafana_pod_check.rc != 0 or grafana_pod_check.stdout | length == 0
+
+    - name: End play if Grafana not available
+      ansible.builtin.meta: end_play
+      when: grafana_pod_check.rc != 0 or grafana_pod_check.stdout | length == 0
+
+    # ========== ENABLE METRICS VIA ENVIRONMENT VARIABLE ==========
+    # Grafana requires GF_METRICS_ENABLED=true to expose the /metrics
+    # endpoint. Without this, the endpoint returns 404.
+    - name: Enable Grafana metrics via environment variable
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env deployment/grafana -n {{ app_namespace }}
+          GF_METRICS_ENABLED=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: env_result
+      changed_when: "'updated' in env_result.stdout"
+
+    # ========== CHECK IF ANNOTATIONS ALREADY PRESENT ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment grafana -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to grafana
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment grafana -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"3000","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    - name: Annotations already present
+      ansible.builtin.debug:
+        msg: "Prometheus scrape annotations already present on grafana - skipping patch"
+      when: current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Grafana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/grafana -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: deployment/grafana"
+          - "Namespace: {{ app_namespace }}"
+          - "GF_METRICS_ENABLED: true {{ '(set)' if env_result.changed else '(already set)' }}"
+          - "Scrape Port: 3000"
+          - "Metrics Path: /metrics"
+          - "Annotations: {{ 'added' if current_scrape.stdout != 'true' else 'already configured' }}"
+          - "=========================================="

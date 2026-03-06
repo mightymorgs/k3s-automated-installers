@@ -1,0 +1,273 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/storage/01-install-longhorn"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/storage/01-install-longhorn.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "storage"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       folder_version: "1.33"
+#       supported_versions: ["1.6.x", "1.7.x"]
+#       version_range: ">=1.6.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - longhorn: "1.7.0"
+#         k3s: "1.34.3"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-11"
+#         notes: "Uses kubectl instead of kubernetes Python module"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["longhorn_installed", "storage_class_available"]
+#   tags: ["longhorn", "storage", "k3s", "golden-master"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: Install Longhorn distributed storage on K3s cluster
+
+- name: Install Longhorn Storage
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: true
+  become: true
+
+  vars:
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    longhorn_version: "1.7.0"
+    longhorn_namespace: longhorn-system
+    longhorn_manifest_url: >-
+      https://raw.githubusercontent.com/longhorn/longhorn/v{{ longhorn_version }}/deploy/longhorn.yaml
+
+  tasks:
+    - name: Check if Longhorn namespace exists
+      ansible.builtin.command: kubectl get namespace {{ longhorn_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: longhorn_ns
+      changed_when: false
+      failed_when: false
+
+    - name: Install open-iscsi (Longhorn dependency)
+      ansible.builtin.apt:
+        name:
+          - open-iscsi
+          - nfs-common
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Enable iscsid service
+      ansible.builtin.systemd:
+        name: iscsid
+        state: started
+        enabled: true
+
+    - name: Download Longhorn manifest
+      ansible.builtin.get_url:
+        url: "{{ longhorn_manifest_url }}"
+        dest: /tmp/longhorn.yaml
+        mode: "0644"
+      when: longhorn_ns.rc != 0
+
+    - name: Apply Longhorn manifest
+      ansible.builtin.command: kubectl apply -f /tmp/longhorn.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: longhorn_ns.rc != 0
+      register: longhorn_apply
+      changed_when: "'created' in longhorn_apply.stdout or 'configured' in longhorn_apply.stdout"
+
+    - name: Wait for Longhorn manager pods to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ longhorn_namespace }} wait
+        --for=condition=ready pod
+        -l app=longhorn-manager
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: longhorn_wait
+      changed_when: false
+      retries: 3
+      delay: 30
+      until: longhorn_wait.rc == 0
+
+    - name: Verify Longhorn StorageClass exists
+      ansible.builtin.command: kubectl get storageclass longhorn
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: longhorn_sc
+      changed_when: false
+      retries: 10
+      delay: 10
+      until: longhorn_sc.rc == 0
+
+    - name: Get Longhorn pod count
+      ansible.builtin.command: >-
+        kubectl -n {{ longhorn_namespace }} get pods -l app=longhorn-manager
+        -o jsonpath='{.items[*].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: longhorn_pods
+      changed_when: false
+
+    - name: Set Longhorn replica count to 1 for single-node clusters
+      ansible.builtin.command: >-
+        kubectl -n {{ longhorn_namespace }} patch settings default-replica-count
+        --type=merge -p '{"value": "1"}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: replica_patch
+      changed_when: "'patched' in replica_patch.stdout"
+      failed_when: false
+
+    - name: Set storage over-provisioning to 300% for single-node
+      ansible.builtin.command: >-
+        kubectl -n {{ longhorn_namespace }} patch settings storage-over-provisioning-percentage
+        --type=merge -p '{"value": "300"}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: overprov_patch
+      changed_when: "'patched' in overprov_patch.stdout"
+      failed_when: false
+
+    - name: Set reserved storage to 15% for single-node
+      ansible.builtin.command: >-
+        kubectl -n {{ longhorn_namespace }} patch settings storage-reserved-percentage-for-default-disk
+        --type=merge -p '{"value": "15"}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: reserved_patch
+      changed_when: "'patched' in reserved_patch.stdout"
+      failed_when: false
+
+    - name: Set minimal available storage to 10% for single-node
+      ansible.builtin.command: >-
+        kubectl -n {{ longhorn_namespace }} patch settings storage-minimal-available-percentage
+        --type=merge -p '{"value": "10"}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: minavail_patch
+      changed_when: "'patched' in minavail_patch.stdout"
+      failed_when: false
+
+    - name: Reduce disk reserved storage on existing default disk
+      ansible.builtin.shell: |
+        set -o pipefail
+        NODE=$(kubectl get nodes \
+          -o jsonpath='{.items[0].metadata.name}')
+        DISK=$(kubectl get nodes.longhorn.io "$NODE" \
+          -n {{ longhorn_namespace }} \
+          -o jsonpath='{.spec.disks}' \
+          | python3 -c \
+          'import json,sys; d=json.load(sys.stdin); print(list(d.keys())[0])')
+        MAX=$(kubectl get nodes.longhorn.io "$NODE" \
+          -n {{ longhorn_namespace }} \
+          -o jsonpath="{.status.diskStatus.$DISK.storageMaximum}")
+        RESERVED=$(python3 -c "print(int($MAX * 0.15))")
+        kubectl -n {{ longhorn_namespace }} \
+          patch nodes.longhorn.io "$NODE" --type=json \
+          -p="[{\"op\": \"replace\", \
+          \"path\": \"/spec/disks/$DISK/storageReserved\", \
+          \"value\": $RESERVED}]"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: disk_reserved
+      changed_when: "'patched' in disk_reserved.stdout"
+      failed_when: false
+
+    - name: Check current StorageClass replica count
+      ansible.builtin.shell: >-
+        kubectl get sc longhorn -o jsonpath='{.parameters.numberOfReplicas}' 2>/dev/null || echo "missing"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: current_sc_replicas
+      changed_when: false
+      failed_when: false
+
+    - name: Patch longhorn-storageclass ConfigMap to use 1 replica
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl get cm longhorn-storageclass \
+          -n {{ longhorn_namespace }} -o json | \
+          jq '.data["storageclass.yaml"]
+          |= gsub("numberOfReplicas: \"3\"";
+          "numberOfReplicas: \"1\"")' | \
+          kubectl apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: cm_patch
+      changed_when: "'configured' in cm_patch.stdout"
+      failed_when: false
+      when: current_sc_replicas.stdout != "1"
+
+    - name: Recreate longhorn StorageClass with 1 replica
+      ansible.builtin.shell: |
+        kubectl scale deployment longhorn-driver-deployer -n {{ longhorn_namespace }} --replicas=0
+        sleep 3
+        kubectl delete sc longhorn --wait=false 2>/dev/null || true
+        sleep 3
+        kubectl scale deployment longhorn-driver-deployer -n {{ longhorn_namespace }} --replicas=1
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: sc_recreate
+      changed_when: true
+      failed_when: false
+      when: current_sc_replicas.stdout != "1"
+
+    - name: Wait for Longhorn StorageClass to exist
+      ansible.builtin.command: kubectl get sc longhorn
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: sc_wait
+      retries: 30
+      delay: 5
+      until: sc_wait.rc == 0
+      changed_when: false
+
+    - name: Set Longhorn as default storage class
+      ansible.builtin.command: >-
+        kubectl patch storageclass longhorn
+        -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: default_sc
+      changed_when: "'patched' in default_sc.stdout"
+
+    - name: Remove default annotation from local-path storage class
+      ansible.builtin.command: >-
+        kubectl patch storageclass local-path
+        -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "false"}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: local_path_patch
+      changed_when: "'patched' in local_path_patch.stdout"
+      failed_when: false
+
+    - name: Display Longhorn installation status
+      ansible.builtin.debug:
+        msg:
+          - "Longhorn installed successfully"
+          - "Namespace: {{ longhorn_namespace }}"
+          - "StorageClass: longhorn (DEFAULT)"
+          - "Manager pods: {{ longhorn_pods.stdout.split() | length }}"
+          - "Replica count: 1 (single-node mode)"

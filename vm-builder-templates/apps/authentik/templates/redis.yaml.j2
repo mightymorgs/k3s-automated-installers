@@ -1,0 +1,65 @@
+---
+# Redis for Authentik
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ redis_host | default('authentik-redis') }}
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app.kubernetes.io/name: {{ redis_host | default('authentik-redis') }}
+    app.kubernetes.io/part-of: {{ app_name | default('authentik') }}
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  replicas: {{ redis_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ redis_host | default('authentik-redis') }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ redis_host | default('authentik-redis') }}
+        app.kubernetes.io/part-of: {{ app_name | default('authentik') }}
+    spec:
+      containers:
+        - name: redis
+          image: {{ redis_image | default('redis:7-alpine') }}
+          args: ["--save", "60", "1", "--loglevel", "warning"]
+          ports:
+            - name: redis
+              containerPort: {{ redis_port | default(6379) }}
+              protocol: TCP
+          resources:
+            requests:
+              cpu: {{ redis_cpu_request | default('50m') }}
+              memory: {{ redis_memory_request | default('64Mi') }}
+            limits:
+              cpu: {{ redis_cpu_limit | default('250m') }}
+              memory: {{ redis_memory_limit | default('256Mi') }}
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: {{ redis_liveness_initial_delay | default(10) }}
+            periodSeconds: {{ redis_liveness_period | default(10) }}
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: {{ redis_readiness_initial_delay | default(5) }}
+            periodSeconds: {{ redis_readiness_period | default(5) }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ redis_host | default('authentik-redis') }}
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app.kubernetes.io/name: {{ redis_host | default('authentik-redis') }}
+    app.kubernetes.io/part-of: {{ app_name | default('authentik') }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ redis_host | default('authentik-redis') }}
+  ports:
+    - name: redis
+      port: {{ redis_port | default(6379) }}
+      targetPort: redis
+      protocol: TCP

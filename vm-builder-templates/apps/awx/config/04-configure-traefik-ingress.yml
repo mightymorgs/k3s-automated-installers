@@ -1,0 +1,227 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/04-configure-traefik-ingress"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/config/04-configure-traefik-ingress.yml"
+#     category: "apps"
+#     subsystem: "awx"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260205_awx_traefik_sso"
+#   dependencies: ["awx_deployed", "authentik_deployed", "awx_sso_configured", "traefik_deployed"]
+#   requires_apps: ["awx", "traefik", "authentik"]
+#   provides: ["awx_ingress_configured", "awx_sso_integrated"]
+#   tags: ["awx", "traefik", "ingress", "sso", "authentik", "oauth2"]
+#   estimated_duration: 90
+#   parallel_safe: false
+#   idempotent: true
+#   description: Deploy AWX with Traefik IngressRoute and Authentik OAuth2 SSO
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.authentik.url"
+#       - path: "_state.authentik.token"
+#       - path: "_state.apps.awx.client_id"
+#       - path: "_state.apps.awx.client_secret"
+#     writes:
+#       - path: "_state.apps.awx.ingress_configured"
+#         example: true
+#       - path: "_state.apps.awx.external_url"
+#         example: "https://awx.example.com"
+
+- name: Configure AWX with Traefik Ingress and Authentik OAuth2 SSO
+  hosts: localhost
+  gather_facts: false
+  vars:
+    awx_namespace: "awx"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    domain: "{{ ingress_domain }}"
+    awx_service_name: "awx-service"
+    awx_service_port: 80
+    authentik_admin_token: "{{ authentik_admin_token | default('') }}"
+
+  tasks:
+    # ========== FAIL-FAST: REQUIRED BWS VARS ==========
+    - name: Fail if ingress_domain not provided by BWS
+      ansible.builtin.fail:
+        msg: "ingress_domain must be provided via BWS extra-vars — no fake defaults"
+      when: ingress_domain is not defined or ingress_domain | length == 0
+
+    - name: Fail if authentik_url not provided by BWS
+      ansible.builtin.fail:
+        msg: "authentik_url must be provided via BWS extra-vars — no fake defaults"
+      when: authentik_url is not defined or authentik_url | length == 0
+
+    - name: Fail if awx_client_id not provided by BWS
+      ansible.builtin.fail:
+        msg: "awx_client_id must be provided via BWS extra-vars — no fake defaults"
+      when: awx_client_id is not defined or awx_client_id | length == 0
+
+    - name: Fail if awx_client_secret not provided by BWS
+      ansible.builtin.fail:
+        msg: "awx_client_secret must be provided via BWS extra-vars — no fake defaults"
+      when: awx_client_secret is not defined or awx_client_secret | length == 0
+
+    # ========== SKIP IF AUTHENTIK NOT INSTALLED ==========
+    - name: Skip if Authentik is not installed on this VM
+      when: authentik_admin_token | default('') | length == 0
+      block:
+        - name: "authentik not installed — skipping Traefik ingress + SSO configuration"
+          ansible.builtin.debug:
+            msg: "authentik_admin_token not provided (authentik not installed on this VM) — skipping ingress + SSO configuration"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    # ========== 1. CREATE AUTHENTIK FORWARD AUTH MIDDLEWARE ==========
+    - name: Create Traefik Middleware for Authentik Forward Auth
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: traefik.io/v1alpha1
+          kind: Middleware
+          metadata:
+            name: authentik-forwardauth
+            namespace: {{ awx_namespace }}
+          spec:
+            forwardAuth:
+              address: "{{ authentik_url }}/outpost.goauthentik.io/auth/traefik"
+              trustForwardHeader: true
+              authResponseHeaders:
+                - X-authentik-username
+                - X-authentik-groups
+                - X-authentik-email
+                - X-authentik-name
+                - X-authentik-uid
+                - X-authentik-jwt
+                - X-authentik-meta-jwks
+                - X-authentik-meta-outpost
+                - X-authentik-meta-provider
+                - X-authentik-meta-app
+                - X-authentik-meta-version
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: forwardauth_middleware
+      changed_when: "'created' in forwardauth_middleware.stdout or 'configured' in forwardauth_middleware.stdout"
+
+    # ========== 2. CREATE TLS CERTIFICATE (CERT-MANAGER) ==========
+    - name: Create Certificate for AWX
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: awx-tls
+            namespace: {{ awx_namespace }}
+          spec:
+            secretName: awx-tls-secret
+            issuerRef:
+              name: letsencrypt-prod
+              kind: ClusterIssuer
+            dnsNames:
+              - "awx.{{ domain }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: awx_certificate
+      changed_when: "'created' in awx_certificate.stdout or 'configured' in awx_certificate.stdout"
+
+    # ========== 3. CREATE TRAEFIK INGRESSROUTE ==========
+    - name: Create Traefik IngressRoute for AWX with SSO
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+        stdin: |
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: awx-ingress
+            namespace: {{ awx_namespace }}
+            annotations:
+              kubernetes.io/ingress.class: traefik
+          spec:
+            entryPoints:
+              - websecure
+            routes:
+              - match: "Host(`awx.{{ domain }}`)"
+                kind: Rule
+                middlewares:
+                  - name: authentik-forwardauth
+                    namespace: {{ awx_namespace }}
+                services:
+                  - name: {{ awx_service_name }}
+                    port: {{ awx_service_port }}
+              - match: "Host(`awx.{{ domain }}`) && PathPrefix(`/oauth2`)"
+                kind: Rule
+                services:
+                  - name: {{ awx_service_name }}
+                    port: {{ awx_service_port }}
+            tls:
+              secretName: awx-tls-secret
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: awx_ingressroute
+      changed_when: "'created' in awx_ingressroute.stdout or 'configured' in awx_ingressroute.stdout"
+
+    # ========== 4. CONFIGURE AWX OAUTH2 SETTINGS ==========
+    - name: Get AWX admin token
+      ansible.builtin.uri:
+        url: "https://awx.{{ domain }}/api/v2/tokens/"
+        method: POST
+        user: admin
+        password: "{{ awx_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          description: "Ansible automation token"
+          scope: "write"
+        status_code: [200, 201]
+        validate_certs: false
+      register: awx_token
+      ignore_errors: true
+
+    - name: Configure AWX OAuth2 authentication settings
+      ansible.builtin.uri:
+        url: "https://awx.{{ domain }}/api/v2/settings/authentication/oidc/"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ awx_token.json.token | default('') }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          SOCIAL_AUTH_OIDC_ENABLED: true
+          SOCIAL_AUTH_OIDC_KEY: "{{ awx_client_id }}"
+          SOCIAL_AUTH_OIDC_SECRET: "{{ awx_client_secret }}"
+          SOCIAL_AUTH_OIDC_OIDC_ENDPOINT: "{{ authentik_url }}/application/o/awx/"
+          SOCIAL_AUTH_OIDC_VERIFY_SSL: true
+        status_code: [200, 204]
+        validate_certs: false
+      when: awx_token.json.token is defined
+      ignore_errors: true
+
+    # ========== 5. DISPLAY RESULT ==========
+    - name: Display AWX deployment result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "AWX Deployment with Traefik + SSO Complete"
+          - "=========================================="
+          - "External URL: https://awx.{{ domain }}"
+          - "Namespace: {{ awx_namespace }}"
+          - "Service: {{ awx_service_name }}:{{ awx_service_port }}"
+          - "=========================================="
+          - "SSO Configuration:"
+          - "  Provider: Authentik OAuth2"
+          - "  Client ID: {{ awx_client_id }}"
+          - "  OIDC Endpoint: {{ authentik_url }}/application/o/awx/"
+          - "=========================================="
+          - "Traefik Components Created:"
+          - "  - Middleware: authentik-forwardauth"
+          - "  - IngressRoute: awx-ingress"
+          - "  - TLS Certificate: awx-tls"
+          - "=========================================="

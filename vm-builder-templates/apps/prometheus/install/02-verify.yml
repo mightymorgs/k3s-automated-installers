@@ -1,0 +1,142 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prometheus/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prometheus/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "prometheus"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "prometheus"
+#       supported_versions: ["latest", "2.45.x", "2.x"]
+#       version_range: ">=2.40.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - prometheus: "latest"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-03-05"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260305_golden_master_fixes"
+#   dependencies: ["prometheus_deployed"]
+#   provides: ["prometheus_verified", "prometheus_healthy"]
+#   tags: ["prometheus", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify Prometheus deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.prometheus.verified"
+#         example: true
+
+- name: Verify Prometheus Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: prometheus
+    app_namespace: "observability"
+    container_port: 9090
+    health_path: "/-/healthy"
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. POD PHASE CHECK ==========
+    - name: Check pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.rc != 0 or pod_phase.stdout != 'Running'
+      retries: 6
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_phase.rc == 0 and pod_phase.stdout == 'Running'
+
+    # ========== 2. GET READY POD NAME ==========
+    - name: Get ready pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 3. HEALTH CHECK (block/rescue) ==========
+    - name: Health check block
+      block:
+        - name: Test health endpoint (auto-detect curl/wget)
+          ansible.builtin.command: >-
+            kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} --
+            /bin/sh -c "command -v curl >/dev/null
+            && curl -sf --max-time {{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}
+            || wget -q -O - --timeout={{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}"
+          register: health_check
+          changed_when: false
+          failed_when: health_check.rc != 0
+          retries: 3
+          delay: "{{ retry_interval_seconds }}"
+          until: health_check.rc == 0
+
+      rescue:
+        - name: Capture failure diagnostics
+          ansible.builtin.set_fact:
+            health_failure:
+              app: "{{ app_name }}"
+              namespace: "{{ app_namespace }}"
+              pod: "{{ app_pod.stdout | default('unknown') }}"
+              endpoint: "http://127.0.0.1:{{ container_port }}{{ health_path }}"
+              rc: "{{ health_check.rc | default('N/A') }}"
+              stderr: "{{ health_check.stderr | default('') | truncate(500) }}"
+              stdout: "{{ health_check.stdout | default('') | truncate(500) }}"
+
+        - name: Fail with diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Health check failed for {{ app_name }}.
+              Diagnostics: {{ health_failure | to_nice_json }}
+
+    # ========== 4. SERVICE EXISTENCE CHECK ==========
+    - name: Check service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc {{ app_name }}
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 5. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prometheus Verification Summary"
+          - "=========================================="
+          - "Pod Phase:      {{ pod_phase.stdout | default('UNKNOWN') }} -- {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "Ready Pod:      {{ app_pod.stdout | default('NONE') }} -- {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Health Check:   {{ health_path }} -- {{ 'OK' if health_check.rc == 0 else 'FAILED' }}"
+          - "Service:        {{ service_check.stdout | default('NONE') }} -- {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

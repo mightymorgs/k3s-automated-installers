@@ -1,0 +1,387 @@
+---
+# playbook_metadata:
+#   id: "atomic/cloudflare/certificates/create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_schema: "catalog/schemas/cloudflare.json"
+#   operation_id: "cloudflare.certificates.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/cloudflare/operations/certificates-create.yml"
+#     category: "platform"
+#     subsystem: "cloudflare"
+#     role: "operations"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflare-api"
+#       supported_versions: ["v4"]
+#       version_range: ">=v4"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - cloudflare_api: "v4"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Creates origin certificates via Cloudflare Origin CA API"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_cloudflare_ops"
+#   dependencies: ["cloudflare_api_token_available"]
+#   provides: ["origin_cert_created", "tls_secret_created"]
+#   tags: ["cloudflare", "origin-ca", "certificates", "tls", "phase5"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: false
+#   description: >-
+#     Create a Cloudflare Origin CA certificate for a specific hostname.
+#     Generates a CSR, requests the certificate via Cloudflare API,
+#     stores the result in a Kubernetes TLS secret, and writes
+#     certificate metadata to BWS._state.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "inventory/shared/secrets/cloudflare/apitoken"
+#         purpose: "Cloudflare API authentication (requires Origin CA scope)"
+#
+#     writes:
+#       - path: "_state.ingress.origin_certs.{{ app_name }}"
+#         example:
+#           cert_id: "abc123def456"
+#           hostname: "grafana.example.com"
+#           wildcard: "*.grafana.example.com"
+#           expires_on: "2036-01-27T00:00:00Z"
+#           request_type: "origin-rsa"
+#           secret_name: "grafana-origin-cert"
+#           secret_namespace: "cert-manager"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Create Origin Certificate"
+#     icon: "certificate"
+#     category: "Security"
+#     description: "Generate Cloudflare Origin CA certificate for app ingress"
+#     docs_url: "https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/"
+
+- name: Cloudflare - Create Origin Certificate
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  connection: local
+
+  vars:
+    # Cloudflare API configuration
+    cloudflare_api_url: "https://api.cloudflare.com/client/v4"
+
+    # Required inputs (must be provided)
+    # hostname: The base hostname for the certificate (e.g., "grafana.example.com")
+    # app_name: Application identifier for state tracking (e.g., "grafana")
+    # namespace: Kubernetes namespace for the TLS secret
+
+    # Optional inputs with defaults
+    validity_days: "{{ validity_days | default(5475) }}"  # ~15 years (max allowed)
+    request_type: "origin-rsa"  # origin-rsa, origin-ecc, keyless-certificate
+    include_wildcard: "{{ include_wildcard | default(true) }}"
+    secret_name: "{{ secret_name | default(app_name + '-origin-cert') }}"
+
+    # BWS configuration
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+    inventory_secret_name: >-
+      {{ vm_hostname | default(lookup('env', 'VM_INVENTORY_SECRET') |
+         default('homelab-k3s-master-staging-mediastack-libvirt-latest')) }}
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ===== INPUT VALIDATION =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - hostname is defined
+          - hostname | length > 0
+          - app_name is defined
+          - app_name | length > 0
+          - namespace is defined
+          - namespace | length > 0
+        fail_msg: |
+          Required variables not provided. Usage:
+            ansible-playbook certificates-create.yml \
+              -e hostname=grafana.example.com \
+              -e app_name=grafana \
+              -e namespace=grafana
+
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - bws_access_token is defined
+          - bws_access_token | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable is not set"
+
+    - name: Validate request_type
+      ansible.builtin.assert:
+        that:
+          - request_type in ['origin-rsa', 'origin-ecc', 'keyless-certificate']
+        fail_msg: "request_type must be one of: origin-rsa, origin-ecc, keyless-certificate"
+
+    - name: Validate validity_days
+      ansible.builtin.assert:
+        that:
+          - validity_days | int in [7, 30, 90, 365, 730, 1095, 5475]
+        fail_msg: "validity_days must be one of: 7, 30, 90, 365, 730, 1095, 5475"
+
+    - name: Display playbook information
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Cloudflare Origin Certificate Creation"
+          - "=========================================="
+          - "App Name: {{ app_name }}"
+          - "Hostname: {{ hostname }}"
+          - "Include Wildcard: {{ include_wildcard }}"
+          - "Validity: {{ validity_days }} days"
+          - "Request Type: {{ request_type }}"
+          - "Secret: {{ namespace }}/{{ secret_name }}"
+          - "=========================================="
+
+    # ===== STEP 1: Fetch Cloudflare API Token =====
+    - name: Fetch Cloudflare API token from BWS
+      ansible.builtin.shell: |
+        bws secret get "inventory/shared/secrets/cloudflare/apitoken" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+      register: bws_cloudflare_token_raw
+      changed_when: false
+      no_log: true
+
+    - name: Parse Cloudflare API token
+      ansible.builtin.set_fact:
+        cloudflare_token: "{{ bws_cloudflare_token_raw.stdout | from_json | json_query('value') }}"
+      no_log: true
+
+    - name: Validate API token retrieved
+      ansible.builtin.assert:
+        that:
+          - cloudflare_token is defined
+          - cloudflare_token | length > 0
+        fail_msg: "Cloudflare API token not found in BWS at inventory/shared/secrets/cloudflare/apitoken"
+
+    # ===== STEP 2: Generate CSR =====
+    - name: Create temporary directory for CSR generation
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: cloudflare_csr
+      register: temp_dir
+
+    - name: Generate private key
+      ansible.builtin.shell: |
+        openssl genrsa -out "{{ temp_dir.path }}/private.key" 2048
+      args:
+        creates: "{{ temp_dir.path }}/private.key"
+      register: key_result
+      no_log: true
+
+    - name: Build hostnames list
+      ansible.builtin.set_fact:
+        cert_hostnames: >-
+          {{
+            [hostname] +
+            (['*.' + hostname] if include_wildcard | bool else [])
+          }}
+
+    - name: Generate CSR
+      ansible.builtin.shell: |
+        openssl req -new \
+          -key "{{ temp_dir.path }}/private.key" \
+          -out "{{ temp_dir.path }}/request.csr" \
+          -subj "/CN={{ hostname }}" \
+          -addext "subjectAltName=DNS:{{ cert_hostnames | join(',DNS:') }}"
+      args:
+        creates: "{{ temp_dir.path }}/request.csr"
+      register: csr_result
+      no_log: true
+
+    - name: Read generated CSR
+      ansible.builtin.slurp:
+        src: "{{ temp_dir.path }}/request.csr"
+      register: csr_content
+      no_log: true
+
+    - name: Read private key
+      ansible.builtin.slurp:
+        src: "{{ temp_dir.path }}/private.key"
+      register: private_key_content
+      no_log: true
+
+    # ===== STEP 3: Call Cloudflare API =====
+    - name: Create origin certificate via Cloudflare API
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api_url }}/certificates"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          csr: "{{ csr_content.content | b64decode }}"
+          hostnames: "{{ cert_hostnames }}"
+          request_type: "{{ request_type }}"
+          requested_validity: "{{ validity_days | int }}"
+        status_code: [200, 201]
+        return_content: true
+      register: cert_response
+      no_log: true
+
+    - name: Validate API response
+      ansible.builtin.assert:
+        that:
+          - cert_response.json.success | default(false)
+          - cert_response.json.result.certificate is defined
+          - cert_response.json.result.id is defined
+        fail_msg: |
+          Cloudflare API returned an error:
+          {{ cert_response.json.errors | default(['Unknown error']) | to_nice_json }}
+
+    - name: Extract certificate data
+      ansible.builtin.set_fact:
+        origin_cert: "{{ cert_response.json.result.certificate }}"
+        origin_cert_id: "{{ cert_response.json.result.id }}"
+        origin_cert_expires: "{{ cert_response.json.result.expires_on | default('') }}"
+      no_log: true
+
+    - name: Display certificate creation result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Origin Certificate Created Successfully"
+          - "=========================================="
+          - "Certificate ID: {{ origin_cert_id }}"
+          - "Hostnames: {{ cert_hostnames | join(', ') }}"
+          - "Expires: {{ origin_cert_expires }}"
+          - "=========================================="
+
+    # ===== STEP 4: Create Kubernetes TLS Secret =====
+    - name: Ensure namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ namespace }}"
+        state: present
+
+    - name: Create Kubernetes TLS secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ secret_name }}"
+            namespace: "{{ namespace }}"
+            labels:
+              app: "{{ app_name }}"
+              cert-type: "cloudflare-origin"
+              cert-id: "{{ origin_cert_id }}"
+            annotations:
+              cloudflare.com/certificate-id: "{{ origin_cert_id }}"
+              cloudflare.com/expires-on: "{{ origin_cert_expires }}"
+              cloudflare.com/hostnames: "{{ cert_hostnames | join(',') }}"
+          type: kubernetes.io/tls
+          data:
+            tls.crt: "{{ origin_cert | b64encode }}"
+            tls.key: "{{ private_key_content.content }}"
+      no_log: true
+
+    - name: Display secret creation result
+      ansible.builtin.debug:
+        msg:
+          - "TLS Secret created: {{ namespace }}/{{ secret_name }}"
+
+    # ===== STEP 5: Update BWS._state =====
+    - name: Fetch current VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+      register: bws_inventory_raw
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory and prepare state update
+      ansible.builtin.set_fact:
+        bws_inventory: "{{ bws_inventory_raw.stdout | from_json }}"
+        cert_state_entry:
+          cert_id: "{{ origin_cert_id }}"
+          hostname: "{{ hostname }}"
+          wildcard: "{{ '*.' + hostname if include_wildcard | bool else '' }}"
+          hostnames: "{{ cert_hostnames }}"
+          expires_on: "{{ origin_cert_expires }}"
+          request_type: "{{ request_type }}"
+          secret_name: "{{ secret_name }}"
+          secret_namespace: "{{ namespace }}"
+          created_at: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+      no_log: true
+
+    - name: Update BWS inventory with origin cert state
+      ansible.builtin.shell: |
+        # Get current value
+        current_value='{{ bws_inventory.value | to_json }}'
+
+        # Update _state.ingress.origin_certs.{{ app_name }}
+        updated_value=$(echo "$current_value" | jq --argjson cert '{{ cert_state_entry | to_json }}' \
+          '._state.ingress.origin_certs.{{ app_name }} = $cert')
+
+        # Get secret ID
+        secret_id='{{ bws_inventory.id }}'
+
+        # Update secret in BWS
+        echo "$updated_value" | bws secret edit "$secret_id" --value -
+      environment:
+        BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 6: Cleanup and Verification =====
+    - name: Clean up temporary files
+      ansible.builtin.file:
+        path: "{{ temp_dir.path }}"
+        state: absent
+      when: temp_dir.path is defined
+
+    - name: Verify BWS state update
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json | \
+          jq -r '.value._state.ingress.origin_certs.{{ app_name }}'
+      environment:
+        BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+      register: bws_verification
+      changed_when: false
+      no_log: false
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Origin Certificate Operation Complete"
+          - "=========================================="
+          - "Certificate ID: {{ origin_cert_id }}"
+          - "Hostnames: {{ cert_hostnames | join(', ') }}"
+          - "Kubernetes Secret: {{ namespace }}/{{ secret_name }}"
+          - "BWS State: _state.ingress.origin_certs.{{ app_name }}"
+          - ""
+          - "Stored State:"
+          - "{{ bws_verification.stdout | from_json | to_nice_yaml }}"
+          - ""
+          - "Usage in IngressRoute:"
+          - "  tls:"
+          - "    secretName: {{ secret_name }}"
+          - "=========================================="

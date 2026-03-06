@@ -1,0 +1,155 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/05-wire-awx"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/config/05-wire-awx.yml"
+#     category: "apps"
+#     subsystem: "argocd"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["argocd_deployed", "awx_deployed"]
+#   provides: ["argocd_awx_wired"]
+#   tags: ["argocd", "awx", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure ArgoCD Notifications to send webhook events to AWX on successful
+#     app syncs. Patches the argocd-notifications-cm ConfigMap to add a webhook
+#     service, notification template, and trigger for sync-succeeded events.
+#     The notifications controller auto-reloads ConfigMap changes.
+#   requires_apps: ["argocd", "awx"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.api_key"
+#         purpose: "AWX API token for webhook authorization header"
+
+- name: Wire AWX Notifications into ArgoCD
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    argocd_namespace: "argocd"
+    awx_namespace: "awx"
+    # awx_url: from BWS _state via Phase 4 extra-vars
+    awx_internal_url: "{{ awx_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF AWX NOT INSTALLED ==========
+    - name: Skip if awx is not installed on this VM
+      when: awx_api_key is not defined
+      block:
+        - name: "awx not installed — skipping argocd <-> awx wiring"
+          ansible.builtin.debug:
+            msg: "awx is not installed on this VM (no awx_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if awx_api_key not provided
+      ansible.builtin.fail:
+        msg: >-
+          awx_api_key must be provided via extra-vars (from BWS inventory).
+          Usage: ansible-playbook 05-wire-awx.yml -e awx_api_key=<token>
+      when: awx_api_key is not defined or awx_api_key | length == 0
+
+    # ========== CHECK IF ARGOCD IS DEPLOYED ==========
+    - name: Check if ArgoCD server is running
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ argocd_namespace }}
+          -l app.kubernetes.io/name=argocd-server --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: argocd_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if ArgoCD not deployed
+      ansible.builtin.meta: end_play
+      when: argocd_pod_check.rc != 0 or argocd_pod_check.stdout | length == 0
+
+    # ========== CHECK IF AWX WEBHOOK ALREADY CONFIGURED ==========
+    - name: Get current argocd-notifications-cm ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap argocd-notifications-cm -n {{ argocd_namespace }}
+          -o jsonpath='{.data}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_notifications_config
+      changed_when: false
+      failed_when: false
+
+    - name: Check if awx-webhook service already configured
+      ansible.builtin.set_fact:
+        awx_webhook_exists: "{{ 'awx-webhook' in (current_notifications_config.stdout | default('')) }}"
+
+    - name: Note awx-webhook already configured
+      ansible.builtin.debug:
+        msg: "AWX webhook service already present in ArgoCD notifications config - skipping patch"
+      when: awx_webhook_exists
+
+    # ========== PATCH ARGOCD NOTIFICATIONS CONFIGMAP ==========
+    - name: Patch argocd-notifications-cm with AWX webhook
+      when: not awx_webhook_exists
+      block:
+        - name: Apply AWX webhook service to notifications ConfigMap
+          ansible.builtin.command:
+            cmd: kubectl apply -f -
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          args:
+            stdin: |
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: argocd-notifications-cm
+                namespace: {{ argocd_namespace }}
+              data:
+                service.webhook.awx-webhook: |
+                  url: {{ awx_internal_url }}/api/v2/job_templates/1/launch/
+                  headers:
+                    - name: Authorization
+                      value: "Bearer {{ awx_api_key }}"
+                    - name: Content-Type
+                      value: "application/json"
+                template.app-sync-succeeded.awx: |
+                  webhook:
+                    awx-webhook:
+                      method: POST
+                      body: |
+                        {"extra_vars": {"app_name": "{{`{{.app.metadata.name}}`}}", "sync_status": "{{`{{.app.status.sync.status}}`}}", "health_status": "{{`{{.app.status.health.status}}`}}"}}
+                trigger.on-sync-succeeded: |
+                  - when: app.status.operationState.phase in ['Succeeded']
+                    send: [app-sync-succeeded.awx]
+          register: notifications_patch
+          changed_when: "'created' in notifications_patch.stdout or 'configured' in notifications_patch.stdout"
+
+    # ArgoCD notifications controller auto-reloads ConfigMap changes,
+    # no restart is needed.
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD <-> AWX Wiring Complete"
+          - "=========================================="
+          - ""
+          - "Webhook Service: {{ 'Added' if not awx_webhook_exists else 'Already configured' }}"
+          - "AWX URL: {{ awx_internal_url }}/api/v2/job_templates/1/launch/"
+          - "Trigger: on-sync-succeeded"
+          - "Template: app-sync-succeeded.awx"
+          - ""
+          - "Successful ArgoCD syncs will trigger AWX job template #1."
+          - "ArgoCD notifications controller auto-reloads - no restart needed."
+          - "=========================================="

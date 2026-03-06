@@ -1,0 +1,12 @@
+# MetalLB native manifests
+# Applied from upstream: https://raw.githubusercontent.com/metallb/metallb/v0.14.5/config/manifests/metallb-native.yaml
+# This is a placeholder - actual manifest should be fetched or included
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metallb-excludel2
+  namespace: metallb-system
+data:
+  excludel2.yaml: |
+    announcedInterfacesToExclude: ["docker0", "veth.*"]

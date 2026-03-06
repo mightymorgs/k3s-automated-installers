@@ -1,0 +1,314 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/loki/06-deploy-alloy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/loki/config/06-deploy-alloy.yml"
+#     category: "apps"
+#     subsystem: "loki"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["loki_deployed"]
+#   provides: ["alloy_deployed", "log_collection_enabled"]
+#   tags: ["loki", "alloy", "log-collection", "daemonset", "phase4", "observability"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Grafana Alloy DaemonSet for log collection into Loki.
+#     Loki is deployed but receives zero logs without a collector.
+#     Alloy runs on every node, collects from /var/log/pods/**/*.log
+#     using loki.source.kubernetes, and pushes to the Loki HTTP endpoint.
+#     Includes ServiceAccount with RBAC for pod/namespace discovery.
+#   requires_apps: ["loki"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Deploy Grafana Alloy DaemonSet for Log Collection
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    loki_namespace: "observability"
+    app_namespace: "{{ loki_namespace }}"
+    alloy_image: "grafana/alloy:v1.5.1"
+    # loki_url: from BWS _state via Phase 4 extra-vars
+    loki_push_url: "{{ loki_url }}/loki/api/v1/push"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF LOKI IS DEPLOYED ==========
+    - name: Check if Loki pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=loki --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Loki not deployed
+      ansible.builtin.meta: end_play
+      when: loki_pod_check.rc != 0 or loki_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ALLOY DAEMONSET ALREADY EXISTS ==========
+    - name: Check if Alloy DaemonSet already exists
+      ansible.builtin.command:
+        cmd: kubectl get daemonset alloy -n {{ app_namespace }} --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alloy_ds_check
+      changed_when: false
+      failed_when: false
+
+    - name: Note Alloy already deployed
+      ansible.builtin.debug:
+        msg: "Alloy DaemonSet already exists in {{ app_namespace }} - skipping deployment"
+      when: alloy_ds_check.rc == 0 and alloy_ds_check.stdout | length > 0
+
+    - name: Set alloy_already_deployed fact
+      ansible.builtin.set_fact:
+        alloy_already_deployed: "{{ alloy_ds_check.rc == 0 and alloy_ds_check.stdout | length > 0 }}"
+
+    # ========== CREATE RBAC RESOURCES ==========
+    # Alloy needs get/list/watch on pods and namespaces for Kubernetes
+    # label discovery. The ServiceAccount, ClusterRole, and
+    # ClusterRoleBinding are created first.
+    - name: Apply Alloy RBAC resources
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: |
+          ---
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: alloy
+            namespace: {{ app_namespace }}
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: alloy
+          rules:
+            - apiGroups: [""]
+              resources: ["pods", "namespaces", "nodes"]
+              verbs: ["get", "list", "watch"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: alloy
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: alloy
+          subjects:
+            - kind: ServiceAccount
+              name: alloy
+              namespace: {{ app_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: rbac_result
+      changed_when: "'created' in rbac_result.stdout"
+      when: not alloy_already_deployed
+
+    # ========== CREATE ALLOY CONFIG ==========
+    # The Alloy config uses River syntax (not YAML). It defines a pipeline:
+    #   1. loki.source.kubernetes — tails /var/log/pods logs
+    #   2. loki.process — adds namespace, pod, container labels
+    #   3. loki.write — pushes to Loki HTTP endpoint
+    - name: Apply Alloy ConfigMap
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: alloy-config
+            namespace: {{ app_namespace }}
+          data:
+            config.alloy: |
+              // Discover Kubernetes pods for log collection
+              discovery.kubernetes "pods" {
+                role = "pod"
+              }
+
+              // Relabel discovered targets to extract useful metadata
+              discovery.relabel "pod_logs" {
+                targets = discovery.kubernetes.pods.targets
+
+                rule {
+                  source_labels = ["__meta_kubernetes_namespace"]
+                  target_label  = "namespace"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_name"]
+                  target_label  = "pod"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_container_name"]
+                  target_label  = "container"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_node_name"]
+                  target_label  = "node"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_label_app"]
+                  target_label  = "app"
+                }
+              }
+
+              // Collect logs from discovered pods
+              loki.source.kubernetes "pod_logs" {
+                targets    = discovery.relabel.pod_logs.output
+                forward_to = [loki.process.pod_logs.receiver]
+              }
+
+              // Process and add static labels
+              loki.process "pod_logs" {
+                stage.static_labels {
+                  values = {
+                    cluster = "k3s",
+                  }
+                }
+                forward_to = [loki.write.default.receiver]
+              }
+
+              // Push logs to Loki
+              loki.write "default" {
+                endpoint {
+                  url = "{{ loki_push_url }}"
+                }
+              }
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: configmap_result
+      changed_when: "'created' in configmap_result.stdout"
+      when: not alloy_already_deployed
+
+    # ========== DEPLOY ALLOY DAEMONSET ==========
+    - name: Apply Alloy DaemonSet
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: |
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: alloy
+            namespace: {{ app_namespace }}
+            labels:
+              app: alloy
+          spec:
+            selector:
+              matchLabels:
+                app: alloy
+            template:
+              metadata:
+                labels:
+                  app: alloy
+              spec:
+                serviceAccountName: alloy
+                tolerations:
+                  - effect: NoSchedule
+                    operator: Exists
+                containers:
+                  - name: alloy
+                    image: {{ alloy_image }}
+                    args:
+                      - run
+                      - /etc/alloy/config.alloy
+                      - --server.http.listen-addr=0.0.0.0:12345
+                      - --storage.path=/tmp/alloy
+                    ports:
+                      - containerPort: 12345
+                        name: http
+                        protocol: TCP
+                    volumeMounts:
+                      - name: config
+                        mountPath: /etc/alloy
+                        readOnly: true
+                      - name: varlog
+                        mountPath: /var/log
+                        readOnly: true
+                      - name: dockercontainers
+                        mountPath: /var/lib/docker/containers
+                        readOnly: true
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 200m
+                        memory: 256Mi
+                volumes:
+                  - name: config
+                    configMap:
+                      name: alloy-config
+                  - name: varlog
+                    hostPath:
+                      path: /var/log
+                  - name: dockercontainers
+                    hostPath:
+                      path: /var/lib/docker/containers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: daemonset_result
+      changed_when: "'created' in daemonset_result.stdout"
+      when: not alloy_already_deployed
+
+    # ========== WAIT FOR DAEMONSET TO BE READY ==========
+    - name: Wait for Alloy DaemonSet to be ready
+      ansible.builtin.command:
+        cmd: kubectl rollout status daemonset/alloy -n {{ app_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not alloy_already_deployed
+
+    # ========== VERIFY ALLOY PODS ARE RUNNING ==========
+    - name: Verify Alloy pods are running
+      ansible.builtin.command:
+        cmd: kubectl get pods -n {{ app_namespace }} -l app=alloy --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alloy_pods
+      changed_when: false
+
+    - name: Check all Alloy pods are in Running state
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pods -n {{ app_namespace }} -l app=alloy
+          -o jsonpath='{.items[*].status.phase}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alloy_pod_phases
+      changed_when: false
+
+    - name: Fail if any Alloy pod is not Running
+      ansible.builtin.fail:
+        msg: "Not all Alloy pods are Running. Pod phases: {{ alloy_pod_phases.stdout }}"
+      when: "'Pending' in alloy_pod_phases.stdout or 'Failed' in alloy_pod_phases.stdout"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display deployment result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Alloy DaemonSet Deployment Complete"
+          - "=========================================="
+          - ""
+          - "Status: {{ 'Already deployed' if alloy_already_deployed else 'Deployed' }}"
+          - "Image: {{ alloy_image }}"
+          - "Namespace: {{ app_namespace }}"
+          - "Loki Endpoint: {{ loki_push_url }}"
+          - ""
+          - "Alloy collects from /var/log/pods on every node."
+          - "Labels added: namespace, pod, container, node, app"
+          - "Pods running:"
+          - "{{ alloy_pods.stdout_lines | default([]) }}"
+          - "=========================================="

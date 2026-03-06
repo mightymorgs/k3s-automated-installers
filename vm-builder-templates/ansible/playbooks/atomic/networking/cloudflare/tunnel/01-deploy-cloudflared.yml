@@ -1,0 +1,253 @@
+---
+# playbook_metadata:
+#   id: "atomic/networking/cloudflare/tunnel/01-deploy-cloudflared"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/networking/cloudflare/tunnel/01-deploy-cloudflared.yml"
+#     category: "networking"
+#     subsystem: "cloudflare"
+#     role: "tunnel"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflared"
+#       folder_version: null
+#       supported_versions: ["latest", "2024.x", "2025.x"]
+#       version_range: ">=2024.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - cloudflared: "latest"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Deploys cloudflared to K8s, requires tunnel token from BWS or Vault"
+#
+#   # ========== ARCHITECTURE NOTES ==========
+#   architecture:
+#     description: "Cloudflare Tunnel for HTTPS access to media stack"
+#     purpose: "Provides secure HTTPS access without exposing ports or managing certificates"
+#     tunnel_mode: "cloudflared with pre-created tunnel token"
+#     traffic_flow: "Internet → Cloudflare → Tunnel → Traefik → Services"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_installed", "media_stack_deployed", "traefik_running"]
+#   provides: ["cloudflared_deployed", "https_access_enabled"]
+#   tags: ["cloudflare", "tunnel", "https", "networking", "ingress", "multi-client"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Cloudflare Tunnel (cloudflared) for HTTPS access to media stack.
+#     Multi-client support via {{ client }} and {{ client_domain }} variables.
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.cloudflare.tunnel_id"
+#         purpose: "Get tunnel ID for deployment configuration"
+#       - path: "_state.cloudflare.tunnel_token"
+#         purpose: "Get tunnel run token for authentication"
+#       - path: "_state.k3s.installed_version"
+#         purpose: "Verify K3s is ready for deployment"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.cloudflared.status"
+#         example: "running"
+#       - path: "_state.apps.cloudflared.deployed_namespace"
+#         example: "media-stack"
+#       - path: "_state.apps.cloudflared.pod_count"
+#         example: 2
+#       - path: "_state.apps.cloudflared.version"
+#         example: "2024.12.2"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   # NOTE: cloudflared provides ingress capability to other apps, not for itself
+#   ingress:
+#     enabled: false
+#     reason: "Provides tunnel egress to Cloudflare, not an ingress consumer"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: false
+#     reason: "Infrastructure component, no user-facing UI"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Cloudflared"
+#     icon: "cloud-upload"
+#     category: "Networking"
+#     description: "Cloudflare Tunnel daemon for secure public access"
+#     docs_url: "https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/"
+
+- name: Deploy Cloudflare Tunnel for Media Stack HTTPS
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    # Multi-client support: override these via extra-vars or inventory
+    client: "{{ client_name | default('homelab') }}"
+    client_domain: "{{ ingress_domain }}"
+    media_namespace: media-stack
+    secret_store: "{{ 'vault' if (use_vault | default(false)) else 'bitwarden' }}"
+    cloudflare_secret_source:
+      bitwarden_item: >-
+        {{ (bitwarden_cloudflare_item_template | default('cloudflare-tunnel-%s'))
+           | format(inventory_hostname) }}
+      vault_path: >-
+        {{ (vault_cloudflare_secret_template | default('secret/data/global/cloudflare/%s'))
+           | format(inventory_hostname) }}
+    cloudflare_required_fields: [tunnel_run_token, tunnel_id]
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    # ========== FAIL-FAST: REQUIRED BWS VARS ==========
+    - name: Fail if ingress_domain not provided by BWS
+      ansible.builtin.fail:
+        msg: "ingress_domain must be provided via BWS extra-vars — no fake defaults"
+      when: ingress_domain is not defined or ingress_domain | length == 0
+
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Deploying Cloudflare Tunnel for {{ client }}
+          - ==========================================
+          - 'Client: {{ client }}'
+          - 'Domain: {{ client_domain }}'
+          - 'Namespace: {{ media_namespace }}'
+          - 'Secret Store: {{ secret_store }}'
+          - 'Purpose: HTTPS access via Cloudflare Tunnel'
+          - ==========================================
+    - name: Resolve Cloudflare secrets from Bitwarden
+      ansible.builtin.set_fact:
+        cloudflare_secrets: >-
+          {{ lookup('community.general.bitwarden',
+                     cloudflare_secret_source.bitwarden_item,
+                     field='text') | from_json }}
+      when: secret_store == 'bitwarden'
+    - name: Resolve Cloudflare secrets from Vault
+      ansible.builtin.set_fact:
+        cloudflare_secrets: >-
+          {{ lookup('community.hashi_vault.hashi_vault', 'secret=' ~ cloudflare_secret_source.vault_path)
+             | from_json }}
+      when: secret_store == 'vault'
+    - name: Verify required Cloudflare secrets present
+      ansible.builtin.assert:
+        that:
+          - cloudflare_secrets.tunnel_run_token is defined
+          - cloudflare_secrets.tunnel_run_token | length > 0
+          - cloudflare_secrets.tunnel_id is defined
+        fail_msg: Cloudflare tunnel secrets missing from {{ secret_store }} – ensure
+          Bitwarden/Vault entries exist.
+    - name: Check if Cloudflare Tunnel secret exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: cloudflare-tunnel
+        namespace: '{{ media_namespace }}'
+      register: secret_check
+    - name: Create Cloudflare Tunnel secret
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Secret
+        name: cloudflare-tunnel
+        namespace: '{{ media_namespace }}'
+        state: present
+        definition:
+          metadata:
+            name: cloudflare-tunnel
+            namespace: '{{ media_namespace }}'
+          type: Opaque
+          stringData:
+            tunnel_run_token: '{{ cloudflare_secrets.tunnel_run_token }}'
+            tunnel_id: '{{ cloudflare_secrets.tunnel_id }}'
+      when: secret_check.resources | length == 0
+      register: secret_create
+    - name: Deploy cloudflared
+      kubernetes.core.k8s:
+        src: '{{ project_root }}/k8s/media-stack/base/cloudflared-deployment.yaml'
+        state: present
+      register: cloudflared_deploy
+    - name: Wait for cloudflared deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: cloudflared
+        namespace: '{{ media_namespace }}'
+        wait: true
+        wait_condition:
+          type: Available
+          status: 'True'
+        wait_timeout: 300
+      register: cloudflared_rollout
+    - name: Get cloudflared pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        label_selectors: [app=cloudflared]
+      register: cloudflared_pods_info
+    - name: Format pod output for display
+      ansible.builtin.set_fact:
+        cloudflared_pods:
+          stdout_lines: "{{ cloudflared_pods_info.resources | map(attribute='metadata.name') | list }}"
+    - name: Get cloudflared logs (verify tunnel connection)
+      kubernetes.core.k8s_log:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        label_selectors: [app=cloudflared]
+        tail_lines: 20
+      register: cloudflared_logs
+      failed_when: false
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Cloudflare Tunnel Deployed Successfully!
+          - ==========================================
+          - 'Client: {{ client }}'
+          - 'Domain: {{ client_domain }}'
+          - ''
+          - 'Pods:'
+          - "{{ cloudflared_pods.stdout_lines | join(', ') }}"
+          - ''
+          - 'Recent Logs:'
+          - "{{ cloudflared_logs.log if cloudflared_logs.log is defined else 'No logs available' }}"
+          - ''
+          - ==========================================
+          - 'Tunnel Status:'
+          - '  Check: https://one.dash.cloudflare.com/'
+          - '  Navigate to: Zero Trust → Access → Tunnels'
+          - "  Your tunnel should show 'Healthy' status"
+          - ''
+          - 'Next Steps:'
+          - '  1. Configure tunnel routes in Cloudflare dashboard'
+          - '  2. Add public hostname mappings:'
+          - '     - sonarr.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - radarr.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - nzb.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - qbit.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - prowl.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - req.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - pstat.{{ client_domain }} → http://traefik.media-stack:80'
+          - '     - auth.{{ client_domain }} → http://traefik.media-stack:80'
+          - '  3. Access via HTTPS:'
+          - '     https://sonarr.{{ client_domain }}, https://radarr.{{ client_domain }},'
+          - '     https://nzb.{{ client_domain }}, https://qbit.{{ client_domain }},'
+          - '     https://prowl.{{ client_domain }}, https://req.{{ client_domain }},'
+          - '     https://pstat.{{ client_domain }}, https://auth.{{ client_domain }}'
+          - ==========================================

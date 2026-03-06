@@ -1,0 +1,11 @@
+---
+- name: "Tier 3: Cleanup test resources"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    test_namespace: "molecule-test-mediastack"
+  tasks:
+    - name: Delete test namespace
+      ansible.builtin.command: kubectl delete namespace {{ test_namespace }} --ignore-not-found
+      register: ns_delete
+      changed_when: "'deleted' in ns_delete.stdout"

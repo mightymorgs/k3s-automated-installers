@@ -1,0 +1,18 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-apply-kustomize.yml:
+    summary: Deploy media stack applications (Sonarr, Radarr, SABnzbd, Prowlarr, qBittorrent)
+      to K3s cluster using Kustomize manifests. Supports Longhorn or NFS storage.
+    source: inferred
+    confidence: medium
+  02-wait-ready.yml:
+    summary: Wait for all media stack pods to reach ready state and verify PersistentVolumeClaims
+      are bound.
+    source: inferred
+    confidence: medium
+  03-verify.yml:
+    summary: Verify media stack applications are healthy and accessible. Checks HTTP
+      endpoints and displays access URLs.
+    source: inferred
+    confidence: medium

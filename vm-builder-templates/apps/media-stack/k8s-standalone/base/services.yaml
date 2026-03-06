@@ -1,0 +1,97 @@
+---
+# Sonarr Service
+# NOTE: Using LoadBalancer temporarily until IngressRoute CRD issues resolved
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonarr
+  namespace: media-stack
+  labels:
+    app: sonarr
+spec:
+  type: LoadBalancer
+  selector:
+    app: sonarr
+  ports:
+    - name: http
+      port: 8989
+      targetPort: 8989
+      protocol: TCP
+
+---
+# SABnzbd Service
+# NOTE: Using LoadBalancer temporarily until IngressRoute CRD issues resolved
+apiVersion: v1
+kind: Service
+metadata:
+  name: sabnzbd
+  namespace: media-stack
+  labels:
+    app: sabnzbd
+spec:
+  type: LoadBalancer
+  selector:
+    app: sabnzbd
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+
+---
+# Prowlarr Service
+# NOTE: Using LoadBalancer temporarily until IngressRoute CRD issues resolved
+apiVersion: v1
+kind: Service
+metadata:
+  name: prowlarr
+  namespace: media-stack
+  labels:
+    app: prowlarr
+spec:
+  type: LoadBalancer
+  selector:
+    app: prowlarr
+  ports:
+    - name: http
+      port: 9696
+      targetPort: 9696
+      protocol: TCP
+
+---
+# Radarr Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: radarr
+  namespace: media-stack
+  labels:
+    app: radarr
+spec:
+  type: LoadBalancer
+  selector:
+    app: radarr
+  ports:
+    - name: http
+      port: 7878
+      targetPort: 7878
+      protocol: TCP
+
+---
+# qBittorrent Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent
+  namespace: media-stack
+  labels:
+    app: qbittorrent
+spec:
+  type: LoadBalancer
+  selector:
+    app: qbittorrent
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+      protocol: TCP

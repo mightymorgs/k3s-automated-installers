@@ -1,0 +1,39 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: "Configure Alertmanager for Tailscale Ingress mode. Alertmanager has\
+      \ no built-in authentication \u2014 auth is handled at the network level by\
+      \ Tailscale. This playbook sets --web.external-url so Alertmanager generates\
+      \ correct links when accessed via the tailnet, waits for the rollout, and verifies\
+      \ the /-/healthy endpoint."
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ alertmanager_url }}/-/healthy'
+  05-wire-awx.yml:
+    summary: Configure Alertmanager to send critical alerts to AWX for auto-remediation.
+      Patches the alertmanager-config ConfigMap to add an awx-webhook receiver that
+      POSTs to AWX job template launch endpoint with Bearer auth, and adds a route
+      for severity=critical alerts. Restarts Alertmanager to pick up the new configuration.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_url }}/api/v2/ping/'
+    requires_apps:
+    - awx
+    references_services:
+    - awx
+  06-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to the Alertmanager workload. Alertmanager
+      natively exposes metrics on port 9093 at /metrics. This playbook discovers whether
+      Alertmanager runs as a statefulset or deployment, then adds pod-level annotations
+      so Prometheus auto-discovers and scrapes the metrics endpoint via its kubernetes-pods
+      scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- awx
+- prometheus

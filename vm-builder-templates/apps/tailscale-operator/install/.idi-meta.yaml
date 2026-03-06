@@ -1,0 +1,19 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Tailscale Kubernetes operator via official static manifests. Downloads
+      operator.yaml from tailscale/tailscale GitHub repo, injects OAuth credentials,
+      and applies with kubectl. Enables per-service MagicDNS names (subdomain.tailnet.ts.net).
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ manifest_url }}'
+    references_services:
+    - manifest
+  02-verify.yml:
+    summary: Verify Tailscale Kubernetes operator deployment
+    source: inferred
+    confidence: medium
+depends_on_apps:
+- manifest

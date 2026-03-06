@@ -1,0 +1,141 @@
+---
+# playbook_metadata:
+#   id: "atomic/hypervisor/qemu/05-verify-capabilities"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/hypervisor/qemu/05-verify-capabilities.yml"
+#     category: "hypervisor"
+#     subsystem: "qemu"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "qemu-kvm"
+#       folder_version: null
+#       supported_versions: ["8.x", "9.x"]
+#       version_range: ">=8.0.0"
+#
+#     requires:
+#       qemu_kvm_installed: true
+#       libvirt_installed: true
+#       libvirt_storage_configured: true
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - qemu: "9.x"
+#         libvirt: "10.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-22"
+#         notes: "Verified on bare-metal with Intel VT-x and default storage pool"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["qemu_kvm_installed", "libvirt_installed", "libvirt_storage_configured"]
+#   provides: ["hypervisor_verified"]
+#   tags: ["qemu", "kvm", "libvirt", "hypervisor", "verification"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify hypervisor capabilities and readiness for VM provisioning.
+#     Checks KVM acceleration, CPU virtualization, storage pools, networks, and disk space.
+
+- name: Verify hypervisor capabilities
+  hosts: hypervisor
+  become: true
+
+  tasks:
+    - name: Check libvirtd service status
+      ansible.builtin.systemd:
+        name: libvirtd
+      register: libvirtd_status
+
+    - name: Verify KVM acceleration
+      ansible.builtin.command:
+        cmd: kvm-ok
+      register: kvm_ok
+      changed_when: false
+      failed_when: false
+
+    - name: Check CPU virtualization support
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -E '(vmx|svm)' /proc/cpuinfo | wc -l
+      args:
+        executable: /bin/bash
+      register: virt_support
+      changed_when: false
+
+    - name: List available storage pools
+      ansible.builtin.command:
+        cmd: virsh pool-list --all
+      register: storage_pools
+      changed_when: false
+
+    - name: List available networks
+      ansible.builtin.command:
+        cmd: virsh net-list --all
+      register: networks
+      changed_when: false
+
+    - name: Check GPU availability (for passthrough)
+      ansible.builtin.shell: |
+        set -o pipefail
+        lspci | grep -i 'vga\|3d\|display' || echo "No GPU detected"
+      args:
+        executable: /bin/bash
+      register: gpu_info
+      changed_when: false
+
+    - name: Get disk space for VM storage
+      ansible.builtin.shell: |
+        set -o pipefail
+        df -h /var/lib/libvirt/images | tail -1
+      args:
+        executable: /bin/bash
+      register: disk_space
+      changed_when: false
+
+    - name: Generate verification report
+      ansible.builtin.set_fact:
+        verification_report:
+          libvirtd_status: "{{ 'active' if libvirtd_status.status.ActiveState == 'active' else 'inactive' }}"
+          kvm_acceleration: "{{ 'available' if kvm_ok.rc == 0 else 'not available' }}"
+          cpu_virt_support: "{{ 'yes (' + virt_support.stdout + ' cores)' if virt_support.stdout | int > 0 else 'no' }}"
+          storage_pools: "{{ storage_pools.stdout_lines }}"
+          networks: "{{ networks.stdout_lines }}"
+          gpu_devices: "{{ gpu_info.stdout_lines }}"
+          storage_space: "{{ disk_space.stdout }}"
+
+    - name: Display verification report
+      ansible.builtin.debug:
+        msg: |
+          ===== Hypervisor Verification Report =====
+          Libvirtd Service: {{ verification_report.libvirtd_status }}
+          KVM Acceleration: {{ verification_report.kvm_acceleration }}
+          CPU Virtualization: {{ verification_report.cpu_virt_support }}
+
+          Storage Pools:
+          {{ verification_report.storage_pools | join('\n') }}
+
+          Networks:
+          {{ verification_report.networks | join('\n') }}
+
+          GPU Devices:
+          {{ verification_report.gpu_devices | join('\n') }}
+
+          Storage Space:
+          {{ verification_report.storage_space }}
+          ==========================================
+
+    - name: Fail if critical requirements not met
+      ansible.builtin.fail:
+        msg: "Hypervisor not ready: libvirtd not running or KVM not available"
+      when:
+        - libvirtd_status.status.ActiveState != 'active' or virt_support.stdout | int == 0

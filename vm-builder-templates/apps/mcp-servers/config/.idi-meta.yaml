@@ -1,0 +1,22 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-vault-mcp.yml:
+    summary: Configure Vault MCP Server with proper credentials
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: vault
+        field: url
+      - app: vault
+        field: root_token
+      - app: vault_mcp
+        field: url
+      writes_to:
+      - app: vault_mcp
+        field: configured
+      - app: vault_mcp
+        field: backend_url
+      - app: vault
+        field: connected_from

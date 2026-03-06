@@ -1,0 +1,63 @@
+# Rendered by Phase 2 workflow from terragrunt.hcl.j2
+# VM: {{ hostname }} | Inventory: {{ inventory_key }}
+# Rendered at: {{ render_timestamp }}
+
+include "root" {
+  path = find_in_parent_folders()
+}
+
+inputs = {
+  # === Identity (baked from BWS inventory) ===
+  name = "{{ hostname }}"
+
+  # === Hardware (baked from BWS inventory) ===
+  vcpu              = {{ vcpu }}
+  memory_mb         = {{ memory_mb }}
+  disk_size_gb      = {{ disk_size_gb }}
+  data_disk_size_gb = {{ data_disk_size_gb | default(0) }}
+  base_image_path   = "{{ base_image_path | default('/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img') }}"
+
+  # === Network (baked from BWS inventory + hypervisor Phase 0 state) ===
+  network_name     = "{{ network_name }}"
+{% if mac %}
+  mac              = "{{ mac }}"
+{% else %}
+  mac              = null
+{% endif %}
+{% if static_ipv4_cidr %}
+  static_ipv4_cidr = "{{ static_ipv4_cidr }}"
+  gateway_ipv4     = "{{ gateway_ipv4 }}"
+{% else %}
+  static_ipv4_cidr = ""
+  gateway_ipv4     = ""
+{% endif %}
+  dns_servers      = [{{ dns_servers | map('tojson') | join(', ') }}]
+
+  # === SSH (baked from BWS inventory) ===
+  ansible_user        = "{{ ssh_user | default('ubuntu') }}"
+  ssh_authorized_keys = [{{ ssh_authorized_keys | map('tojson') | join(', ') }}]
+
+  # === GPU passthrough (baked from BWS inventory) ===
+  enable_gpu_passthrough = {{ enable_gpu_passthrough | default(false) | lower }}
+  gpu_pci_address        = "{{ gpu_pci_address | default('') }}"
+
+  # === Tailscale ===
+  enable_tailscale_setup = true
+  tailscale_tag          = "tag:{{ hostname }}"
+  tailscale_auth_key     = get_env("TG_TAILSCALE_AUTH_KEY", "")
+
+  # === GitHub runner ===
+  enable_github_runner  = true
+  github_runner_labels  = "self-hosted,libvirt,{{ hostname }}"
+  github_runner_version = "{{ github_runner_version }}"
+
+  # === Ephemeral secrets (NOT baked — read from env at runtime) ===
+  runner_token          = get_env("TG_RUNNER_TOKEN", "")
+  bws_access_token      = get_env("TG_BWS_ACCESS_TOKEN", "")
+  ssh_private_key_b64   = get_env("TG_SSH_PRIVATE_KEY_B64", "")
+  inventory_key         = "{{ inventory_key }}"
+  github_repo           = "{{ github_repo }}"
+  console_username      = "{{ console_username }}"
+  console_password      = get_env("TG_CONSOLE_PASSWORD", "")
+  user_data_content_b64 = get_env("TG_USER_DATA_CONTENT_B64", "")
+}

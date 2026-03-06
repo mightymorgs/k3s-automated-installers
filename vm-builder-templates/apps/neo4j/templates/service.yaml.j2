@@ -1,0 +1,29 @@
+---
+# Neo4j Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('neo4j') }}
+  namespace: {{ app_namespace | default('neo4j') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+spec:
+  type: {{ service_type | default('ClusterIP') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name | default('neo4j') }}
+  ports:
+    - name: http
+      port: {{ http_port | default(7474) }}
+      targetPort: {{ http_port | default(7474) }}
+{% if service_type | default('ClusterIP') == 'NodePort' and http_nodeport is defined %}
+      nodePort: {{ http_nodeport }}
+{% endif %}
+      protocol: TCP
+    - name: bolt
+      port: {{ bolt_port | default(7687) }}
+      targetPort: {{ bolt_port | default(7687) }}
+{% if service_type | default('ClusterIP') == 'NodePort' and bolt_nodeport is defined %}
+      nodePort: {{ bolt_nodeport }}
+{% endif %}
+      protocol: TCP

@@ -1,0 +1,17 @@
+---
+# Grafana ConfigMap (J2 template)
+# Defaults match k8s-base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ configmap_name | default('grafana-config') }}
+  namespace: {{ app_namespace | default('grafana') }}
+  labels:
+    app: {{ app_name | default('grafana') }}
+    app.kubernetes.io/name: {{ app_name | default('grafana') }}
+    app.kubernetes.io/managed-by: idi-ansible
+data:
+  GF_SERVER_HTTP_PORT: "{{ container_port | default(3000) }}"
+  GF_SERVER_ROOT_URL: "{{ app_url | default('http://localhost:' ~ (nodeport | default(30030)) | string) }}"
+  GF_LOG_LEVEL: "{{ log_level | default('info') }}"
+  GF_SECURITY_ADMIN_USER: "{{ admin_user | default('admin') }}"

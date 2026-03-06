@@ -1,0 +1,10 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-eso-config.yml:
+    summary: 'Verify External Secrets Operator configuration is complete and functioning:
+      - SecretStore/ClusterSecretStore is ready and can connect to backend - ExternalSecret
+      is syncing successfully - Target Kubernetes Secrets are created with expected
+      keys - Optional: Test secret value retrieval (without exposing values)'
+    source: inferred
+    confidence: medium

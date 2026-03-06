@@ -1,0 +1,214 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/troubleshooting/03-update-traefik-crds"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/troubleshooting/03-update-traefik-crds.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "troubleshooting"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "traefik"
+#       folder_version: "1.33"
+#       supported_versions: ["2.x", "3.x"]
+#       version_range: ">=2.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       traefik: ">=2.0.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - traefik: "latest"
+#         k3s: "1.33.5+k3s1"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-10"
+#         notes: "Downloads and applies official Traefik v3 CRD definitions"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "traefik_deployed"]
+#   provides: ["traefik_crds_updated"]
+#   tags: ["k3s", "traefik", "crd", "troubleshooting", "fix"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Update Traefik CRDs to fix incomplete IngressRoute schema
+- name: Update Traefik CRDs to Fix IngressRoute Schema
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    media_namespace: media-stack
+    traefik_crd_url: >-
+      https://raw.githubusercontent.com/traefik/traefik/v3.2/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml
+  tasks:
+    - name: Display update information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Updating Traefik CRDs
+          - ==========================================
+          - 'Issue: IngressRoute CRD has incomplete schema'
+          - 'Missing fields: match, kind, services in routes'
+          - 'Solution: Apply official Traefik v3 CRD definitions'
+          - 'Source: {{ traefik_crd_url }}'
+          - ==========================================
+
+    # ========== PHASE 1: Fetch kubeconfig ==========
+    - name: Fetch kubeconfig from remote host
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_raw
+    - name: Save kubeconfig locally
+      ansible.builtin.copy:
+        content: "{{ kubeconfig_raw.content | b64decode | regex_replace('127.0.0.1', ansible_host) }}"
+        dest: /tmp/media-stack-kubeconfig.yaml
+        mode: '0600'
+      delegate_to: localhost
+
+    # ========== PHASE 2: Backup existing CRDs ==========
+    - name: Get existing IngressRoute CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: ingressroutes.traefik.io
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: existing_crd
+    - name: Save backup of existing CRD
+      ansible.builtin.copy:
+        content: '{{ existing_crd.resources[0] | to_nice_yaml }}'
+        dest: /tmp/traefik-ingressroute-crd-backup.yaml
+        mode: '0644'
+      delegate_to: localhost
+      when: existing_crd.resources | length > 0
+
+    # ========== PHASE 3: Download and apply official Traefik CRDs ==========
+    - name: Download official Traefik v3 CRDs
+      ansible.builtin.get_url:
+        url: '{{ traefik_crd_url }}'
+        dest: /tmp/traefik-crds-v3.yaml
+        mode: '0644'
+      delegate_to: localhost
+    - name: Apply official Traefik CRDs
+      kubernetes.core.k8s:
+        state: present
+        src: /tmp/traefik-crds-v3.yaml
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: crd_apply
+
+    # ========== PHASE 4: Verify CRD update ==========
+    - name: Wait for CRD to be established
+      ansible.builtin.pause:
+        seconds: 5
+    - name: Get updated IngressRoute CRD
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: ingressroutes.traefik.io
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: updated_crd
+    - name: Extract CRD version info
+      ansible.builtin.set_fact:
+        crd_versions: "{{ updated_crd.resources[0].spec.versions | map(attribute='name') | list }}"
+      when: updated_crd.resources | length > 0
+    - name: Display CRD update status
+      ansible.builtin.debug:
+        msg:
+          - 'CRD versions available: {{ crd_versions }}'
+          - >-
+            CRD status: {{ updated_crd.resources[0].status.conditions
+            | selectattr('type', 'equalto', 'Established') | list }}
+
+    # ========== PHASE 5: Test IngressRoute creation ==========
+    - name: Delete any existing test IngressRoute
+      kubernetes.core.k8s:
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        name: test-crd-update
+        namespace: '{{ media_namespace }}'
+        state: absent
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      failed_when: false
+    - name: Create test IngressRoute with updated CRD
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: test-crd-update
+            namespace: '{{ media_namespace }}'
+          spec:
+            entryPoints: [web]
+            routes:
+              - match: Host(`test.{{ domain | default('example.local') }}`)
+                kind: Rule
+                services:
+                  - name: sonarr
+                    port: 8989
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: test_create
+    - name: Wait for reconciliation
+      ansible.builtin.pause:
+        seconds: 5
+    - name: Get test IngressRoute back
+      kubernetes.core.k8s_info:
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        name: test-crd-update
+        namespace: '{{ media_namespace }}'
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: test_get
+    - name: Verify test IngressRoute has valid routes
+      ansible.builtin.assert:
+        that:
+          - test_get.resources[0].spec.routes is defined
+          - test_get.resources[0].spec.routes | length > 0
+          - test_get.resources[0].spec.routes[0] != {}
+          - test_get.resources[0].spec.routes[0].match is defined
+        fail_msg: Test IngressRoute still has corrupted routes after CRD update!
+        success_msg: Test IngressRoute routes are valid after CRD update
+    - name: Display test IngressRoute spec
+      ansible.builtin.debug:
+        var: test_get.resources[0].spec
+    - name: Cleanup test IngressRoute
+      kubernetes.core.k8s:
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        name: test-crd-update
+        namespace: '{{ media_namespace }}'
+        state: absent
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+
+    # ========== PHASE 6: Summary ==========
+    - name: Display update summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Traefik CRD Update Complete!
+          - ==========================================
+          - ''
+          - 'CRD versions: {{ crd_versions }}'
+          - 'Test IngressRoute: VALID (routes preserved)'
+          - ''
+          - 'Next Steps:'
+          - '  1. Recreate existing IngressRoutes using 01-fix-corrupted-ingressroutes.yml'
+          - '  2. Verify all routes are preserved with correct match/services'
+          - '  3. Test external access via Cloudflare tunnel'
+          - ==========================================

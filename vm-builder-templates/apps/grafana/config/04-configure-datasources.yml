@@ -1,0 +1,130 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/04-configure-datasources"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/04-configure-datasources.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260128_grafana_config"
+#   dependencies: ["grafana_deployed", "prometheus_deployed", "loki_deployed"]
+#   requires_apps: ["grafana", "prometheus", "loki"]
+#   provides: ["grafana_datasources_configured"]
+#   tags: ["grafana", "datasources", "observability", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: Configure Grafana datasources via API
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+#     writes:
+#       - path: "_state.apps.grafana.datasources_configured"
+#         example: true
+
+- name: Configure Grafana Datasources
+  hosts: localhost
+  gather_facts: false
+  vars:
+    grafana_user: "admin"
+
+  tasks:
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== PROMETHEUS DATASOURCE ==========
+    - name: Add Prometheus datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Prometheus"
+          type: "prometheus"
+          url: "http://prometheus.prometheus:9090"
+          access: "proxy"
+          isDefault: true
+        status_code: [200, 409]  # 409 = already exists
+      register: prometheus_ds
+
+    # ========== LOKI DATASOURCE ==========
+    - name: Add Loki datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Loki"
+          type: "loki"
+          url: "http://loki.loki:3100"
+          access: "proxy"
+        status_code: [200, 409]
+      register: loki_ds
+
+    # ========== ALERTMANAGER DATASOURCE ==========
+    - name: Add Alertmanager datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Alertmanager"
+          type: "alertmanager"
+          url: "http://alertmanager.alertmanager:9093"
+          access: "proxy"
+          jsonData:
+            implementation: "prometheus"
+        status_code: [200, 409]
+      register: alertmanager_ds
+
+    # ========== ELASTICSEARCH DATASOURCE ==========
+    - name: Add Elasticsearch datasource
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Elasticsearch"
+          type: "elasticsearch"
+          url: "http://elasticsearch.elastic:9200"
+          access: "proxy"
+          database: "logs-*"
+          jsonData:
+            timeField: "@timestamp"
+            esVersion: "8.0.0"
+        status_code: [200, 409]
+      register: elasticsearch_ds
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display datasources configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana Datasources Configuration Complete"
+          - "=========================================="
+          - "Prometheus: {{ 'Added' if prometheus_ds.status == 200 else 'Already exists' }}"
+          - "Loki: {{ 'Added' if loki_ds.status == 200 else 'Already exists' }}"
+          - "Alertmanager: {{ 'Added' if alertmanager_ds.status == 200 else 'Already exists' }}"
+          - "Elasticsearch: {{ 'Added' if elasticsearch_ds.status == 200 else 'Already exists' }}"
+          - "=========================================="

@@ -1,0 +1,163 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/metallb/05-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/metallb/config/05-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "metallb"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["metallb_deployed"]
+#   provides: ["metallb_metrics_enabled"]
+#   tags: ["metallb", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus scrape annotations to MetalLB controller deployment
+#     and speaker daemonset. Both expose metrics on port 7472 at /metrics.
+#     This playbook adds pod-level annotations so Prometheus auto-discovers
+#     and scrapes both endpoints via its kubernetes-pods scrape config.
+#   requires_apps: ["metallb", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for MetalLB
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    metallb_namespace: "metallb-system"
+    app_namespace: "{{ metallb_namespace }}"
+  tasks:
+    # ========== CHECK IF METALLB IS DEPLOYED ==========
+    - name: Check if MetalLB controller pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=metallb,component=controller --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: metallb_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if MetalLB not deployed
+      ansible.builtin.debug:
+        msg: "MetalLB not deployed - skipping metrics configuration"
+      when: metallb_pod_check.rc != 0 or metallb_pod_check.stdout | length == 0
+
+    - name: End play if MetalLB not available
+      ansible.builtin.meta: end_play
+      when: metallb_pod_check.rc != 0 or metallb_pod_check.stdout | length == 0
+
+    # ========== DISCOVER CONTROLLER DEPLOYMENT NAME ==========
+    - name: Get MetalLB controller deployment name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ app_namespace }}
+          -l app=metallb,component=controller
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: controller_name
+      changed_when: false
+      failed_when: false
+
+    - name: Set controller deployment name fact
+      ansible.builtin.set_fact:
+        metallb_controller: "{{ controller_name.stdout | default('metallb-controller') }}"
+
+    # ========== DISCOVER SPEAKER DAEMONSET NAME ==========
+    - name: Get MetalLB speaker daemonset name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get daemonset -n {{ app_namespace }}
+          -l app=metallb,component=speaker
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: speaker_name
+      changed_when: false
+      failed_when: false
+
+    - name: Set speaker daemonset name fact
+      ansible.builtin.set_fact:
+        metallb_speaker: "{{ speaker_name.stdout | default('metallb-speaker') }}"
+
+    # ========== CONTROLLER ANNOTATIONS ==========
+    - name: Check if prometheus annotations already present on controller
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ metallb_controller }} -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: controller_scrape
+      changed_when: false
+      failed_when: false
+
+    - name: Add Prometheus scrape annotations to MetalLB controller
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ metallb_controller }} -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"7472","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: controller_patch
+      changed_when: "'patched' in controller_patch.stdout"
+      when: controller_scrape.stdout != "true"
+
+    # ========== SPEAKER ANNOTATIONS ==========
+    - name: Check if prometheus annotations already present on speaker
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get daemonset {{ metallb_speaker }} -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: speaker_scrape
+      changed_when: false
+      failed_when: false
+
+    - name: Add Prometheus scrape annotations to MetalLB speaker
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch daemonset {{ metallb_speaker }} -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"7472","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: speaker_patch
+      changed_when: "'patched' in speaker_patch.stdout"
+      when: speaker_scrape.stdout != "true"
+
+    # ========== WAIT FOR ROLLOUTS ==========
+    - name: Wait for controller rollout
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/{{ metallb_controller }} -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: controller_scrape.stdout != "true"
+
+    - name: Wait for speaker rollout
+      ansible.builtin.command:
+        cmd: kubectl rollout status daemonset/{{ metallb_speaker }} -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: speaker_scrape.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "MetalLB Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Controller ({{ metallb_controller }}): port 7472 {{ '(annotations added)' if controller_scrape.stdout != 'true' else '(already configured)' }}"
+          - "Speaker ({{ metallb_speaker }}): port 7472 {{ '(annotations added)' if speaker_scrape.stdout != 'true' else '(already configured)' }}"
+          - "Namespace: {{ app_namespace }}"
+          - "Metrics Path: /metrics"
+          - "=========================================="

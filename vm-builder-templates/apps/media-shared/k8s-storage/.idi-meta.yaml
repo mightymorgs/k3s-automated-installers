@@ -1,0 +1,31 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  base/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  base/namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  base/pvc.yaml:
+    summary: 'K8s PersistentVolumeClaim: pvc.yaml'
+    source: inferred
+    confidence: medium
+  overlays/nfs-homelab/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  overlays/nfs-homelab/namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  overlays/nfs-homelab/nfs-pv.yaml:
+    summary: 'K8s PersistentVolume: nfs-pv.yaml'
+    source: inferred
+    confidence: medium
+  overlays/nfs-homelab/nfs-pvc.yaml:
+    summary: 'K8s PersistentVolumeClaim: nfs-pvc.yaml'
+    source: inferred
+    confidence: medium

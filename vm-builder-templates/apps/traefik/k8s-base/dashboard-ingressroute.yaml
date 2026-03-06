@@ -1,0 +1,24 @@
+---
+# Traefik Dashboard IngressRoute
+# Exposes Traefik dashboard with SSO protection
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/component: dashboard
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`traefik.{{ domain | default("local") }}`) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService
+      middlewares:
+        - name: authentik-forwardauth
+          namespace: kube-system
+  tls: {}

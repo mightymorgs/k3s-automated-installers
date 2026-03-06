@@ -1,0 +1,439 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/langfuse/verify/langfuse-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "langfuse_configuration_verified"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/langfuse/verify/01-verify-langfuse-config.yml"
+#     category: "platform"
+#     subsystem: "langfuse"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "langfuse"
+#       supported_versions: ["2.x", "3.x"]
+#       version_range: ">=2.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - langfuse: "3.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies Langfuse configuration (API, prompts, datasets)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_langfuse_verification"
+#   dependencies: ["langfuse_deployed"]
+#   provides: ["langfuse_config_verified"]
+#   tags: ["langfuse", "verification", "llm-observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that Langfuse is properly configured. Checks that the API is
+#     accessible with valid credentials, expected prompts are created, and
+#     datasets exist. Provides a comprehensive health check for Langfuse
+#     LLM observability setup.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.langfuse.public_key"
+#         purpose: "Langfuse public key for Basic auth username"
+#       - path: "_state.apps.langfuse.secret_key"
+#         purpose: "Langfuse secret key for Basic auth password"
+#       - path: "_state.apps.langfuse.url"
+#         purpose: "Langfuse base URL"
+#       - path: "_state.apps.langfuse.prompts"
+#         purpose: "Expected prompts to verify"
+#       - path: "_state.apps.langfuse.datasets"
+#         purpose: "Expected datasets to verify"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - Langfuse Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    langfuse_base_url: "{{ langfuse_url }}"
+    langfuse_api_base: "{{ langfuse_base_url }}/api/public"
+
+    # Expected resources to verify (can be overridden by caller or BWS state)
+    expected_prompts: "{{ expected_prompts_input | default([]) }}"
+    expected_datasets: "{{ expected_datasets_input | default([]) }}"
+
+    # Verification options
+    fail_on_missing: "{{ fail_on_missing_input | default(false) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying Langfuse Configuration"
+          - "=========================================="
+          - "Base URL: {{ langfuse_base_url }}"
+          - "Expected Prompts: {{ expected_prompts | length }}"
+          - "Expected Datasets: {{ expected_datasets | length }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Langfuse credentials
+      ansible.builtin.set_fact:
+        langfuse_public_key: >-
+          {{ inventory._state.apps.langfuse.public_key | default(langfuse_public_key) }}
+        langfuse_secret_key: >-
+          {{ inventory._state.apps.langfuse.secret_key | default(langfuse_secret_key) }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        langfuse_base_url: "{{ inventory._state.apps.langfuse.url }}"
+        langfuse_api_base: "{{ inventory._state.apps.langfuse.url }}/api/public"
+      when: inventory._state.apps.langfuse.url is defined
+
+    - name: Load expected resources from BWS state if not provided
+      ansible.builtin.set_fact:
+        expected_prompts: >-
+          {{
+            expected_prompts if expected_prompts | length > 0
+            else (inventory._state.apps.langfuse.prompts | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_datasets: >-
+          {{
+            expected_datasets if expected_datasets | length > 0
+            else (inventory._state.apps.langfuse.datasets | default({}) | dict2items | map(attribute='key') | list)
+          }}
+
+    # ===== STEP 2: Verify Langfuse API is accessible =====
+    - name: Check Langfuse API health (projects endpoint as health check)
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/projects"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200, 401, 403]
+        validate_certs: false
+      register: api_health
+      failed_when: false
+      no_log: true
+
+    - name: Evaluate API health status
+      ansible.builtin.set_fact:
+        api_accessible: "{{ api_health.status == 200 }}"
+        api_auth_valid: "{{ api_health.status == 200 }}"
+        api_error: >-
+          {{
+            'Authentication failed' if api_health.status in [401, 403]
+            else ('Connection failed: ' + (api_health.msg | default('unknown error'))) if api_health.status is not defined
+            else 'OK'
+          }}
+
+    - name: Display API connectivity result
+      ansible.builtin.debug:
+        msg:
+          - "API Accessible: {{ api_accessible }}"
+          - "Auth Valid: {{ api_auth_valid }}"
+          - "Status: {{ api_error }}"
+
+    - name: Assert Langfuse API is accessible
+      ansible.builtin.assert:
+        that:
+          - api_accessible | bool
+        fail_msg: "Langfuse API is not accessible at {{ langfuse_base_url }} - {{ api_error }}"
+        success_msg: "Langfuse API is accessible and authentication is valid"
+
+    # ===== STEP 3: Verify Prompts =====
+    - name: List all prompts
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/prompts?limit=100"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200]
+        validate_certs: false
+      register: prompts_list
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Extract prompt names
+      ansible.builtin.set_fact:
+        existing_prompt_names: "{{ prompts_list.json.data | default([]) | map(attribute='name') | list }}"
+      when: api_accessible | bool
+
+    - name: Check expected prompts exist
+      ansible.builtin.set_fact:
+        prompt_results: >-
+          {{
+            prompt_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_prompt_names
+            }]
+          }}
+      loop: "{{ expected_prompts }}"
+      when:
+        - api_accessible | bool
+        - expected_prompts | length > 0
+
+    - name: Get prompt details for existing prompts
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/prompts/{{ item | urlencode }}"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+        validate_certs: false
+      register: prompt_details_results
+      loop: "{{ expected_prompts }}"
+      when:
+        - api_accessible | bool
+        - expected_prompts | length > 0
+        - item in existing_prompt_names
+      failed_when: false
+      no_log: true
+
+    - name: Build prompt details summary
+      ansible.builtin.set_fact:
+        prompt_details_summary: >-
+          {{
+            prompt_details_summary | default([]) + [{
+              'name': item.item,
+              'version': item.json.version | default('unknown'),
+              'type': item.json.type | default('unknown'),
+              'found': item.status == 200
+            }]
+          }}
+      loop: "{{ prompt_details_results.results | default([]) }}"
+      when:
+        - api_accessible | bool
+        - item.json is defined
+
+    # ===== STEP 4: Verify Datasets =====
+    - name: List all datasets
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/datasets?limit=100"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200]
+        validate_certs: false
+      register: datasets_list
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Extract dataset names
+      ansible.builtin.set_fact:
+        existing_dataset_names: "{{ datasets_list.json.data | default([]) | map(attribute='name') | list }}"
+      when: api_accessible | bool
+
+    - name: Check expected datasets exist
+      ansible.builtin.set_fact:
+        dataset_results: >-
+          {{
+            dataset_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_dataset_names
+            }]
+          }}
+      loop: "{{ expected_datasets }}"
+      when:
+        - api_accessible | bool
+        - expected_datasets | length > 0
+
+    - name: Get dataset details for existing datasets
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/datasets/{{ item | urlencode }}"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+        validate_certs: false
+      register: dataset_details_results
+      loop: "{{ expected_datasets }}"
+      when:
+        - api_accessible | bool
+        - expected_datasets | length > 0
+        - item in existing_dataset_names
+      failed_when: false
+      no_log: true
+
+    - name: Build dataset details summary
+      ansible.builtin.set_fact:
+        dataset_details_summary: >-
+          {{
+            dataset_details_summary | default([]) + [{
+              'name': item.item,
+              'id': item.json.id | default('unknown'),
+              'items_count': item.json.items | default([]) | length,
+              'found': item.status == 200
+            }]
+          }}
+      loop: "{{ dataset_details_results.results | default([]) }}"
+      when:
+        - api_accessible | bool
+        - item.json is defined
+
+    # ===== STEP 5: Get Overall Statistics =====
+    - name: Get trace count for statistics
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/traces?limit=1"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200]
+        validate_certs: false
+      register: traces_count
+      no_log: true
+      failed_when: false
+      when: api_accessible | bool
+
+    - name: Get score count for statistics
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}/scores?limit=1"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200]
+        validate_certs: false
+      register: scores_count
+      no_log: true
+      failed_when: false
+      when: api_accessible | bool
+
+    # ===== STEP 6: Calculate Verification Results =====
+    - name: Calculate prompt verification result
+      ansible.builtin.set_fact:
+        all_prompts_exist: >-
+          {{
+            (prompt_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate dataset verification result
+      ansible.builtin.set_fact:
+        all_datasets_exist: >-
+          {{
+            (dataset_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            api_accessible | bool and
+            api_auth_valid | bool and
+            all_prompts_exist | bool and
+            all_datasets_exist | bool
+          }}
+
+    # ===== STEP 7: Verification Summary =====
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          langfuse_url: "{{ langfuse_base_url }}"
+          api_accessible: "{{ api_accessible }}"
+          api_auth_valid: "{{ api_auth_valid }}"
+          prompts:
+            expected: "{{ expected_prompts | length }}"
+            found: "{{ prompt_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_prompts_exist }}"
+            details: "{{ prompt_details_summary | default([]) }}"
+          datasets:
+            expected: "{{ expected_datasets | length }}"
+            found: "{{ dataset_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_datasets_exist }}"
+            details: "{{ dataset_details_summary | default([]) }}"
+          statistics:
+            total_prompts: "{{ existing_prompt_names | default([]) | length }}"
+            total_datasets: "{{ existing_dataset_names | default([]) | length }}"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Langfuse Configuration Verification Summary"
+          - "=========================================="
+          - ""
+          - "Langfuse URL: {{ langfuse_base_url }}"
+          - "API Accessible: {{ 'YES' if api_accessible else 'NO' }}"
+          - "Authentication: {{ 'VALID' if api_auth_valid else 'INVALID' }}"
+          - ""
+          - "PROMPTS:"
+          - "  Total in Langfuse: {{ existing_prompt_names | default([]) | length }}"
+          - "  Expected: {{ expected_prompts | length }}"
+          - "  Found: {{ prompt_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_prompts_exist }}"
+          - ""
+          - "DATASETS:"
+          - "  Total in Langfuse: {{ existing_dataset_names | default([]) | length }}"
+          - "  Expected: {{ expected_datasets | length }}"
+          - "  Found: {{ dataset_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_datasets_exist }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Display prompt details
+      ansible.builtin.debug:
+        msg:
+          - "PROMPT DETAILS:"
+          - "{{ prompt_details_summary | default([]) | to_nice_yaml }}"
+      when: prompt_details_summary is defined and prompt_details_summary | length > 0
+
+    - name: Display dataset details
+      ansible.builtin.debug:
+        msg:
+          - "DATASET DETAILS:"
+          - "{{ dataset_details_summary | default([]) | to_nice_yaml }}"
+      when: dataset_details_summary is defined and dataset_details_summary | length > 0
+
+    - name: Display missing resources if any
+      ansible.builtin.debug:
+        msg:
+          - "MISSING RESOURCES:"
+          - "  Prompts: {{ prompt_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Datasets: {{ dataset_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+      when: not all_checks_passed
+
+    - name: Fail if critical checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          Langfuse configuration verification failed.
+          See summary above for details.
+      when: not all_checks_passed and fail_on_missing | bool
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "Langfuse configuration verification complete - all checks passed"
+      when: all_checks_passed

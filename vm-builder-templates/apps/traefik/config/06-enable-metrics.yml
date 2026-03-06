@@ -1,0 +1,232 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/traefik/06-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/config/06-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "traefik"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["traefik_deployed"]
+#   provides: ["traefik_metrics_enabled"]
+#   tags: ["traefik", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Traefik Prometheus metrics endpoint. Patches the Traefik
+#     deployment to add --metrics.prometheus args and a metrics entrypoint
+#     on port 9100. Adds prometheus.io annotations to the pod template
+#     for automatic scrape discovery. Verifies the /metrics endpoint
+#     responds after rollout.
+#   requires_apps: ["traefik", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Enable Traefik Prometheus Metrics Endpoint
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    traefik_namespace: "traefik"
+    metrics_port: 9100
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF TRAEFIK IS DEPLOYED ==========
+    - name: Check if Traefik deployment exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ traefik_namespace }}
+          -l app.kubernetes.io/name=traefik --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_deploy_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Traefik not deployed
+      ansible.builtin.meta: end_play
+      when: traefik_deploy_check.rc != 0 or traefik_deploy_check.stdout | length == 0
+
+    # ========== GET TRAEFIK DEPLOYMENT NAME ==========
+    - name: Get Traefik deployment name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ traefik_namespace }}
+          -l app.kubernetes.io/name=traefik
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_deploy_name
+      changed_when: false
+
+    - name: Set Traefik deployment name fact
+      ansible.builtin.set_fact:
+        traefik_deployment: "{{ traefik_deploy_name.stdout }}"
+
+    # ========== CHECK IF METRICS ALREADY ENABLED ==========
+    - name: Get current Traefik container args
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[0].args}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_current_args
+      changed_when: false
+
+    - name: Check if Prometheus metrics already enabled
+      ansible.builtin.set_fact:
+        metrics_already_enabled: "{{ '--metrics.prometheus' in (traefik_current_args.stdout | default('')) }}"
+
+    - name: Note metrics already enabled
+      ansible.builtin.debug:
+        msg: "Traefik Prometheus metrics already enabled - skipping args patch"
+      when: metrics_already_enabled
+
+    # ========== PATCH TRAEFIK DEPLOYMENT WITH METRICS ARGS ==========
+    # Traefik supports Prometheus metrics via CLI args. We add:
+    #   --metrics.prometheus=true        — enable the Prometheus metrics exporter
+    #   --metrics.prometheus.entryPoint=metrics — serve metrics on a named entrypoint
+    #   --entrypoints.metrics.address=:9100    — bind the metrics entrypoint to port 9100
+    - name: Patch Traefik deployment with metrics arguments
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          --type=json
+          -p=[
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--metrics.prometheus=true"},
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--metrics.prometheus.entryPoint=metrics"},
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--entrypoints.metrics.address=:9100"}
+          ]
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: metrics_args_patch
+      changed_when: "'patched' in metrics_args_patch.stdout and '(no change)' not in metrics_args_patch.stdout"
+      when: not metrics_already_enabled
+
+    # ========== ADD METRICS CONTAINER PORT ==========
+    # The metrics entrypoint port must be declared in the container spec
+    # for Kubernetes service discovery to work correctly.
+    - name: Check if metrics port already declared
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[0].ports[*].containerPort}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_ports
+      changed_when: false
+
+    - name: Add metrics container port
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          --type=json
+          -p=[{"op": "add", "path": "/spec/template/spec/containers/0/ports/-",
+               "value": {"containerPort": {{ metrics_port }}, "name": "metrics", "protocol": "TCP"}}]
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: port_patch
+      changed_when: "'patched' in port_patch.stdout and '(no change)' not in port_patch.stdout"
+      when: "metrics_port | string not in (current_ports.stdout | default(''))"
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    # Prometheus auto-discovers scrape targets via pod annotations.
+    # These annotations tell Prometheus to scrape this pod on port 9100 at /metrics.
+    - name: Check if prometheus scrape annotation already set
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: scrape_annotation_check
+      changed_when: false
+      failed_when: false
+
+    - name: Add Prometheus scrape annotations to pod template
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          --type=merge
+          -p={"spec":{"template":{"metadata":{"annotations":{
+            "prometheus.io/scrape":"true",
+            "prometheus.io/port":"{{ metrics_port }}",
+            "prometheus.io/path":"/metrics"
+          }}}}}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: annotation_patch
+      changed_when: "'patched' in annotation_patch.stdout and '(no change)' not in annotation_patch.stdout"
+      when: scrape_annotation_check.stdout != "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Traefik rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status deployment/{{ traefik_deployment }}
+          -n {{ traefik_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not metrics_already_enabled
+
+    # ========== VERIFY METRICS ENDPOINT ==========
+    - name: Get Traefik pod name after rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ traefik_namespace }}
+          -l app.kubernetes.io/name=traefik
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: _traefik_pod_result
+      changed_when: false
+
+    - name: Verify /metrics endpoint responds
+      ansible.builtin.command:
+        cmd: >-
+          kubectl exec -n {{ traefik_namespace }} {{ _traefik_pod_result.stdout }}
+          -- wget -q -O - http://127.0.0.1:{{ metrics_port }}/metrics
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: metrics_check
+      retries: 10
+      delay: 6
+      until: metrics_check.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if metrics endpoint not responding
+      ansible.builtin.fail:
+        msg: "Traefik /metrics endpoint not responding on port {{ metrics_port }} (rc: {{ metrics_check.rc | default('unknown') }})"
+      when: metrics_check.rc is not defined or metrics_check.rc != 0
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Traefik Prometheus Metrics Enabled"
+          - "=========================================="
+          - ""
+          - "Status: {{ 'Already enabled' if metrics_already_enabled else 'Enabled' }}"
+          - "Metrics Port: {{ metrics_port }}"
+          - "Metrics Path: /metrics"
+          - "EntryPoint: metrics"
+          - ""
+          - "Prometheus Annotations:"
+          - "  prometheus.io/scrape: true"
+          - "  prometheus.io/port: {{ metrics_port }}"
+          - "  prometheus.io/path: /metrics"
+          - ""
+          - "Add a scrape_config or ServiceMonitor in Prometheus"
+          - "to collect Traefik metrics."
+          - "=========================================="

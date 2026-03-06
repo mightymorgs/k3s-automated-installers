@@ -1,0 +1,402 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# Infrastructure:                                                #}
+{#   vm_hostname           - VM name (REQUIRED, no default)       #}
+{#   kubeconfig_path       - Path to kubeconfig                   #}
+{#                           (default: /etc/rancher/k3s/k3s.yaml) #}
+{#   registry_path_default - Relative fallback for REGISTRY_PATH  #}
+{#                           (default: playbook_dir/../../../registry.json) #}
+{#                                                                #}
+{# Service:                                                       #}
+{#   authentik_registry_key - Registry key for authentik           #}
+{#                            (default: authentik)                 #}
+{#   authentik_api_version  - API version path segment             #}
+{#                            (default: v3)                        #}
+{#                                                                #}
+{# State:                                                         #}
+{#   bws_cache_path        - Path to BWS secrets cache            #}
+{#                           (default: /tmp/bws_secrets.json)     #}
+{#   bws_inventory_prefix  - BWS key prefix for inventory         #}
+{#                           (default: inventory)                 #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   target_hosts          - Ansible host pattern                 #}
+{#                           (default: k3s_servers)               #}
+{#   api_token_identifier  - Identifier for the automation token  #}
+{#                           (default: phase5-api-token)          #}
+{# ============================================================== #}
+---
+- name: Create Authentik Proxy Providers for Cloudflare Apps
+  hosts: "{{ '{{ ' }} target_hosts | default('{{ target_hosts | default('k3s_servers') }}') {{ ' }}' }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    registry_path: "{{ '{{ ' }} lookup('env', 'REGISTRY_PATH') | default(playbook_dir ~ '/{{ registry_path_default | default('../../../registry.json') }}') {{ ' }}' }}"
+
+  tasks:
+    # === Read inventory + registry ===
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ '{{ ' }} inventory_raw.stdout | from_json {{ ' }}' }}"
+
+    - name: Read app registry
+      ansible.builtin.slurp:
+        src: "{{ '{{ ' }} registry_path {{ ' }}' }}"
+      register: registry_content
+      delegate_to: localhost
+      become: false
+
+    - name: Parse registry
+      ansible.builtin.set_fact:
+        app_registry: "{{ '{{ ' }} registry_content.content | b64decode | from_json {{ ' }}' }}"
+
+    - name: Extract authentik service details from registry
+      ansible.builtin.set_fact:
+        _ak_namespace: "{{ '{{ ' }} app_registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.namespace {{ ' }}' }}"
+        _ak_service: "{{ '{{ ' }} app_registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.service_name {{ ' }}' }}"
+        _ak_port: "{{ '{{ ' }} app_registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.service_port {{ ' }}' }}"
+        _ak_subdomain: "{{ '{{ ' }} app_registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.subdomain {{ ' }}' }}"
+
+    # === Resolve authentik service IP (K8s DNS not available from runner) ===
+    - name: Resolve authentik ClusterIP
+      ansible.builtin.shell: |
+        kubectl get svc {{ '{{ ' }} _ak_service {{ ' }}' }} -n {{ '{{ ' }} _ak_namespace {{ ' }}' }} -o jsonpath='{.spec.clusterIP}'
+      environment:
+        KUBECONFIG: {{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}
+      register: authentik_ip_raw
+      changed_when: false
+
+    - name: Set authentik URL
+      ansible.builtin.set_fact:
+        authentik_url: "http://{{ '{{ ' }} authentik_ip_raw.stdout | trim {{ ' }}' }}:{{ '{{ ' }} _ak_port {{ ' }}' }}"
+
+    - name: Extract config
+      ansible.builtin.set_fact:
+        ingress_domain: "{{ '{{ ' }} _inventory.ingress.domain {{ ' }}' }}"
+        default_ingress_mode: "{{ '{{ ' }} _inventory.ingress.mode | default('nodeport') {{ ' }}' }}"
+        app_overrides: "{{ '{{ ' }} _inventory.ingress.app_overrides | default({}) {{ ' }}' }}"
+        installed_apps: "{{ '{{ ' }} _inventory._state.apps.installed | default([]) {{ ' }}' }}"
+
+    - name: Extract SSO overrides
+      ansible.builtin.set_fact:
+        sso_overrides: "{{ '{{ ' }} _inventory.ingress.sso_overrides | default({}) {{ ' }}' }}"
+
+    # === Filter to Cloudflare-mode SSO apps ===
+    - name: Build override lists
+      ansible.builtin.set_fact:
+        _non_cf_overrides: >-
+          {{ '{{ ' }} app_overrides | dict2items |
+          rejectattr('value', 'equalto', 'cloudflare') |
+          map(attribute='key') | list {{ ' }}' }}
+        _cf_overrides: >-
+          {{ '{{ ' }} app_overrides | dict2items |
+          selectattr('value', 'equalto', 'cloudflare') |
+          map(attribute='key') | list {{ ' }}' }}
+
+    - name: Extract installed SSO-enabled apps
+      ansible.builtin.set_fact:
+        _all_sso_apps: >-
+          {{ '{{ ' }} app_registry.apps | dict2items |
+          selectattr('value.sso.enabled', 'defined') |
+          selectattr('value.sso.enabled', 'equalto', true) |
+          selectattr('value.sso.forwardauth.enabled', 'defined') |
+          selectattr('value.sso.forwardauth.enabled', 'equalto', true) |
+          selectattr('key', 'in', installed_apps) |
+          list {{ ' }}' }}
+
+    - name: Filter to cloudflare-mode SSO apps (default=cloudflare)
+      ansible.builtin.set_fact:
+        cf_sso_apps: >-
+          {{ '{{ ' }} _all_sso_apps | rejectattr('key', 'in', _non_cf_overrides) | list {{ ' }}' }}
+      when: default_ingress_mode == 'cloudflare'
+
+    - name: Filter to cloudflare-mode SSO apps (default!=cloudflare)
+      ansible.builtin.set_fact:
+        cf_sso_apps: >-
+          {{ '{{ ' }} _all_sso_apps | selectattr('key', 'in', _cf_overrides) | list {{ ' }}' }}
+      when: default_ingress_mode != 'cloudflare'
+
+    - name: Apply sso_overrides (exclude disabled apps)
+      ansible.builtin.set_fact:
+        cf_sso_apps: >-
+          {{ '{{ ' }} cf_sso_apps |
+          rejectattr('key', 'in',
+            sso_overrides | dict2items |
+            rejectattr('value', 'equalto', true) |
+            map(attribute='key') | list
+          ) | list {{ ' }}' }}
+      when: sso_overrides | length > 0
+
+    - name: Display apps requiring proxy providers
+      ansible.builtin.debug:
+        msg: "Creating proxy providers for {{ '{{ ' }} cf_sso_apps | length {{ ' }}' }} apps: {{ '{{ ' }} cf_sso_apps | map(attribute='key') | join(', ') {{ ' }}' }}"
+
+    # === Get authentik admin token ===
+    - name: Try BWS inventory for admin token
+      ansible.builtin.set_fact:
+        authentik_token: "{{ '{{ ' }} _inventory._state.apps.{{ authentik_registry_key | default('authentik') }}.admin_token | default('') {{ ' }}' }}"
+      no_log: true
+
+    - name: Create API token via recovery key if not in BWS
+      when: authentik_token | length == 0
+      block:
+        - name: Create recovery key for akadmin
+          ansible.builtin.shell: |
+            kubectl exec statefulset/authentik-server -n {{ '{{ ' }} _ak_namespace {{ ' }}' }} -- ak create_recovery_key 10 akadmin 2>&1 | tail -1
+          environment:
+            KUBECONFIG: {{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}
+          register: recovery_output
+          changed_when: false
+
+        - name: Extract recovery token from URL
+          ansible.builtin.shell: |
+            echo "{{ '{{ ' }} recovery_output.stdout {{ ' }}' }}" | grep -oP '/use-token/\K[^/]+'
+          register: recovery_token_raw
+          changed_when: false
+
+        - name: Authenticate via recovery token
+          ansible.builtin.shell: |
+            set -eu
+            curl -s -c /tmp/ak_cookies.txt \
+              -L \
+              -o /dev/null \
+              "{{ '{{ ' }} authentik_url {{ ' }}' }}/recovery/use-token/{{ '{{ ' }} recovery_token_raw.stdout | trim {{ ' }}' }}/"
+            SESSION=$(grep authentik_session /tmp/ak_cookies.txt | awk '{print $NF}' || true)
+            CSRF=$(grep authentik_csrf /tmp/ak_cookies.txt | awk '{print $NF}' || true)
+            echo "$SESSION"
+            echo "$CSRF"
+          register: auth_raw
+          changed_when: false
+
+        - name: Set session vars
+          ansible.builtin.set_fact:
+            _ak_session: "{{ '{{ ' }} auth_raw.stdout_lines[0] {{ ' }}' }}"
+            _ak_csrf: "{{ '{{ ' }} auth_raw.stdout_lines[1] {{ ' }}' }}"
+          no_log: true
+
+        - name: Check if {{ api_token_identifier | default('phase5-api-token') }} already exists
+          ansible.builtin.shell: |
+            curl -s \
+              -b "authentik_session={{ '{{ ' }} _ak_session {{ ' }}' }}; authentik_csrf={{ '{{ ' }} _ak_csrf {{ ' }}' }}" \
+              -H "X-authentik-CSRF: {{ '{{ ' }} _ak_csrf {{ ' }}' }}" \
+              "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/core/tokens/?identifier={{ api_token_identifier | default('phase5-api-token') }}"
+          register: token_check_raw
+          changed_when: false
+
+        - name: Create API token if not exists
+          ansible.builtin.shell: |
+            curl -s \
+              -b "authentik_session={{ '{{ ' }} _ak_session {{ ' }}' }}; authentik_csrf={{ '{{ ' }} _ak_csrf {{ ' }}' }}" \
+              -H "X-authentik-CSRF: {{ '{{ ' }} _ak_csrf {{ ' }}' }}" \
+              -H "Content-Type: application/json" \
+              -X POST \
+              -d '{"identifier": "{{ api_token_identifier | default('phase5-api-token') }}", "intent": "api", "description": "Phase 5 automation", "expiring": false}' \
+              "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/core/tokens/"
+          register: token_create_raw
+          changed_when: true
+          when: (token_check_raw.stdout | from_json).pagination.count == 0
+
+        - name: View token key
+          ansible.builtin.shell: |
+            curl -s \
+              -b "authentik_session={{ '{{ ' }} _ak_session {{ ' }}' }}; authentik_csrf={{ '{{ ' }} _ak_csrf {{ ' }}' }}" \
+              -H "X-authentik-CSRF: {{ '{{ ' }} _ak_csrf {{ ' }}' }}" \
+              "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/core/tokens/{{ api_token_identifier | default('phase5-api-token') }}/view_key/" | jq -r '.key'
+          register: token_key_raw
+          changed_when: false
+
+        - name: Set authentik token
+          ansible.builtin.set_fact:
+            authentik_token: "{{ '{{ ' }} token_key_raw.stdout | trim {{ ' }}' }}"
+          no_log: true
+
+        - name: Clean up cookie jar
+          ansible.builtin.file:
+            path: /tmp/ak_cookies.txt
+            state: absent
+
+    # === Get authorization + invalidation flows (UUIDs required) ===
+    - name: Get authorization flow
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer {{ '{{ ' }} authentik_token {{ ' }}' }}" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/flows/instances/?designation=authorization" | jq -r '.results[0].pk'
+      register: auth_flow_raw
+      changed_when: false
+
+    - name: Get invalidation flow
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer {{ '{{ ' }} authentik_token {{ ' }}' }}" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/flows/instances/?designation=invalidation" | jq -r '.results[0].pk'
+      register: invalidation_flow_raw
+      changed_when: false
+
+    - name: Set flow UUIDs
+      ansible.builtin.set_fact:
+        auth_flow_pk: "{{ '{{ ' }} auth_flow_raw.stdout | trim {{ ' }}' }}"
+        invalidation_flow_pk: "{{ '{{ ' }} invalidation_flow_raw.stdout | trim {{ ' }}' }}"
+
+    # === Create proxy providers + applications ===
+    - name: Create or get proxy provider for each app
+      ansible.builtin.shell: |
+        set -eu
+        APP_NAME="{{ '{{ ' }} item.key {{ ' }}' }}"
+        EXISTING=$(curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/providers/proxy/?search=${APP_NAME}-proxy")
+        COUNT=$(echo "$EXISTING" | jq '.pagination.count')
+        if [ "$COUNT" -gt 0 ]; then
+          echo "$EXISTING" | jq -r '.results[0].pk'
+          exit 0
+        fi
+        RESULT=$(curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d '{
+            "name": "{{ '{{ ' }} item.key {{ ' }}' }}-proxy",
+            "authorization_flow": "{{ '{{ ' }} auth_flow_pk {{ ' }}' }}",
+            "invalidation_flow": "{{ '{{ ' }} invalidation_flow_pk {{ ' }}' }}",
+            "external_host": "https://{{ '{{ ' }} item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} ingress_domain {{ ' }}' }}",
+            "internal_host": "http://{{ '{{ ' }} item.value.ingress.service_name {{ ' }}' }}.{{ '{{ ' }} item.value.ingress.namespace {{ ' }}' }}.svc.cluster.local:{{ '{{ ' }} item.value.ingress.service_port {{ ' }}' }}",
+            "mode": "forward_single"
+          }' \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/providers/proxy/")
+        PK=$(echo "$RESULT" | jq -r '.pk // empty')
+        if [ -z "$PK" ]; then
+          echo "ERROR: $(echo "$RESULT" | jq -c .)" >&2
+          exit 1
+        fi
+        echo "$PK"
+      environment:
+        AK_TOKEN: "{{ '{{ ' }} authentik_token {{ ' }}' }}"
+      loop: "{{ '{{ ' }} cf_sso_apps {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.key {{ ' }}' }}"
+      register: provider_results
+
+    - name: Create application for each provider
+      ansible.builtin.shell: |
+        set -eu
+        APP_NAME="{{ '{{ ' }} item.item.key {{ ' }}' }}"
+        PROVIDER_PK="{{ '{{ ' }} item.stdout | trim {{ ' }}' }}"
+        EXISTING=$(curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/core/applications/?slug=${APP_NAME}")
+        COUNT=$(echo "$EXISTING" | jq '.pagination.count')
+        if [ "$COUNT" -gt 0 ]; then
+          echo "exists"
+          exit 0
+        fi
+        curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d "{
+            \"name\": \"${APP_NAME}\",
+            \"slug\": \"${APP_NAME}\",
+            \"provider\": ${PROVIDER_PK},
+            \"meta_launch_url\": \"https://{{ '{{ ' }} item.item.value.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} ingress_domain {{ ' }}' }}\"
+          }" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/core/applications/"
+      environment:
+        AK_TOKEN: "{{ '{{ ' }} authentik_token {{ ' }}' }}"
+      loop: "{{ '{{ ' }} provider_results.results {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.item.key {{ ' }}' }}"
+      register: app_results
+
+    # === Bind providers to embedded outpost ===
+    - name: Get embedded outpost
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer {{ '{{ ' }} authentik_token {{ ' }}' }}" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/outposts/instances/?name__icontains=embedded" | jq -r '.results[0].pk'
+      register: outpost_pk_raw
+      changed_when: false
+
+    - name: Get current outpost providers
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer {{ '{{ ' }} authentik_token {{ ' }}' }}" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/outposts/instances/{{ '{{ ' }} outpost_pk_raw.stdout | trim {{ ' }}' }}/" | jq '[.providers[]]'
+      register: current_providers_raw
+      changed_when: false
+
+    - name: Build merged provider list
+      ansible.builtin.set_fact:
+        all_provider_pks: >-
+          {{ '{{ ' }} (current_providers_raw.stdout | from_json) +
+          (provider_results.results | map(attribute='stdout') | map('trim') | map('int') | list) | unique {{ ' }}' }}
+
+    - name: Update outpost with providers and host config
+      ansible.builtin.shell: |
+        set -eu
+        AUTH_URL="https://{{ '{{ ' }} _ak_subdomain {{ ' }}' }}.{{ '{{ ' }} ingress_domain {{ ' }}' }}/"
+        curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X PATCH \
+          -d "$(jq -n \
+            --argjson providers '{{ '{{ ' }} all_provider_pks | to_json {{ ' }}' }}' \
+            --arg host "$AUTH_URL" \
+            '{providers: $providers, config: {authentik_host: $host, authentik_host_browser: $host}}')" \
+          "{{ '{{ ' }} authentik_url {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}/outposts/instances/{{ '{{ ' }} outpost_pk_raw.stdout | trim {{ ' }}' }}/"
+      environment:
+        AK_TOKEN: "{{ '{{ ' }} authentik_token {{ ' }}' }}"
+      changed_when: true
+
+    # === Write state to BWS ===
+    - name: Build provider metadata
+      ansible.builtin.set_fact:
+        provider_metadata: >-
+          {{ '{{ ' }} provider_metadata | default({}) |
+          combine({item.item.key: {'provider_pk': item.stdout | trim | int, 'app_slug': item.item.key}}) {{ ' }}' }}
+      loop: "{{ '{{ ' }} provider_results.results {{ ' }}' }}"
+      loop_control:
+        label: "{{ '{{ ' }} item.item.key {{ ' }}' }}"
+
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Write proxy provider state and admin token to BWS
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ '{{ ' }} _inv_id_raw.stdout | trim {{ ' }}' }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        updated=$(printf '%s' "$inv" | jq \
+          --argjson providers '{{ '{{ ' }} provider_metadata | to_json {{ ' }}' }}' \
+          --arg token "{{ '{{ ' }} authentik_token {{ ' }}' }}" \
+          '._state.sso.proxy_providers = $providers |
+           ._state.apps.{{ authentik_registry_key | default('authentik') }}.admin_token = $token')
+
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ '{{ ' }} lookup('env', 'BWS_ACCESS_TOKEN') {{ ' }}' }}"
+      changed_when: true
+      no_log: true
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "Proxy providers created for {{ '{{ ' }} cf_sso_apps | length {{ ' }}' }} apps"
+          - "Providers bound to embedded outpost ({{ '{{ ' }} outpost_pk_raw.stdout | trim {{ ' }}' }})"
+          - "Admin token saved to BWS for future runs"
+          - "ForwardAuth address: http://{{ '{{ ' }} _ak_service {{ ' }}' }}.{{ '{{ ' }} _ak_namespace {{ ' }}' }}.svc.cluster.local:{{ '{{ ' }} _ak_port {{ ' }}' }}/outpost.goauthentik.io/auth/traefik"

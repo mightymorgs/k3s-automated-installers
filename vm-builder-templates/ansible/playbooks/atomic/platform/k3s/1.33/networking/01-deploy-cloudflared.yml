@@ -1,0 +1,228 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/networking/01-deploy-cloudflared"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/networking/01-deploy-cloudflared.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "networking"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflared"
+#       folder_version: "1.33"
+#       supported_versions: ["latest", "2024.x", "2025.x"]
+#       version_range: ">=2024.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       bws: ">=0.4.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - cloudflared: "latest"
+#         k3s: "1.33.5+k3s1"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-10"
+#         notes: "Requires BWS access token and Cloudflare tunnel credentials"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "media_stack_deployed", "traefik_running", "bws_configured"]
+#   provides: ["cloudflared_deployed", "https_access_enabled"]
+#   tags: ["k3s", "cloudflare", "tunnel", "https", "networking", "ingress"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Deploy Cloudflare Tunnel (cloudflared) for HTTPS access to media stack
+- name: Deploy Cloudflare Tunnel for Media Stack HTTPS
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+    media_namespace: media-stack
+    cloudflare_secret_key: cloudflare/tunnel/media_stack_production
+    project_root: "{{ lookup('env', 'PWD') | regex_replace('/ansible$', '') }}"
+  tasks:
+    # ========== PHASE 0: Resolve Secrets from Bitwarden ==========
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Deploying Cloudflare Tunnel
+          - ==========================================
+          - 'Namespace: {{ media_namespace }}'
+          - 'Secret Store: Bitwarden Secrets Manager (BWS)'
+          - 'Secret Key: {{ cloudflare_secret_key }}'
+          - 'Purpose: HTTPS access via Cloudflare Tunnel'
+          - ==========================================
+    - name: Verify BWS access token is set
+      ansible.builtin.assert:
+        that: [bws_access_token is defined, bws_access_token | length > 0]
+        fail_msg: BWS_ACCESS_TOKEN environment variable is not set
+    - name: Resolve Bitwarden secret UUID
+      ansible.builtin.command: >
+        docker run --rm
+          -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+          bitwarden/bws secret list --output json
+      register: bws_secret_list
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      delegate_to: localhost
+      no_log: true
+    - name: Extract UUID for Cloudflare tunnel secret
+      ansible.builtin.set_fact:
+        cloudflare_secret_uuid: >-
+          {{ (bws_secret_list.stdout | from_json)
+               | selectattr('key', 'equalto', cloudflare_secret_key)
+               | map(attribute='id')
+               | first | default('') }}
+      no_log: true
+    - name: Retrieve Cloudflare tunnel credentials from Bitwarden
+      ansible.builtin.command: >
+        docker run --rm
+          -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+          bitwarden/bws secret get {{ cloudflare_secret_uuid }} --output json
+      register: cloudflare_secret_raw
+      changed_when: false
+      failed_when: cloudflare_secret_uuid == ''
+      check_mode: false
+      delegate_to: localhost
+      no_log: true
+    - name: Parse Cloudflare credentials
+      ansible.builtin.set_fact:
+        cloudflare_creds: >-
+          {{ (cloudflare_secret_raw.stdout | from_json).value | from_json }}
+      no_log: true
+    - name: Verify required Cloudflare fields present
+      ansible.builtin.assert:
+        that:
+          - cloudflare_creds.tunnel_run_token is defined
+          - cloudflare_creds.tunnel_run_token | length > 0
+          - cloudflare_creds.tunnel_id is defined
+          - cloudflare_creds.tunnel_id | length > 0
+        fail_msg: Cloudflare tunnel credentials incomplete in Bitwarden
+
+    # ========== PHASE 1: Create Kubernetes Resources ==========
+    - name: Fetch kubeconfig from remote host
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_raw
+    - name: Save kubeconfig locally
+      ansible.builtin.copy:
+        content: "{{ kubeconfig_raw.content | b64decode | regex_replace('127.0.0.1', ansible_host) }}"
+        dest: /tmp/media-stack-kubeconfig.yaml
+        mode: '0600'
+      delegate_to: localhost
+    - name: Ensure media-stack namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: '{{ media_namespace }}'
+        state: present
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+    - name: Create/Update Cloudflare Tunnel Secret (from Bitwarden)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: cloudflare-tunnel
+            namespace: '{{ media_namespace }}'
+          stringData:
+            tunnel_run_token: '{{ cloudflare_creds.tunnel_run_token }}'
+            tunnel_id: '{{ cloudflare_creds.tunnel_id }}'
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      no_log: true
+    - name: Deploy cloudflared Deployment
+      kubernetes.core.k8s:
+        state: present
+        definition: >-
+          {{ lookup('file', project_root ~ '/k8s/media-stack/base/cloudflared-deployment.yaml')
+          |
+          from_yaml }}
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: cloudflared_deploy
+
+    # ========== PHASE 2: Verify Deployment ==========
+    - name: Wait for cloudflared deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: cloudflared
+        namespace: '{{ media_namespace }}'
+        wait: true
+        wait_condition:
+          type: Available
+          status: 'True'
+        wait_timeout: 300
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+    - name: Get cloudflared pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        label_selectors: [app=cloudflared]
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: cloudflared_pods
+    - name: Get cloudflared logs (verify tunnel connection)
+      kubernetes.core.k8s_log:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        label_selectors: [app=cloudflared]
+        tail_lines: 20
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: cloudflared_logs_raw
+      failed_when: false
+    - name: Format logs output
+      ansible.builtin.set_fact:
+        cloudflared_logs:
+          stdout_lines: "{{ cloudflared_logs_raw.log.split('\n') if cloudflared_logs_raw.log is defined else [] }}"
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Cloudflare Tunnel Deployed Successfully!
+          - ==========================================
+          - ''
+          - 'Pods:'
+          - "{{ cloudflared_pods.resources | map(attribute='metadata.name') | list }}"
+          - ''
+          - 'Recent Logs:'
+          - '{{ cloudflared_logs.stdout_lines }}'
+          - ''
+          - ==========================================
+          - 'Tunnel Status:'
+          - '  Check: https://one.dash.cloudflare.com/'
+          - '  Navigate to: Zero Trust → Access → Tunnels'
+          - '  Tunnel ID: {{ cloudflare_creds.tunnel_id }}'
+          - "  Your tunnel should show 'Healthy' status"
+          - ''
+          - 'External Access:'
+          - "  https://auth.{{ domain | default('example.local') }} (Authentik)"
+          - "  https://sonarr.{{ domain | default('example.local') }}"
+          - "  https://radarr.{{ domain | default('example.local') }}"
+          - "  https://nzb.{{ domain | default('example.local') }}"
+          - "  https://qbit.{{ domain | default('example.local') }}"
+          - "  https://prowl.{{ domain | default('example.local') }}"
+          - "  https://req.{{ domain | default('example.local') }}"
+          - "  https://pstat.{{ domain | default('example.local') }}"
+          - ==========================================

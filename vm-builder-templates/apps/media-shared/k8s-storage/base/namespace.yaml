@@ -1,0 +1,9 @@
+---
+# Media Stack Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: media-stack
+  labels:
+    app.kubernetes.io/name: media-stack
+    app.kubernetes.io/managed-by: kustomize

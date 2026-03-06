@@ -1,0 +1,14 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-sso-protection.yml:
+    summary: Verify that a web application is protected by Authentik SSO. Checks OAuth
+      provider exists, application exists, ForwardAuth middleware is configured, and
+      unauthenticated requests redirect to Authentik for authentication.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ authentik_url }}/api/v3/providers/oauth2/?name={{ app_name }}-{{ client
+      }}'
+    - '{{ authentik_url }}/api/v3/core/applications/?slug={{ app_name }}'
+    - https://{{ app_host }}/

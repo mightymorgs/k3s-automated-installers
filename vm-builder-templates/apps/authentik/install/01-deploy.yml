@@ -1,0 +1,547 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "authentik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "authentik"
+#       supported_versions: ["2024.8.x", "2025.x"]
+#       version_range: ">=2024.8.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - authentik: "latest"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-02-19"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260219_authentik_j2"
+#   dependencies: ["k3s_server_installed", "traefik_deployed"]
+#   provides: ["authentik_deployed", "authentik_namespace_ready", "sso_provider_ready"]
+#   tags: ["authentik", "sso", "identity", "j2-template", "golden-master"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Authentik identity provider via J2 templates.
+#     Includes bundled PostgreSQL 16 and Redis 7.
+#     Secrets from K8s Secret (ESO will sync real values).
+#     Accessible via NodePort 30900.
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   credentials:
+#     secret_name: "authentik-secrets"
+#     fields:
+#       secret_key:
+#         bws_field: "secret_key"
+#         source: "k8s-secret"
+#       postgres_password:
+#         bws_field: "postgres_password"
+#         source: "k8s-secret"
+#       bootstrap_password:
+#         bws_field: "bootstrap_password"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.vault.url"
+#         purpose: "ESO ClusterSecretStore endpoint"
+#       - path: "inventory/shared/secrets/authentik/secret_key"
+#         purpose: "Authentik secret key"
+#       - path: "inventory/shared/secrets/authentik/postgres_password"
+#         purpose: "PostgreSQL password"
+#       - path: "inventory/shared/secrets/authentik/bootstrap_password"
+#         purpose: "Initial admin password"
+#     writes:
+#       - path: "_state.apps.authentik.status"
+#         example: "ready"
+#       - path: "_state.apps.authentik.url"
+#         example: "https://auth.example.com"
+#       - path: "_state.apps.authentik.api_token"
+#         example: "ak-..."
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "auth"
+#     service_name: "authentik"
+#     service_port: 9000
+#     namespace: "authentik"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: false
+#     reason: "authentik IS the SSO provider — no forwardauth on itself"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Authentik"
+#     icon: "key"
+#     category: "Security"
+#     description: "Identity Provider and SSO platform"
+#     docs_url: "https://docs.goauthentik.io/"
+#     port: 9000
+#     nodeport: 30900
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     authentik_image:
+#       label: "Authentik Image"
+#       description: "Docker image for authentik server + worker"
+#       type: "string"
+#       default: "ghcr.io/goauthentik/server:latest"
+#     postgres_image:
+#       label: "PostgreSQL Image"
+#       description: "Docker image for bundled PostgreSQL"
+#       type: "string"
+#       default: "postgres:16-alpine"
+#     redis_image:
+#       label: "Redis Image"
+#       description: "Docker image for bundled Redis"
+#       type: "string"
+#       default: "redis:7-alpine"
+#     busybox_image:
+#       label: "Busybox Image"
+#       description: "Init container image for wait-for checks"
+#       type: "string"
+#       default: "busybox:1.36"
+#     domain:
+#       label: "Domain"
+#       description: "Base domain for authentik and blueprint URLs"
+#       type: "string"
+#       required: true
+#     bootstrap_email:
+#       label: "Admin Email"
+#       description: "Initial admin account email"
+#       type: "string"
+#     log_level:
+#       label: "Log Level"
+#       description: "Authentik server and worker log level"
+#       type: "string"
+#       default: "info"
+#     server_replicas:
+#       label: "Server Replicas"
+#       description: "Number of authentik server replicas"
+#       type: "integer"
+#       default: 1
+#     worker_replicas:
+#       label: "Worker Replicas"
+#       description: "Number of authentik worker replicas"
+#       type: "integer"
+#       default: 1
+#     server_cpu_request:
+#       label: "Server CPU Request"
+#       description: "Minimum CPU for authentik server"
+#       type: "string"
+#       default: "200m"
+#     server_memory_request:
+#       label: "Server Memory Request"
+#       description: "Minimum memory for authentik server"
+#       type: "string"
+#       default: "512Mi"
+#     server_cpu_limit:
+#       label: "Server CPU Limit"
+#       description: "Maximum CPU for authentik server"
+#       type: "string"
+#       default: "1000m"
+#     server_memory_limit:
+#       label: "Server Memory Limit"
+#       description: "Maximum memory for authentik server"
+#       type: "string"
+#       default: "1Gi"
+#     worker_cpu_request:
+#       label: "Worker CPU Request"
+#       description: "Minimum CPU for authentik worker"
+#       type: "string"
+#       default: "100m"
+#     worker_memory_request:
+#       label: "Worker Memory Request"
+#       description: "Minimum memory for authentik worker"
+#       type: "string"
+#       default: "256Mi"
+#     worker_cpu_limit:
+#       label: "Worker CPU Limit"
+#       description: "Maximum CPU for authentik worker"
+#       type: "string"
+#       default: "500m"
+#     worker_memory_limit:
+#       label: "Worker Memory Limit"
+#       description: "Maximum memory for authentik worker"
+#       type: "string"
+#       default: "512Mi"
+#     postgres_host:
+#       label: "PostgreSQL Host"
+#       description: "Hostname for PostgreSQL service"
+#       type: "string"
+#       default: "authentik-postgres"
+#     redis_host:
+#       label: "Redis Host"
+#       description: "Hostname for Redis service"
+#       type: "string"
+#       default: "authentik-redis"
+#     http_port:
+#       label: "HTTP Port"
+#       description: "Authentik server HTTP port"
+#       type: "integer"
+#       default: 9000
+#     https_port:
+#       label: "HTTPS Port"
+#       description: "Authentik server HTTPS port"
+#       type: "integer"
+#       default: 9443
+#     metrics_port:
+#       label: "Metrics Port"
+#       description: "Authentik server metrics port"
+#       type: "integer"
+#       default: 9300
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type for authentik"
+#       type: "string"
+#       default: "NodePort"
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for all PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     postgres_storage_size:
+#       label: "PostgreSQL Storage"
+#       description: "Persistent volume size for PostgreSQL data"
+#       type: "string"
+#       default: "10Gi"
+#     media_storage_size:
+#       label: "Media Storage"
+#       description: "Persistent volume size for authentik media"
+#       type: "string"
+#       default: "5Gi"
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "integer"
+#       default: 30900
+
+- name: Deploy Authentik
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: authentik
+    app_namespace: "authentik"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/authentik-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    secrets_name: authentik-secrets
+
+  tasks:
+    # ========== 1. VERIFY PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: nodes_check.rc == 0
+
+    # ========== 2. CREATE NAMESPACE ==========
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name=authentik
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 3. RENDER J2 TEMPLATES ==========
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check if authentik secrets already exist
+      ansible.builtin.command: >-
+        kubectl get secret {{ secrets_name | default('authentik-secrets') }}
+        -n {{ app_namespace }} -o jsonpath='{.data.postgres-password}'
+      register: existing_secret
+      changed_when: false
+      failed_when: false
+
+    - name: Decode existing postgres password
+      ansible.builtin.set_fact:
+        existing_pg_password: "{{ existing_secret.stdout | b64decode }}"
+        existing_secret_found: true
+      when: existing_secret.rc == 0 and existing_secret.stdout != ''
+
+    - name: Set existing_secret_found to false if no secret
+      ansible.builtin.set_fact:
+        existing_secret_found: false
+      when: existing_secret.rc != 0 or existing_secret.stdout == ''
+
+    - name: Decode existing secret key
+      ansible.builtin.command: >-
+        kubectl get secret {{ secrets_name | default('authentik-secrets') }}
+        -n {{ app_namespace }} -o jsonpath='{.data.secret-key}'
+      register: existing_sk
+      changed_when: false
+      failed_when: false
+      when: existing_secret_found
+
+    - name: Set preserved secret values
+      ansible.builtin.set_fact:
+        authentik_postgres_password: "{{ existing_pg_password }}"
+        authentik_secret_key: "{{ existing_sk.stdout | b64decode }}"
+      when: existing_secret_found
+
+    - name: Generate new secret values for fresh install
+      ansible.builtin.set_fact:
+        authentik_secret_key: "{{ lookup('password', '/dev/null length=50 chars=ascii_letters,digits') }}"
+        authentik_postgres_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+      when: not existing_secret_found
+      no_log: true
+
+    - name: Set bootstrap defaults if not provided via extra-vars
+      ansible.builtin.set_fact:
+        authentik_bootstrap_password: "{{ authentik_bootstrap_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
+        bootstrap_email: "{{ bootstrap_email | default('admin@' ~ (domain | default('example.local'))) }}"
+      no_log: true
+
+    - name: Guard against empty secret values
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to deploy — credential field '{{ item.name }}' is empty.
+          This means neither preservation from an existing K8s Secret nor generation
+          produced a value. Check that the Secret exists or that the password lookup works.
+      when: item.value | length == 0
+      loop:
+        - { name: "authentik_secret_key", value: "{{ authentik_secret_key }}" }
+        - { name: "authentik_postgres_password", value: "{{ authentik_postgres_password }}" }
+        - { name: "authentik_bootstrap_password", value: "{{ authentik_bootstrap_password }}" }
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Render secrets template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/secrets.yaml.j2"
+        dest: "{{ render_dir }}/secrets.yaml"
+        mode: '0644'
+
+    - name: Render postgres template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/postgres.yaml.j2"
+        dest: "{{ render_dir }}/postgres.yaml"
+        mode: '0644'
+
+    - name: Render redis template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/redis.yaml.j2"
+        dest: "{{ render_dir }}/redis.yaml"
+        mode: '0644'
+
+    - name: Render server template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/server.yaml.j2"
+        dest: "{{ render_dir }}/server.yaml"
+        mode: '0644'
+
+    - name: Render worker template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/worker.yaml.j2"
+        dest: "{{ render_dir }}/worker.yaml"
+        mode: '0644'
+
+    - name: Render blueprints configmap template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/blueprints-configmap.yaml.j2"
+        dest: "{{ render_dir }}/blueprints-configmap.yaml"
+        mode: '0644'
+
+    - name: Check if Traefik CRDs are available
+      ansible.builtin.command: kubectl get crd middlewares.traefik.io
+      register: traefik_crds
+      changed_when: false
+      failed_when: false
+
+    - name: Render forwardauth middleware template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/forwardauth-middleware.yaml.j2"
+        dest: "{{ render_dir }}/forwardauth-middleware.yaml"
+        mode: '0644'
+      when: traefik_crds.rc == 0
+
+    - name: Render ingressroute template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/ingressroute.yaml.j2"
+        dest: "{{ render_dir }}/ingressroute.yaml"
+        mode: '0644'
+      when: traefik_crds.rc == 0
+
+    - name: Skip Traefik resources (CRDs not installed)
+      ansible.builtin.debug:
+        msg: "Skipping forwardauth middleware and ingressroute - Traefik CRDs not available (will be applied in Phase 5)"
+      when: traefik_crds.rc != 0
+
+    - name: Render PushSecret template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/pushsecret.yaml.j2"
+        dest: "{{ render_dir }}/pushsecret.yaml"
+        mode: '0644'
+
+    # ========== 5. APPLY RENDERED MANIFESTS ==========
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg:
+          - "Protected: {{ protected_apply.stdout_lines | default([]) }}"
+          - "Workloads: {{ workload_apply.stdout_lines | default([]) }}"
+
+    # ========== 6. WAIT FOR POSTGRES ==========
+    - name: Wait for PostgreSQL pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name=authentik-postgres
+        --timeout=120s
+      register: postgres_wait
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: postgres_wait.rc == 0
+
+    # ========== 7. WAIT FOR REDIS ==========
+    - name: Wait for Redis pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name=authentik-redis
+        --timeout=120s
+      register: redis_wait
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: redis_wait.rc == 0
+
+    # ========== 8. WAIT FOR AUTHENTIK SERVER ==========
+    - name: Wait for Authentik server pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app=authentik,component=server
+        --timeout=600s
+      register: server_wait
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: server_wait.rc == 0
+
+    # ========== 9. WAIT FOR AUTHENTIK WORKER ==========
+    - name: Wait for Authentik worker pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app=authentik,component=worker
+        --timeout=300s
+      register: worker_wait
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: worker_wait.rc == 0
+
+    # ========== 10. DISPLAY STATUS ==========
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Authentik Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ authentik_image | default('ghcr.io/goauthentik/server:latest') }}"
+          - "PostgreSQL: {{ postgres_image | default('postgres:16-alpine') }}"
+          - "Redis: {{ redis_image | default('redis:7-alpine') }}"
+          - "Access URL: http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30900) }}"
+          - "=========================================="
+
+    # ========== 11. CLEANUP ==========
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

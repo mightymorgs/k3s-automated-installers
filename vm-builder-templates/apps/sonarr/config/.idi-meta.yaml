@@ -1,0 +1,100 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure Sonarr via API (root folders, naming)
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ sonarr_url }}/api/v3/system/status'
+    - '{{ sonarr_url }}/api/v3/rootfolder'
+    - '{{ sonarr_url }}/api/v3/rootfolder'
+    - '{{ sonarr_url }}/api/v3/config/host'
+    - '{{ sonarr_url }}/api/v3/config/host'
+    - '{{ sonarr_url }}/api/v3/config/naming'
+    - '{{ sonarr_url }}/api/v3/config/naming'
+  05-wire-sabnzbd.yml:
+    summary: Register SABnzbd as download client in Sonarr and create tv-sonarr category
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ sonarr_url }}/api/v3/system/status'
+    - '{{ sabnzbd_url }}/api?mode=version&output=json&apikey={{ sabnzbd_api_key }}'
+    - '{{ sabnzbd_url }}/api?mode=get_config&section=categories&apikey={{ sabnzbd_api_key
+      }}&output=json'
+    - '{{ sabnzbd_url }}/api?mode=set_config&section=categories&keyword=tv-sonarr&name=name&value=tv-sonarr&apikey={{
+      sabnzbd_api_key }}&output=json'
+    - '{{ sonarr_url }}/api/v3/downloadclient'
+    - '{{ sonarr_url }}/api/v3/downloadclient'
+    requires_apps:
+    - sabnzbd
+    references_services:
+    - sabnzbd
+  06-wire-qbittorrent.yml:
+    summary: Register qBittorrent as torrent download client in Sonarr and create
+      tv-sonarr category
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ sonarr_url }}/api/v3/system/status'
+    - '{{ qbittorrent_url }}/api/v2/app/version'
+    - '{{ qbittorrent_url }}/api/v2/torrents/categories'
+    - '{{ qbittorrent_url }}/api/v2/torrents/createCategory'
+    - '{{ sonarr_url }}/api/v3/downloadclient'
+    - '{{ sonarr_url }}/api/v3/downloadclient'
+    requires_apps:
+    - qbittorrent
+    references_services:
+    - qbittorrent
+  07-wire-jellyfin.yml:
+    summary: Register Jellyfin as notification connection in Sonarr for library refresh
+      on episode import
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ sonarr_url }}/api/v3/system/status'
+    - '{{ sonarr_url }}/api/v3/notification'
+    - '{{ sonarr_url }}/api/v3/notification'
+    requires_apps:
+    - jellyfin
+  08-wire-plex.yml:
+    summary: Register Plex as notification connection in Sonarr for library refresh
+      on episode import
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ sonarr_url }}/api/v3/system/status'
+    - '{{ sonarr_url }}/api/v3/notification'
+    - '{{ sonarr_url }}/api/v3/notification'
+    requires_apps:
+    - plex
+  09-deploy-exporter.yml:
+    summary: Deploy Exportarr sidecar container to Sonarr StatefulSet for Prometheus
+      metrics scraping. Patches the StatefulSet to add the exportarr container on
+      port 9707 and adds prometheus.io annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+    references_services:
+    - app
+  10-import-plex-watchlist.yml:
+    summary: Import Plex Watchlist into Sonarr as an automatic import list. When users
+      add TV shows to their Plex Watchlist, Sonarr will automatically search for and
+      download them. Uses the PlexImport implementation with the Plex authentication
+      token.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ sonarr_url }}/api/v3/system/status'
+    - '{{ sonarr_url }}/api/v3/importlist'
+    - '{{ sonarr_url }}/api/v3/importlist'
+    requires_apps:
+    - plex
+depends_on_apps:
+- app
+- jellyfin
+- plex
+- prometheus
+- qbittorrent
+- sabnzbd

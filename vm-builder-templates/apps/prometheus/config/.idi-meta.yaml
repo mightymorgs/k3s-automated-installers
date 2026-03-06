@@ -1,0 +1,55 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: "Configure Prometheus for Tailscale Ingress mode. Sets --web.external-url\
+      \ so Prometheus generates correct self-referencing links when accessed via the\
+      \ Tailscale IP. Verifies --web.enable-lifecycle is present for remote config\
+      \ reload capability. Prometheus has no built-in authentication \u2014 Tailscale\
+      \ provides the network-level access control."
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prometheus_url }}/-/healthy'
+  05-wire-alertmanager.yml:
+    summary: Configure Prometheus to send alerts to Alertmanager. Prometheus uses
+      a YAML config file (not an API) for alertmanager_config. This playbook patches
+      the Prometheus ConfigMap to add the alerting.alertmanagers section pointing
+      to the Alertmanager K8s service, then triggers a config reload via the /-/reload
+      endpoint.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prometheus_url }}/-/reload'
+    requires_apps:
+    - alertmanager
+    references_services:
+    - alertmanager
+  06-enable-rule-files.yml:
+    summary: Add rule_files section to the Prometheus ConfigMap and mount a rules
+      ConfigMap. Creates an empty prometheus-rules ConfigMap as a placeholder for
+      alert rules, patches prometheus.yml to include rule_files pointing at /etc/prometheus/rules/*.yml,
+      and mounts the rules ConfigMap into the Prometheus deployment. Triggers a config
+      reload via /-/reload.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prometheus_url }}/-/reload'
+    - '{{ prometheus_url }}/-/healthy'
+  07-configure-alert-rules.yml:
+    summary: 'Create or update the prometheus-rules ConfigMap in the observability
+      namespace containing all Prometheus alert rules. Rules are split into two groups:
+      infrastructure (cert-manager, vault, argocd, longhorn, external-secrets, traefik,
+      authentik) and media-stack (sonarr, radarr, prowlarr, sabnzbd, qbittorrent,
+      jellyfin, plex). The prerequisite playbook (06-enable-rule-files.yml) sets up
+      the rule_files path and volume mount -- this playbook only manages the ConfigMap
+      content. Prometheus watches ConfigMaps if configured with rule_files, so no
+      restart is needed. Idempotent: skips apply if content hash unchanged.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ prometheus_url }}/api/v1/rules'
+    requires_apps:
+    - alertmanager
+depends_on_apps:
+- alertmanager

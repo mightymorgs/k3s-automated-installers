@@ -1,0 +1,10 @@
+---
+# Media Stack Namespace (J2 template)
+# Defaults match k8s-standalone/base/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ media_namespace | default('media-stack') }}
+  labels:
+    name: {{ media_namespace | default('media-stack') }}
+    app.kubernetes.io/part-of: media-automation

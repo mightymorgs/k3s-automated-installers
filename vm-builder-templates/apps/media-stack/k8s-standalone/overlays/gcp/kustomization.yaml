@@ -1,0 +1,166 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# GCP overlay: Uses Longhorn storage instead of NFS
+# Services use NodePort for Tailscale access (no LoadBalancer/MetalLB)
+
+namespace: media-stack
+
+resources:
+  - ../../base
+  - shared-storage-pvc.yaml
+
+patches:
+  # StatefulSet patches: Replace NFS with Longhorn shared storage
+  - target:
+      kind: StatefulSet
+      name: sonarr
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: shared-media
+            persistentVolumeClaim:
+              claimName: media-shared-pvc
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: config
+            mountPath: /config
+          - name: shared-media
+            mountPath: /media
+            subPath: media
+          - name: shared-media
+            mountPath: /downloads
+            subPath: downloads
+  - target:
+      kind: StatefulSet
+      name: radarr
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: shared-media
+            persistentVolumeClaim:
+              claimName: media-shared-pvc
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: config
+            mountPath: /config
+          - name: shared-media
+            mountPath: /media
+            subPath: media
+          - name: shared-media
+            mountPath: /downloads
+            subPath: downloads
+  - target:
+      kind: StatefulSet
+      name: sabnzbd
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: shared-media
+            persistentVolumeClaim:
+              claimName: media-shared-pvc
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: config
+            mountPath: /config
+          - name: shared-media
+            mountPath: /downloads
+            subPath: downloads
+  - target:
+      kind: StatefulSet
+      name: prowlarr
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: shared-media
+            persistentVolumeClaim:
+              claimName: media-shared-pvc
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: config
+            mountPath: /config
+          - name: shared-media
+            mountPath: /downloads
+            subPath: downloads
+  - target:
+      kind: StatefulSet
+      name: qbittorrent
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: shared-media
+            persistentVolumeClaim:
+              claimName: media-shared-pvc
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: config
+            mountPath: /config
+          - name: shared-media
+            mountPath: /downloads
+            subPath: downloads
+
+  # Service patches: Use NodePort instead of LoadBalancer (access via Tailscale IP)
+  - target:
+      kind: Service
+      name: sonarr
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30989
+  - target:
+      kind: Service
+      name: radarr
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30878
+  - target:
+      kind: Service
+      name: sabnzbd
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30880
+  - target:
+      kind: Service
+      name: prowlarr
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30696
+  - target:
+      kind: Service
+      name: qbittorrent
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30081
+
+commonLabels:
+  environment: gcp

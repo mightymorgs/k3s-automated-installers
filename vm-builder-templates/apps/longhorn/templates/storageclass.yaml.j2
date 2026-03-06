@@ -1,0 +1,84 @@
+---
+# Longhorn StorageClass Template
+# Variables:
+#   - replicas: Number of replicas (default: 3)
+#   - is_default: Set as default StorageClass (default: true)
+#   - data_locality: Data locality setting (default: "best-effort")
+#   - reclaim_policy: Reclaim policy (default: "Delete")
+#   - storage_class_name: Name of the StorageClass (default: "longhorn")
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ storage_class_name | default('longhorn') }}
+  annotations:
+{% if is_default | default(true) %}
+    storageclass.kubernetes.io/is-default-class: "true"
+{% endif %}
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: {{ reclaim_policy | default('Delete') }}
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "{{ replicas | default(3) }}"
+  dataLocality: "{{ data_locality | default('best-effort') }}"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+{% if disk_selector is defined %}
+  diskSelector: "{{ disk_selector }}"
+{% endif %}
+{% if node_selector is defined %}
+  nodeSelector: "{{ node_selector }}"
+{% endif %}
+
+---
+# Fast SSD-backed StorageClass (single replica, strict local)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-fast
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "1"
+  dataLocality: "strict-local"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  diskSelector: "ssd"
+  nodeSelector: ""
+
+---
+# Replicated StorageClass (high availability)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-replicated
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "{{ replicas | default(3) }}"
+  dataLocality: "{{ data_locality | default('best-effort') }}"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+
+---
+# Bulk HDD-backed StorageClass (single replica, cold storage)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-bulk
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "1"
+  dataLocality: "strict-local"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  diskSelector: "hdd"
+  nodeSelector: ""

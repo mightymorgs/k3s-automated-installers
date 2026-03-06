@@ -1,0 +1,17 @@
+---
+# Plex ConfigMap (J2 template)
+# Defaults match k8s-base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ configmap_name | default('plex-config') }}
+  namespace: {{ app_namespace | default('plex') }}
+  labels:
+    app: {{ app_name | default('plex') }}
+    app.kubernetes.io/name: {{ app_name | default('plex') }}
+data:
+  TZ: "{{ timezone | default('Australia/Sydney') }}"
+{% if plex_claim_token | default('') != '' %}
+  PLEX_CLAIM: "{{ plex_claim_token }}"
+{% endif %}
+  ADVERTISE_IP: "{{ advertise_ip | default('') }}"

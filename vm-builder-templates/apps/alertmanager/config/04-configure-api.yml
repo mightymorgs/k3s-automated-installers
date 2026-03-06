@@ -1,0 +1,119 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/alertmanager/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/alertmanager/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "alertmanager"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["alertmanager_deployed"]
+#   provides: ["alertmanager_api_configured"]
+#   tags: ["alertmanager", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Alertmanager for Tailscale Ingress mode.
+#     Alertmanager has no built-in authentication — auth is handled at
+#     the network level by Tailscale. This playbook sets --web.external-url
+#     so Alertmanager generates correct links when accessed via the tailnet,
+#     waits for the rollout, and verifies the /-/healthy endpoint.
+#   requires_apps: ["alertmanager"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.alertmanager.configured"
+#         example: true
+
+- name: Configure Alertmanager for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    alertmanager_namespace: "alertmanager"
+    app_namespace: "{{ alertmanager_namespace }}"
+    # alertmanager_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== 1. CHECK IF ALERTMANAGER IS DEPLOYED ==========
+    - name: Check if Alertmanager pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=alertmanager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: alertmanager_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Alertmanager not deployed
+      ansible.builtin.debug:
+        msg: "Alertmanager not deployed - skipping API configuration"
+      when: alertmanager_pod_check.rc != 0 or alertmanager_pod_check.stdout | length == 0
+
+    - name: End play if Alertmanager not available
+      ansible.builtin.meta: end_play
+      when: alertmanager_pod_check.rc != 0 or alertmanager_pod_check.stdout | length == 0
+
+    # ========== 2. SET EXTERNAL URL FOR TAILSCALE ACCESS ==========
+    # Alertmanager uses --web.external-url to generate correct links in
+    # notifications and the UI. We patch the StatefulSet to add this arg
+    # so links point to the Tailscale-accessible URL rather than localhost.
+    - name: Patch StatefulSet with --web.external-url for Tailscale
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset alertmanager -n {{ app_namespace }}
+          --type=json
+          -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/args", "value": ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/data", "--web.external-url={{ alertmanager_url }}"]}]'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout and '(no change)' not in patch_result.stdout"
+
+    # ========== 3. WAIT FOR ROLLOUT ==========
+    # StatefulSet rolling update restarts alertmanager-0 with the new args.
+    - name: Wait for Alertmanager StatefulSet rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/alertmanager -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== 4. VERIFY ALERTMANAGER IS ACCESSIBLE ==========
+    # Alertmanager exposes /-/healthy for liveness checks. No auth required
+    # since Alertmanager has no built-in authentication — Tailscale provides
+    # the network-level auth layer.
+    - name: Verify Alertmanager health endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ alertmanager_url }}/-/healthy"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Alertmanager not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Alertmanager not accessible after rollout (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== 5. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Alertmanager API Configuration Complete"
+          - "=========================================="
+          - "Built-in Auth: None (no login page to bypass)"
+          - "Auth Layer: Tailscale (network-level access control)"
+          - "External URL: {{ alertmanager_url }}"
+          - "Health Check: {{ alertmanager_url }}/-/healthy ({{ health_check.status }})"
+          - "=========================================="

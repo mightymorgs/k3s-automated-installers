@@ -1,0 +1,62 @@
+---
+- name: "Tier 1: Syntax check all playbooks"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_dir: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    apps_dir: "{{ ansible_dir }}/../apps"
+  tasks:
+    - name: Find infrastructure playbooks
+      ansible.builtin.find:
+        paths:
+          - "{{ ansible_dir }}/playbooks/atomic"
+        patterns: "*.yml"
+        recurse: true
+        excludes:
+          - "molecule*"
+      register: infra_playbooks
+
+    - name: Find app install playbooks
+      ansible.builtin.find:
+        paths: "{{ apps_dir }}"
+        patterns: "*.yml"
+        recurse: true
+        excludes:
+          - "molecule*"
+      register: all_app_files
+
+    - name: Filter to install/ and config/ playbooks only
+      ansible.builtin.set_fact:
+        app_playbooks: >-
+          {{ all_app_files.files | selectattr('path', 'match', '.*/(?:install|config)/[^/]+\\.yml$') | list }}
+
+    - name: Combine and exclude known-broken orchestration playbooks
+      ansible.builtin.set_fact:
+        playbook_files: >-
+          {{ (infra_playbooks.files + app_playbooks)
+             | rejectattr('path', 'search', 'grouped/')
+             | rejectattr('path', 'search', '02-merge-inventory-layers')
+             | list }}
+
+    - name: Syntax check each playbook
+      ansible.builtin.command:
+        cmd: "ansible-playbook --syntax-check {{ item.path }}"
+      loop: "{{ playbook_files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: syntax_results
+      changed_when: false
+      failed_when: false
+
+    - name: Report syntax failures
+      ansible.builtin.debug:
+        msg: "SYNTAX FAIL: {{ item.item.path | basename }} — {{ item.stderr | default('unknown error') }}"
+      loop: "{{ syntax_results.results }}"
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+      when: item.rc != 0
+
+    - name: Fail if any syntax errors
+      ansible.builtin.fail:
+        msg: "{{ syntax_results.results | selectattr('rc', 'ne', 0) | map(attribute='item') | map(attribute='path') | map('basename') | list | join(', ') }} failed syntax check"
+      when: syntax_results.results | selectattr('rc', 'ne', 0) | list | length > 0

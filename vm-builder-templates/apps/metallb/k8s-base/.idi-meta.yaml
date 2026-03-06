@@ -1,0 +1,27 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  metallb-native.yaml:
+    summary: 'K8s ConfigMap: metallb-native.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  overlays/staging/ipaddresspool.yaml:
+    summary: 'K8s IPAddressPool: ipaddresspool.yaml'
+    source: inferred
+    confidence: medium
+  overlays/staging/kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  overlays/staging/l2advertisement.yaml:
+    summary: 'K8s L2Advertisement: l2advertisement.yaml'
+    source: inferred
+    confidence: medium

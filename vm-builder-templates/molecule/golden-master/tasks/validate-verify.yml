@@ -1,0 +1,401 @@
+---
+# Validate verify playbook patterns against golden master rules.
+#
+# Expects: app_path (set by caller via loop_var)
+# Appends results to: validation_results (list)
+#
+# Rules checked (8 total):
+#   CRITICAL: no-ignore-errors, no-contradictory-error-handling,
+#             health-retries, health-hard-fail
+#   WARNING:  health-auto-detect, health-probe-timeout,
+#             ready-pod-selection, consistent-namespace-var
+
+# ========== 1. DISCOVER VERIFY PLAYBOOK ==========
+# Look for 02-verify.yml first, then fall back to any *verify*.yml pattern
+
+- name: "{{ app_path | basename }} | Check for verify playbook (02-verify.yml)"
+  ansible.builtin.stat:
+    path: "{{ app_path }}/install/02-verify.yml"
+  register: verify_standard
+
+- name: "{{ app_path | basename }} | Find alternative verify playbook"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/install"
+    patterns: "*verify*.yml"
+  register: verify_alternatives
+  when: not verify_standard.stat.exists
+
+- name: "{{ app_path | basename }} | Set verify file path"
+  ansible.builtin.set_fact:
+    verify_file: >-
+      {{ verify_standard.stat.path if verify_standard.stat.exists
+         else (verify_alternatives.files[0].path
+               if (verify_alternatives.files | default([]) | length > 0)
+               else '') }}
+
+# ========== 2. SLURP + DECODE ==========
+
+- name: "{{ app_path | basename }} | Read verify playbook"
+  ansible.builtin.slurp:
+    src: "{{ verify_file }}"
+  register: verify_content_raw
+  when: verify_file | trim != ''
+
+- name: "{{ app_path | basename }} | Decode verify content"
+  ansible.builtin.set_fact:
+    verify_content: "{{ verify_content_raw.content | b64decode }}"
+  when: verify_file | trim != ''
+
+- name: "{{ app_path | basename }} | Skip — no verify playbook found"
+  ansible.builtin.debug:
+    msg: "No verify playbook found for {{ app_path | basename }}, skipping verify rules"
+  when: verify_file | trim == ''
+
+# ========== 3. CRITICAL RULES ==========
+
+# Rule: no-ignore-errors (CRITICAL)
+# Verify playbooks must NEVER use ignore_errors: true.
+# This silently swallows health check failures, making the pipeline
+# report success when the app is actually broken.
+- name: "{{ app_path | basename }} | Rule: no-ignore-errors [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - "'ignore_errors: true' not in verify_content"
+      - "'ignore_errors: yes' not in verify_content"
+    fail_msg: >-
+      {{ app_path | basename }}: CRITICAL — ignore_errors found in verify playbook.
+      Health check failures will be silently swallowed.
+    quiet: true
+  register: rule_no_ignore_errors
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record no-ignore-errors result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'no-ignore-errors',
+        'category': 'verify',
+        'severity': 'critical',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_no_ignore_errors.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: pod-phase-check-retries (CRITICAL)
+# Pod phase check must have retries to handle the race condition after
+# replace --force where no pods exist yet.
+- name: "{{ app_path | basename }} | Rule: pod-phase-check-retries [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'items[0].status.phase' not in verify_content
+        or ('retries:' in verify_content and 'until:' in verify_content)
+    fail_msg: >-
+      {{ app_path | basename }}: CRITICAL — pod phase check uses .items[0].status.phase
+      without retries. This crashes with 'array index out of bounds' when no pods
+      exist yet (race after replace --force). Add retries + until.
+    quiet: true
+  register: rule_pod_phase_retries
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record pod-phase-check-retries result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'pod-phase-check-retries',
+        'category': 'verify',
+        'severity': 'critical',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_pod_phase_retries.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: no-contradictory-error-handling (CRITICAL)
+# No task should combine failed_when: with ignore_errors: true.
+# These are contradictory — failed_when defines failure conditions
+# while ignore_errors discards them.
+- name: "{{ app_path | basename }} | Rule: no-contradictory-error-handling [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - "not (verify_content is regex('failed_when:.*\\n.*ignore_errors:\\s*(true|yes)'))"
+      - "not (verify_content is regex('ignore_errors:\\s*(true|yes).*\\n.*failed_when:'))"
+    fail_msg: >-
+      {{ app_path | basename }}: CRITICAL — found both failed_when and ignore_errors
+      on the same task. These are contradictory — pick one.
+    quiet: true
+  register: rule_no_contradictory
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record no-contradictory-error-handling result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'no-contradictory-error-handling',
+        'category': 'verify',
+        'severity': 'critical',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_no_contradictory.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: health-retries (CRITICAL)
+# Health check tasks MUST use retries: keyword for transient failure
+# tolerance. Apps may take seconds to respond after pod readiness.
+- name: "{{ app_path | basename }} | Rule: health-retries [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('health' not in (verify_content | lower) and 'curl' not in verify_content and 'wget' not in verify_content)
+        or 'retries:' in verify_content
+    fail_msg: >-
+      {{ app_path | basename }}: CRITICAL — health check found without retries.
+      Health probes must use retries + until for transient failure tolerance.
+    quiet: true
+  register: rule_health_retries
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record health-retries result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'health-retries',
+        'category': 'verify',
+        'severity': 'critical',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_health_retries.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: health-hard-fail (CRITICAL)
+# Health check tasks must NOT use failed_when: false.
+# This silently passes even when the health endpoint returns errors.
+# Use failed_when: rc != 0 or omit failed_when entirely.
+- name: "{{ app_path | basename }} | Rule: health-hard-fail [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('health' not in (verify_content | lower) and 'curl' not in verify_content and 'wget' not in verify_content)
+        or 'failed_when: false' not in verify_content
+    fail_msg: >-
+      {{ app_path | basename }}: CRITICAL — health check uses failed_when: false.
+      Health failures will be silently passed. Use retries instead.
+    quiet: true
+  register: rule_health_hard_fail
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record health-hard-fail result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'health-hard-fail',
+        'category': 'verify',
+        'severity': 'critical',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_health_hard_fail.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# ========== 4. WARNING RULES ==========
+
+# Rule: health-auto-detect (WARNING)
+# Health probes should use 'command -v curl' auto-detection.
+# Not all container images ship curl (alpine/busybox use wget).
+# Pattern: command -v curl && curl ... || wget ...
+- name: "{{ app_path | basename }} | Rule: health-auto-detect [WARNING]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('health' not in (verify_content | lower) and 'curl' not in verify_content and 'wget' not in verify_content)
+        or 'command -v curl' in verify_content
+        or ('curl' not in verify_content and 'wget' not in verify_content)
+    fail_msg: >-
+      {{ app_path | basename }}: WARNING — health probe uses curl or wget directly
+      without auto-detection. Use 'command -v curl && curl ... || wget ...' pattern.
+    quiet: true
+  register: rule_health_auto_detect
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record health-auto-detect result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'health-auto-detect',
+        'category': 'verify',
+        'severity': 'warning',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_health_auto_detect.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: health-probe-timeout (WARNING)
+# Health probe commands must include explicit timeout flags.
+# curl: --max-time N, wget: --timeout=N
+# Without these, a hung endpoint blocks the pipeline indefinitely.
+- name: "{{ app_path | basename }} | Rule: health-probe-timeout [WARNING]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('curl' not in verify_content and 'wget' not in verify_content)
+        or '--max-time' in verify_content
+        or '--timeout' in verify_content
+        or 'health_probe_timeout_seconds' in verify_content
+    fail_msg: >-
+      {{ app_path | basename }}: WARNING — health probe lacks timeout flag.
+      Use --max-time (curl) or --timeout (wget) to prevent indefinite hangs.
+    quiet: true
+  register: rule_health_probe_timeout
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record health-probe-timeout result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'health-probe-timeout',
+        'category': 'verify',
+        'severity': 'warning',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_health_probe_timeout.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: ready-pod-selection (WARNING)
+# Pod discovery should use containerStatuses[0].ready==true jsonpath
+# or --field-selector=status.phase=Running with readiness validation.
+# A pod can be Running but not Ready (e.g., during init containers
+# or failing readiness probes).
+- name: "{{ app_path | basename }} | Rule: ready-pod-selection [WARNING]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'get pods' not in verify_content
+        or 'containerStatuses' in verify_content
+        or 'field-selector' in verify_content
+        or 'readyReplicas' in verify_content
+    fail_msg: >-
+      {{ app_path | basename }}: WARNING — pod discovery does not select Ready pods.
+      Use containerStatuses[0].ready==true jsonpath or --field-selector=status.phase=Running.
+    quiet: true
+  register: rule_ready_pod_selection
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record ready-pod-selection result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'ready-pod-selection',
+        'category': 'verify',
+        'severity': 'warning',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_ready_pod_selection.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: consistent-namespace-var (CRITICAL)
+# Verify playbooks must use the generic app_namespace variable,
+# not app-specific variants like vault_namespace or grafana_namespace.
+# The check detects {app}_namespace patterns (e.g., vault_namespace)
+# but allows app_namespace itself.
+- name: "{{ app_path | basename }} | Rule: consistent-namespace-var [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        (app_path | basename) + '_namespace' not in verify_content
+    fail_msg: >-
+      {{ app_path | basename }}: CRITICAL — uses {{ app_path | basename }}_namespace
+      instead of the generic app_namespace variable.
+    quiet: true
+  register: rule_consistent_namespace_var
+  failed_when: false
+  when: verify_content is defined
+
+- name: "{{ app_path | basename }} | Record consistent-namespace-var result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'consistent-namespace-var',
+        'category': 'verify',
+        'severity': 'critical',
+        'status': 'skip' if verify_content is not defined
+                  else ('pass' if (rule_consistent_namespace_var.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# Rule: no-duplicate-task-keys (WARNING)
+# YAML allows duplicate keys but the second silently overwrites the first.
+# This is a common copy-paste bug where retries/delay/until appear twice
+# on the same task. Ansible only uses the last occurrence.
+- name: "{{ app_path | basename }} | Rule: no-duplicate-task-keys [WARNING]"
+  ansible.builtin.shell: >-
+    grep -n '^\s\+retries:' "{{ verify_file }}" | wc -l
+  register: retries_count
+  changed_when: false
+  failed_when: false
+  when: verify_file | trim != ''
+
+- name: "{{ app_path | basename }} | Check duplicate retries vs tasks"
+  ansible.builtin.shell: >-
+    grep -c '^\s\+- name:' "{{ verify_file }}"
+  register: task_count
+  changed_when: false
+  failed_when: false
+  when: verify_file | trim != ''
+
+- name: "{{ app_path | basename }} | Assert no duplicate retries [WARNING]"
+  ansible.builtin.assert:
+    that:
+      - (retries_count.stdout | default('0') | int) <= (task_count.stdout | default('0') | int)
+    fail_msg: >-
+      {{ app_path | basename }}: WARNING — more retries: keys ({{ retries_count.stdout }})
+      than tasks ({{ task_count.stdout }}). Likely duplicate retries/delay/until from copy-paste.
+    quiet: true
+  register: rule_no_duplicate_keys
+  failed_when: false
+  when: verify_file | trim != '' and retries_count.stdout is defined and task_count.stdout is defined
+
+- name: "{{ app_path | basename }} | Record no-duplicate-task-keys result"
+  ansible.builtin.set_fact:
+    validation_results: >-
+      {{ validation_results | default([]) + [{
+        'app': app_path | basename,
+        'rule': 'no-duplicate-task-keys',
+        'category': 'verify',
+        'severity': 'warning',
+        'status': 'skip' if verify_file | default('') | trim == ''
+                  else ('pass' if (rule_no_duplicate_keys.evaluated_to | default(true))
+                  else 'FAIL'),
+        'file': verify_file | default('') | trim
+      }] }}
+
+# ========== 5. CLEANUP ==========
+# Clear per-app variables so they don't leak to the next app
+
+- name: "{{ app_path | basename }} | Clear verify variables"
+  ansible.builtin.set_fact:
+    verify_file: ''
+    verify_content: "{{ omit }}"

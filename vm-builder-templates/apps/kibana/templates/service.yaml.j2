@@ -1,0 +1,22 @@
+---
+# Kibana Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('kibana') }}
+  namespace: {{ app_namespace | default('kibana') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('kibana') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name | default('kibana') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(5601) }}
+      targetPort: {{ container_port | default(5601) }}
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30560) }}
+{% endif %}
+      protocol: TCP

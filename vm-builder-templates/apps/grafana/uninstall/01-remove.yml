@@ -1,0 +1,74 @@
+---
+- name: Uninstall Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: grafana
+    app_namespace: "observability"
+    delete_pvc: false
+
+  tasks:
+    - name: Check namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+      register: ns_check
+
+    - name: Skip if namespace does not exist
+      ansible.builtin.meta: end_play
+      when: ns_check.resources | length == 0
+
+    - name: Delete StatefulSet grafana
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: StatefulSet
+        name: grafana
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete Service grafana
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Service
+        name: grafana
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete PVCs for {{ app_name }}
+      when: delete_pvc | bool
+      block:
+        - name: Find PVCs with app label
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ app_namespace }}"
+            label_selectors:
+              - "app={{ app_name }}"
+          register: app_pvcs
+
+        - name: Remove PVCs
+          kubernetes.core.k8s:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            name: "{{ item.metadata.name }}"
+            namespace: "{{ app_namespace }}"
+            state: absent
+          loop: "{{ app_pvcs.resources }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+    - name: Verify removal
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: grafana
+        namespace: "{{ app_namespace }}"
+      register: verify
+      failed_when: verify.resources | length > 0

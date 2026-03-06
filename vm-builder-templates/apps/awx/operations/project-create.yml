@@ -1,0 +1,266 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/operations/project-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "awx.projects.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/operations/project-create.yml"
+#     category: "platform"
+#     subsystem: "awx"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["23.x", "24.x"]
+#       version_range: ">=23.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - awx: "24.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from AWX API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_awx_operations"
+#   dependencies: ["awx_deployed", "awx_running"]
+#   provides: ["awx_project_created"]
+#   tags: ["awx", "project", "scm", "automation", "operations"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an AWX project for SCM-based playbook management. This operation
+#     is idempotent - if a project with the same name exists, it will be skipped.
+#     Supports all project parameters including SCM type, URL, branch, and credentials.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.token"
+#         purpose: "AWX API token for authentication"
+#       - path: "_state.apps.awx.url"
+#         purpose: "AWX service URL"
+#
+#     writes:
+#       - path: "_state.apps.awx.projects.{project_name}.id"
+#         example: 42
+#       - path: "_state.apps.awx.projects.{project_name}.status"
+#         example: "created"
+
+- name: AWX - Create Project
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    awx_base_url: "{{ awx_url }}"
+    awx_api_base: "{{ awx_base_url }}/api/v2"
+
+    # Required fields
+    # project_name: Name of the project (required)
+
+    # Optional fields with sensible defaults
+    project_description: "{{ project_description_input | default('') }}"
+    organization_id: "{{ organization_id_input | default(1) }}"
+    scm_type: "{{ scm_type_input | default('git') }}"
+    scm_url: "{{ scm_url_input | default('') }}"
+    scm_branch: "{{ scm_branch_input | default('main') }}"
+    scm_credential_id: "{{ scm_credential_id_input | default(omit) }}"
+    scm_clean: "{{ scm_clean_input | default(true) }}"
+    scm_delete_on_update: "{{ scm_delete_on_update_input | default(false) }}"
+    scm_update_on_launch: "{{ scm_update_on_launch_input | default(true) }}"
+    scm_update_cache_timeout: "{{ scm_update_cache_timeout_input | default(0) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - project_name is defined and project_name | length > 0
+        fail_msg: "Required inputs missing: project_name is required"
+        success_msg: "All required inputs validated: project_name={{ project_name }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and AWX Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract AWX token
+      ansible.builtin.set_fact:
+        awx_token: "{{ inventory._state.apps.awx.token }}"
+      no_log: true
+
+    - name: Validate AWX token is available
+      ansible.builtin.assert:
+        that:
+          - awx_token | length > 0
+        fail_msg: "AWX token not found in BWS _state. Ensure AWX is configured."
+        success_msg: "AWX token retrieved from BWS _state"
+
+    # ===== STEP 4: Check for Existing Project (Idempotency) =====
+    - name: Check if project already exists by name
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/?name={{ project_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: existing_project
+      no_log: false
+
+    - name: Set project exists flag
+      ansible.builtin.set_fact:
+        project_exists: "{{ existing_project.json.count > 0 }}"
+        existing_project_id: "{{ existing_project.json.results[0].id | default(0) }}"
+
+    - name: Skip creation if project exists
+      ansible.builtin.debug:
+        msg: >-
+          Project '{{ project_name }}' already exists with ID: {{ existing_project_id }}
+      when: project_exists
+
+    # ===== STEP 5: Create Project =====
+    - name: Build project payload
+      ansible.builtin.set_fact:
+        project_payload:
+          name: "{{ project_name }}"
+          description: "{{ project_description }}"
+          organization: "{{ organization_id }}"
+          scm_type: "{{ scm_type }}"
+          scm_url: "{{ scm_url }}"
+          scm_branch: "{{ scm_branch }}"
+          scm_clean: "{{ scm_clean }}"
+          scm_delete_on_update: "{{ scm_delete_on_update }}"
+          scm_update_on_launch: "{{ scm_update_on_launch }}"
+          scm_update_cache_timeout: "{{ scm_update_cache_timeout }}"
+      when: not project_exists
+
+    - name: Add credential to payload if provided
+      ansible.builtin.set_fact:
+        project_payload: "{{ project_payload | combine({'credential': scm_credential_id}) }}"
+      when:
+        - not project_exists
+        - scm_credential_id is defined
+        - scm_credential_id | string | length > 0
+
+    - name: Create AWX project
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ project_payload }}"
+        status_code: [201]
+        validate_certs: false
+      register: create_result
+      when: not project_exists
+      no_log: false
+
+    - name: Set created project ID
+      ansible.builtin.set_fact:
+        created_project_id: "{{ create_result.json.id }}"
+      when: not project_exists
+
+    # ===== STEP 6: Wait for Project Sync =====
+    - name: Wait for initial project sync to complete
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/{{ created_project_id }}/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: project_status
+      until: >-
+        project_status.json.current_job is none or
+        project_status.json.status in ['successful', 'failed', 'error']
+      retries: 30
+      delay: 10
+      when: not project_exists
+      no_log: false
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Update BWS inventory with project info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Merge project info into _state.apps.awx.projects
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ project_name }}" \
+          --argjson id {{ created_project_id | default(existing_project_id) }} \
+          --arg status "{{ 'created' if not project_exists else 'existing' }}" \
+          --arg scm_url "{{ scm_url }}" \
+          --arg scm_branch "{{ scm_branch }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.awx == null then ._state.apps.awx = {} else . end |
+          if ._state.apps.awx.projects == null then ._state.apps.awx.projects = {} else . end |
+          ._state.apps.awx.projects[$name] = {
+            "id": $id,
+            "status": $status,
+            "scm_url": $scm_url,
+            "scm_branch": $scm_branch,
+            "updated_at": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 8: Output Result =====
+    - name: Display project creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if project_exists else 'created' }}"
+          project_name: "{{ project_name }}"
+          project_id: "{{ existing_project_id if project_exists else created_project_id }}"
+          scm_type: "{{ scm_type }}"
+          scm_url: "{{ scm_url }}"
+          scm_branch: "{{ scm_branch }}"

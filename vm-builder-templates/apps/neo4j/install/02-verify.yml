@@ -1,0 +1,138 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/neo4j/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/neo4j/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "neo4j"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "neo4j"
+#       supported_versions: ["5.24.x", "5.25.x", "5.26.x"]
+#       version_range: ">=5.24.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - neo4j: "5.26.1"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-04"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260224_neo4j_refactor"
+#   dependencies: ["neo4j_deployed"]
+#   provides: ["neo4j_verified", "neo4j_healthy"]
+#   tags: ["neo4j", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify Neo4j deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.neo4j.verified"
+#         example: true
+
+- name: Verify Neo4j Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: neo4j
+    app_namespace: "neo4j"
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. POD PHASE CHECK ==========
+    - name: Check pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.rc != 0 or pod_phase.stdout != 'Running'
+      retries: 6
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_phase.rc == 0 and pod_phase.stdout == 'Running'
+
+    # ========== 2. GET READY POD NAME ==========
+    - name: Get ready pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 3. HEALTH CHECK (block/rescue) ==========
+    - name: Health check block
+      block:
+        - name: Test Neo4j health via cypher-shell
+          ansible.builtin.command: >-
+            kubectl -n {{ app_namespace }} exec {{ app_pod.stdout }} --
+            /bin/sh -c "NEO4J_PASS=$(echo \"$NEO4J_AUTH\" | cut -d/ -f2-); cypher-shell -u neo4j -p \"${NEO4J_PASS:-neo4j}\" 'RETURN 1 AS health'"
+          register: health_check
+          changed_when: false
+          failed_when: health_check.rc != 0
+          retries: 3
+          delay: "{{ retry_interval_seconds }}"
+          until: health_check.rc == 0
+
+      rescue:
+        - name: Capture failure diagnostics
+          ansible.builtin.set_fact:
+            health_failure:
+              app: "{{ app_name }}"
+              namespace: "{{ app_namespace }}"
+              pod: "{{ app_pod.stdout | default('unknown') }}"
+              endpoint: "cypher-shell RETURN 1 AS health"
+              rc: "{{ health_check.rc | default('N/A') }}"
+              stderr: "{{ health_check.stderr | default('') | truncate(500) }}"
+              stdout: "{{ health_check.stdout | default('') | truncate(500) }}"
+
+        - name: Fail with diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Health check failed for {{ app_name }}.
+              Diagnostics: {{ health_failure | to_nice_json }}
+
+    # ========== 4. SERVICE EXISTENCE CHECK ==========
+    - name: Check service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc {{ app_name }}
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 5. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Neo4j Verification Summary"
+          - "=========================================="
+          - "Pod Phase:      {{ pod_phase.stdout | default('UNKNOWN') }} -- {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "Ready Pod:      {{ app_pod.stdout | default('NONE') }} -- {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Health Check:   cypher-shell -- {{ 'OK' if health_check.rc == 0 else 'FAILED' }}"
+          - "Service:        {{ service_check.stdout | default('NONE') }} -- {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

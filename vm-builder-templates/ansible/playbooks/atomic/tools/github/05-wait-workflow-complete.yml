@@ -1,0 +1,152 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/github/05-wait-workflow-complete"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/github/05-wait-workflow-complete.yml"
+#     category: "tools"
+#     subsystem: "github"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "gh-api"
+#       folder_version: null
+#       supported_versions: ["2020-01-01+"]
+#       version_range: ">=2020-01-01"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - gh-api: "2024-11-01"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-13"
+#         notes: >-
+#           Polls workflow run status via GitHub REST API with 10s interval,
+#           20min timeout, fails if conclusion != success
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["github_workflow_dispatched"]
+#   provides: ["github_workflow_verified"]
+#   tags: ["github", "actions", "workflow", "wait"]
+#   estimated_duration: 600
+#   parallel_safe: true
+#   idempotent: true
+#   description: Poll a GitHub Actions run until completion and report status
+- name: Wait for GitHub Actions run to complete
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    repo_name: "{{ target_repo_name | default('media-stack') }}"
+    run_id: "{{ target_run_id | default('') }}"
+    poll_interval: 10
+    max_attempts: 120  # 20 min timeout
+    bws_access_token: "{{ lookup('env','BWS_ACCESS_TOKEN') }}"
+    secrets_json_path: "{{ project_root | default(playbook_dir + '/../../../../..') }}/secrets/secrets.json"
+  pre_tasks:
+    - name: Resolve GitHub PAT from Bitwarden (if available) or secrets.json
+      ansible.builtin.command: >-
+        docker run --rm
+        -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+        bitwarden/bws secret list --output json
+      register: bws_list
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: bws_access_token | length > 0
+    - name: Parse PAT secret id from Bitwarden list (if available)
+      ansible.builtin.set_fact:
+        github_pat_id_from_bws: >-
+          {{ (vars.get('bws_list', {}).get('stdout', '[]') | from_json
+             | selectattr('key','search','github')
+             | selectattr('key','search','token|pat')
+             | map(attribute='id') | list | first | default('')) }}
+      no_log: true
+    - name: If PAT id found in Bitwarden, get value
+      ansible.builtin.command: >-
+        docker run --rm
+        -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+        bitwarden/bws secret get {{ github_pat_id_from_bws }} --output json
+      register: bws_pat
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: github_pat_id_from_bws is defined and github_pat_id_from_bws | length
+        > 0
+    - name: Finalize PAT selection
+      ansible.builtin.set_fact:
+        github_pat: >-
+          {{ (bws_pat.stdout | default('') | ternary((bws_pat.stdout | from_json).value,
+          ''))
+             if (bws_pat is defined and bws_pat.stdout is defined and bws_pat.stdout|length>0)
+             else ((lookup('file', secrets_json_path) | from_json).github.token
+          | default('')) }}
+      no_log: true
+    - name: Resolve GitHub owner via API
+      ansible.builtin.uri:
+        url: https://api.github.com/user
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: gh_user
+      no_log: true
+    - name: Set GitHub owner fact
+      ansible.builtin.set_fact:
+        github_owner: "{{ (gh_user.json.login | default('')) }}"
+    - name: If no run_id provided, get latest dispatch run id
+      ansible.builtin.uri:
+        url: >-
+          https: >-
+            //api.github.com/repos/{{ github_owner }}/{{ repo_name }}/actions/runs?event=workflow_dispatch&per_page=1
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: runs_list
+      when: run_id | length == 0
+      no_log: true
+    - name: Set run id fact when not passed
+      ansible.builtin.set_fact:
+        run_id: "{{ (runs_list.json.workflow_runs | first).id | default('') }}"
+      when: run_id | length == 0
+  tasks:
+    - name: Assert run id available
+      ansible.builtin.assert:
+        that: [run_id | length > 0]
+        fail_msg: No workflow run_id available to monitor
+    - name: Poll workflow run status
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/{{ github_owner }}/{{ repo_name }}/actions/runs/{{
+          run_id }}
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: run_status
+      until: run_status.json.status == 'completed'
+      retries: '{{ max_attempts }}'
+      delay: '{{ poll_interval }}'
+      failed_when: false
+    - name: Report run result
+      ansible.builtin.debug:
+        msg:
+          - 'Workflow URL: {{ run_status.json.html_url }}'
+          - 'Status: {{ run_status.json.status }}'
+          - 'Conclusion: {{ run_status.json.conclusion }}'
+    - name: Fail when run did not succeed
+      ansible.builtin.fail:
+        msg: Workflow run failed ({{ run_status.json.conclusion }})
+      when: run_status.json.conclusion is defined and run_status.json.conclusion
+        != 'success'

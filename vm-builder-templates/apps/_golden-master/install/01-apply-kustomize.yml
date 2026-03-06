@@ -1,0 +1,308 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/_golden-master/01-apply-kustomize"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/_golden-master/install/01-apply-kustomize.yml"
+#     category: "apps"
+#     subsystem: "_golden-master"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "_golden-master"
+#       supported_versions: ["latest"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - _golden-master: "latest"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "reference"
+#         test_date: "2026-03-04"
+#         notes: "Golden master reference — not deployable"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260304_golden_master_kustomize"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["app_deployed", "app_namespace_ready"]
+#   tags: ["golden-master", "kustomize", "reference"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Canonical kustomize install playbook — reference for apps that use
+#     kubectl apply -k instead of J2 template rendering (e.g. argocd,
+#     cert-manager). Includes all golden master safety patterns.
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   # Kustomize apps typically have operator-managed secrets.
+#   # Operator creates the secret; we extract from it.
+#   credentials:
+#     secret_name: "{{ app_name }}-initial-admin-secret"
+#     fields:
+#       password:
+#         bws_field: "admin_password"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.vault.url"
+#         purpose: "ESO ClusterSecretStore endpoint"
+#     writes:
+#       - path: "_state.apps.{{ app_name }}.status"
+#         example: "ready"
+#       - path: "_state.apps.{{ app_name }}.url"
+#         example: "https://{{ app_name }}.example.com"
+#       - path: "_state.apps.{{ app_name }}.nodeport"
+#         example: 30000
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Golden Master (Kustomize)"
+#     icon: "layers"
+#     category: "Reference"
+#     description: "Canonical kustomize install reference — not deployable"
+
+- name: "Deploy {{ app_name }} (kustomize)"
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: _golden_master
+    app_namespace: "golden-master"
+    # Kustomize directory — relative to playbook or absolute path
+    kustomize_dir: "{{ playbook_dir }}/../k8s-base"
+    # PushSecret template for credential pipeline
+    pushsecret_template: "{{ playbook_dir }}/../templates/pushsecret.yaml.j2"
+    pushsecret_render_path: "/tmp/{{ app_name }}-pushsecret.yaml"
+    # Mode-dependent action for workload resources
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+
+    # Operator-managed secret name (kustomize apps often use operator defaults)
+    operator_secret_name: "{{ app_name }}-initial-admin-secret"
+    operator_secret_key: "password"
+
+    # Credential fields to extract from operator-managed secrets
+    # (empty list = no credential extraction needed)
+    credential_fields:
+      - field_name: admin_password
+        k8s_key: "{{ operator_secret_key }}"
+        bws_field: admin_password
+
+    # Global timeout constants (arch review addition)
+    # Centralised here so molecule can verify no magic numbers in tasks.
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+  tasks:
+    # ========== 1. VERIFY PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    - name: Cluster sanity check
+      ansible.builtin.command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    # ========== 2. CHECK EXISTING SECRETS ==========
+    # Kustomize apps typically have operator-managed secrets. We check if
+    # the operator has already created the secret (e.g. argocd-initial-admin-secret).
+    # If it exists, we preserve it — no regeneration needed.
+    - name: Check for existing operator-managed secret
+      ansible.builtin.command: >-
+        kubectl get secret {{ operator_secret_name }}
+        -n {{ app_namespace }}
+        -o jsonpath='{.data.{{ item.k8s_key }}}'
+      register: existing_secret_checks
+      changed_when: false
+      failed_when: false
+      loop: "{{ credential_fields }}"
+      loop_control:
+        label: "{{ item.field_name }}"
+      no_log: true
+
+    - name: Preserve existing secret values
+      ansible.builtin.set_fact:
+        "{{ item.item.field_name }}": "{{ item.stdout | b64decode }}"
+      when: item.rc == 0 and item.stdout | length > 0 and (item.stdout | b64decode | length) > 0
+      loop: "{{ existing_secret_checks.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.field_name }}"
+      no_log: true
+
+    # ========== 3. ENSURE NAMESPACE + LABELS ==========
+    # Namespace must exist before kustomize apply. Created idempotently
+    # via dry-run pipe pattern.
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 4. DRY-RUN VALIDATION (arch review addition) ==========
+    # Validate the kustomize output against the API server before applying.
+    # Catches schema errors, missing CRDs, and invalid field values early.
+    - name: Validate kustomize output against API server (dry-run)
+      ansible.builtin.command:
+        cmd: kubectl apply -k {{ kustomize_dir }} --dry-run=server
+      register: dryrun_result
+      changed_when: false
+      failed_when: dryrun_result.rc != 0
+
+    # ========== 5. APPLY KUSTOMIZE ==========
+    # Unlike the J2 variant, kustomize applies all resources at once via
+    # kubectl apply -k. This is safe because kustomize handles ordering
+    # internally (namespaces, CRDs first, then workloads).
+    #
+    # We always use 'apply' (not replace --force) for the kustomize base
+    # because it contains mixed resource types including secrets and CRDs.
+    # Kustomize manages the full set — we cannot split by numeric prefix.
+    - name: Apply kustomize manifests
+      ansible.builtin.command:
+        cmd: kubectl apply -k {{ kustomize_dir }}
+      register: kustomize_apply
+      changed_when: "'created' in kustomize_apply.stdout or 'configured' in kustomize_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg: "{{ kustomize_apply.stdout_lines | default([]) }}"
+
+    # ========== 6. TWO-STEP WAIT ==========
+    # Step 1: Wait for at least one pod to exist (safe count check).
+    # Uses jq '.items | length' instead of '.items[0]' to avoid index errors
+    # when zero pods exist (arch review: safe pod count).
+    - name: Wait for at least one pod to exist (safe count check)
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods -l app.kubernetes.io/name={{ app_name }}
+        -o json | jq '.items | length'
+      register: pod_count
+      changed_when: false
+      failed_when: false
+      retries: "{{ (app_start_timeout_seconds / retry_interval_seconds) | int }}"
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_count.rc == 0 and (pod_count.stdout | int) > 0
+
+    # Step 2: Wait for pod readiness with timeout from global constant.
+    - name: Wait for pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name={{ app_name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      register: wait_result
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: wait_result.rc == 0
+
+    # ========== 7. CREDENTIAL EXTRACTION ==========
+    # For kustomize apps, credentials are typically created by the operator
+    # (e.g. argocd-initial-admin-secret). We extract from the operator's
+    # K8s Secret rather than generating our own.
+    - name: Extract operator-managed credentials
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get secret {{ operator_secret_name }}
+        -o jsonpath='{.data.{{ item.k8s_key }}}' | base64 -d
+      register: extracted_credentials
+      changed_when: false
+      failed_when: false
+      loop: "{{ credential_fields }}"
+      loop_control:
+        label: "{{ item.field_name }}"
+      no_log: true
+
+    - name: Set extracted credential facts
+      ansible.builtin.set_fact:
+        "{{ item.item.field_name }}": "{{ item.stdout }}"
+      when: item.rc == 0 and item.stdout | length > 0
+      loop: "{{ extracted_credentials.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.field_name }}"
+      no_log: true
+
+    - name: Guard against empty credential extraction
+      ansible.builtin.fail:
+        msg: "Credential extraction returned empty for {{ item.item.field_name }} — operator may not have created {{ operator_secret_name }} yet"
+      when: >-
+        item.rc != 0 or item.stdout | default('') | length == 0
+      loop: "{{ extracted_credentials.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.field_name }}"
+
+    # ========== 8. PUSHSECRET RENDER + APPLY ==========
+    # PushSecret is ALWAYS applied with kubectl apply (never replace --force).
+    # It bridges the credential pipeline: K8s Secret -> PushSecret -> Vault KV.
+    # Rendered separately because the kustomize base does not include it.
+    - name: Check if PushSecret template exists
+      ansible.builtin.stat:
+        path: "{{ pushsecret_template }}"
+      register: pushsecret_stat
+
+    - name: Render and apply PushSecret
+      when: pushsecret_stat.stat.exists
+      block:
+        - name: Render PushSecret template
+          ansible.builtin.template:
+            src: "{{ pushsecret_template }}"
+            dest: "{{ pushsecret_render_path }}"
+            mode: '0644'
+
+        - name: Apply PushSecret (always kubectl apply)
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ pushsecret_render_path }}
+          register: pushsecret_apply
+          changed_when: "'created' in pushsecret_apply.stdout or 'configured' in pushsecret_apply.stdout"
+
+        - name: Clean up rendered PushSecret
+          ansible.builtin.file:
+            path: "{{ pushsecret_render_path }}"
+            state: absent
+
+    # ========== 9. DISPLAY STATUS ==========
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name }} Deployed Successfully (kustomize)"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Kustomize dir: {{ kustomize_dir }}"
+          - "Access URL: https://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30000) }}"
+          - "Credentials: stored in {{ operator_secret_name }}"
+          - "=========================================="

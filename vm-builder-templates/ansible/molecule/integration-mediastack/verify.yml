@@ -1,0 +1,44 @@
+---
+- name: "Tier 3: Verify mediastack integration"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    test_namespace: "molecule-test-mediastack"
+  tasks:
+    - name: Verify all pods are Running
+      ansible.builtin.command: >-
+        kubectl -n {{ test_namespace }} get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
+      register: all_pods
+      changed_when: false
+
+    - name: Show pod status
+      ansible.builtin.debug:
+        msg: "{{ all_pods.stdout_lines }}"
+
+    - name: Assert no Failed/CrashLoopBackOff pods
+      ansible.builtin.assert:
+        that:
+          - "'Failed' not in all_pods.stdout"
+          - "'CrashLoopBackOff' not in all_pods.stdout"
+        fail_msg: "Found unhealthy pods in {{ test_namespace }}"
+
+    - name: Verify sonarr API responds
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarr_nodeport | default('30989') }}/api/v1/system/status"
+        headers:
+          X-Api-Key: "{{ sonarr_api_key | default('') }}"
+        return_content: true
+        status_code: [200]
+      register: sonarr_api
+      retries: 5
+      delay: 10
+      until: sonarr_api.status == 200
+      when: sonarr_api_key is defined
+      failed_when: false
+
+    - name: Report integration results
+      ansible.builtin.debug:
+        msg: |
+          Mediastack Integration Results:
+          Pods: {{ all_pods.stdout_lines | length }}
+          Sonarr API: {{ 'OK' if sonarr_api.status | default(0) == 200 else 'SKIP (no API key)' }}

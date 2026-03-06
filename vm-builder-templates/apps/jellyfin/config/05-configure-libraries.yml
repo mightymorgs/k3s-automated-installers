@@ -1,0 +1,222 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/jellyfin/05-configure-libraries"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/jellyfin/config/05-configure-libraries.yml"
+#     category: "apps"
+#     subsystem: "jellyfin"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["jellyfin_deployed", "jellyfin_api_configured"]
+#   provides: ["jellyfin_libraries_configured"]
+#   tags: ["jellyfin", "libraries", "media", "configuration", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure Jellyfin media libraries for TV Shows, Movies, and Music
+#   requires_apps: ["jellyfin"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.jellyfin.api_key"
+
+- name: Configure Jellyfin Media Libraries
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    jellyfin_namespace: "jellyfin"
+    app_namespace: "{{ jellyfin_namespace }}"
+    # jellyfin_url: from BWS _state via Phase 4 extra-vars
+    # Media paths inside the Jellyfin container (mapped via PVC/hostPath)
+    media_libraries:
+      - name: "TV Shows"
+        collection_type: "tvshows"
+        path: "/media/tv"
+      - name: "Movies"
+        collection_type: "movies"
+        path: "/media/movies"
+      - name: "Music"
+        collection_type: "music"
+        path: "/media/music"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if jellyfin_api_key not provided
+      ansible.builtin.fail:
+        msg: "jellyfin_api_key must be provided via extra-vars (from BWS inventory)"
+      when: jellyfin_api_key is not defined or jellyfin_api_key | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Jellyfin pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ app_namespace }} \
+          -l app.kubernetes.io/name=jellyfin \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ app_namespace }} \
+          -l app=jellyfin \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ========== VERIFY JELLYFIN API ==========
+    - name: Verify Jellyfin API is accessible
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/System/Info/Public"
+        method: GET
+        return_content: false
+      register: api_status
+      retries: 10
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: End play if Jellyfin API not accessible
+      ansible.builtin.meta: end_play
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== GET EXISTING LIBRARIES ==========
+    - name: Get existing Jellyfin libraries
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders"
+        method: GET
+        headers:
+          Authorization: "MediaBrowser Token=\"{{ jellyfin_api_key }}\""
+        status_code: [200]
+        return_content: true
+      register: existing_libraries
+
+    - name: Extract existing library names
+      ansible.builtin.set_fact:
+        existing_library_names: "{{ existing_libraries.json | map(attribute='Name') | list }}"
+
+    # ========== ENSURE MEDIA DIRECTORIES EXIST ==========
+    - name: Ensure media directories exist in Jellyfin container
+      ansible.builtin.command: >-
+        kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }}
+        -- mkdir -p {{ item.path }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      loop: "{{ media_libraries }}"
+      loop_control:
+        label: "{{ item.path }}"
+      changed_when: true
+
+    # ========== CREATE TV SHOWS LIBRARY ==========
+    - name: Add TV Shows library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders?name={{ 'TV Shows' | urlencode }}&collectionType=tvshows&paths={{ '/media/tv' | urlencode }}&refreshLibrary=false"
+        method: POST
+        headers:
+          Authorization: "MediaBrowser Token=\"{{ jellyfin_api_key }}\""
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          LibraryOptions:
+            Enabled: true
+            EnableRealtimeMonitor: true
+            EnableAutomaticSeriesGrouping: true
+            EnableEmbeddedTitles: false
+            EnableEmbeddedEpisodeInfos: false
+            AutomaticRefreshIntervalDays: 0
+            PreferredMetadataLanguage: "en"
+            MetadataCountryCode: "US"
+            SaveLocalMetadata: false
+            PathInfos:
+              - Path: "/media/tv"
+        status_code: [200, 204]
+      register: add_tv_library
+      when: "'TV Shows' not in existing_library_names"
+
+    # ========== CREATE MOVIES LIBRARY ==========
+    - name: Add Movies library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders?name={{ 'Movies' | urlencode }}&collectionType=movies&paths={{ '/media/movies' | urlencode }}&refreshLibrary=false"
+        method: POST
+        headers:
+          Authorization: "MediaBrowser Token=\"{{ jellyfin_api_key }}\""
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          LibraryOptions:
+            Enabled: true
+            EnableRealtimeMonitor: true
+            AutomaticRefreshIntervalDays: 0
+            PreferredMetadataLanguage: "en"
+            MetadataCountryCode: "US"
+            SaveLocalMetadata: false
+            PathInfos:
+              - Path: "/media/movies"
+        status_code: [200, 204]
+      register: add_movies_library
+      when: "'Movies' not in existing_library_names"
+
+    # ========== CREATE MUSIC LIBRARY ==========
+    - name: Add Music library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders?name={{ 'Music' | urlencode }}&collectionType=music&paths={{ '/media/music' | urlencode }}&refreshLibrary=false"
+        method: POST
+        headers:
+          Authorization: "MediaBrowser Token=\"{{ jellyfin_api_key }}\""
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          LibraryOptions:
+            Enabled: true
+            EnableRealtimeMonitor: true
+            AutomaticRefreshIntervalDays: 0
+            PreferredMetadataLanguage: "en"
+            MetadataCountryCode: "US"
+            SaveLocalMetadata: false
+            PathInfos:
+              - Path: "/media/music"
+        status_code: [200, 204]
+      register: add_music_library
+      when: "'Music' not in existing_library_names"
+
+    # ========== TRIGGER LIBRARY SCAN ==========
+    - name: Trigger library scan
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/Refresh"
+        method: POST
+        headers:
+          Authorization: "MediaBrowser Token=\"{{ jellyfin_api_key }}\""
+        status_code: [200, 204]
+      register: library_scan
+      changed_when: true
+
+    # ========== VERIFY LIBRARIES ==========
+    - name: Get updated library list
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders"
+        method: GET
+        headers:
+          Authorization: "MediaBrowser Token=\"{{ jellyfin_api_key }}\""
+        status_code: [200]
+        return_content: true
+      register: final_libraries
+
+    - name: Extract final library names
+      ansible.builtin.set_fact:
+        final_library_names: "{{ final_libraries.json | map(attribute='Name') | list }}"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Jellyfin Media Libraries Configured"
+          - "=========================================="
+          - "TV Shows:  {{ 'created' if 'TV Shows' not in existing_library_names else 'exists' }} -> /media/tv"
+          - "Movies:    {{ 'created' if 'Movies' not in existing_library_names else 'exists' }} -> /media/movies"
+          - "Music:     {{ 'created' if 'Music' not in existing_library_names else 'exists' }} -> /media/music"
+          - "Library scan: triggered"
+          - "Final libraries: {{ final_library_names | join(', ') }}"
+          - "=========================================="

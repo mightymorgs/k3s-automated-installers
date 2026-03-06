@@ -1,0 +1,202 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/plex/05-configure-libraries"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/plex/config/05-configure-libraries.yml"
+#     category: "apps"
+#     subsystem: "plex"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["plex_deployed"]
+#   provides: ["plex_libraries_configured"]
+#   tags: ["plex", "libraries", "media", "configuration", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Plex media libraries for TV Shows, Movies, and Music.
+#     Uses the Plex HTTP API with X-Plex-Token authentication. Library
+#     sections are created via form-encoded POST (Plex API quirk).
+#     Idempotent: checks for existing library sections before creating.
+#   requires_apps: ["plex"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.plex.api_key"
+
+- name: Configure Plex Media Libraries
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    plex_namespace: "plex"
+    app_namespace: "{{ plex_namespace }}"
+    # plex_url: from BWS _state via Phase 4 extra-vars
+    # Library definitions: name, type (1=movie, 2=show, 8=artist), scanner, path
+    libraries:
+      - name: "TV Shows"
+        type: 2
+        agent: "tv.plex.agents.series"
+        scanner: "Plex TV Series"
+        path: "/media/tv"
+        language: "en-US"
+      - name: "Movies"
+        type: 1
+        agent: "tv.plex.agents.movie"
+        scanner: "Plex Movie"
+        path: "/media/movies"
+        language: "en-US"
+      - name: "Music"
+        type: 8
+        agent: "tv.plex.agents.music"
+        scanner: "Plex Music"
+        path: "/media/music"
+        language: "en-US"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if plex_api_key not provided
+      ansible.builtin.fail:
+        msg: "plex_api_key must be provided via extra-vars (from BWS inventory)"
+      when: plex_api_key is not defined or plex_api_key | length == 0
+
+    # ========== VERIFY PLEX API ==========
+    - name: Verify Plex API is accessible
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/identity"
+        method: GET
+        headers:
+          X-Plex-Token: "{{ plex_api_key }}"
+          Accept: "application/json"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: End play if Plex API not accessible
+      ansible.builtin.meta: end_play
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== GET EXISTING LIBRARY SECTIONS ==========
+    - name: Get existing library sections
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/library/sections"
+        method: GET
+        headers:
+          X-Plex-Token: "{{ plex_api_key }}"
+          Accept: "application/json"
+        status_code: [200]
+        return_content: true
+      register: existing_sections
+
+    - name: Extract existing library titles
+      ansible.builtin.set_fact:
+        existing_library_titles: "{{ existing_sections.json.MediaContainer.Directory | default([]) | map(attribute='title') | list }}"
+
+    # ========== ENSURE MEDIA DIRECTORIES EXIST ==========
+    - name: Ensure media directories exist in Plex container
+      ansible.builtin.command: >-
+        kubectl exec -n {{ app_namespace }}
+        $(kubectl get pod -n {{ app_namespace }} -l app=plex -o jsonpath='{.items[0].metadata.name}')
+        -- mkdir -p {{ item.path }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      loop: "{{ libraries }}"
+      loop_control:
+        label: "{{ item.path }}"
+      changed_when: true
+      failed_when: false
+
+    # ========== CREATE TV SHOWS LIBRARY ==========
+    # Plex library section creation uses form-encoded POST (not JSON)
+    - name: Add TV Shows library section
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/library/sections"
+        method: POST
+        headers:
+          X-Plex-Token: "{{ plex_api_key }}"
+        body_format: form-urlencoded
+        body:
+          name: "TV Shows"
+          type: "show"
+          agent: "tv.plex.agents.series"
+          scanner: "Plex TV Series"
+          language: "en-US"
+          "location[0]": "/media/tv"
+        status_code: [200, 201]
+      register: add_tv_result
+      when: "'TV Shows' not in existing_library_titles"
+
+    # ========== CREATE MOVIES LIBRARY ==========
+    - name: Add Movies library section
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/library/sections"
+        method: POST
+        headers:
+          X-Plex-Token: "{{ plex_api_key }}"
+        body_format: form-urlencoded
+        body:
+          name: "Movies"
+          type: "movie"
+          agent: "tv.plex.agents.movie"
+          scanner: "Plex Movie"
+          language: "en-US"
+          "location[0]": "/media/movies"
+        status_code: [200, 201]
+      register: add_movies_result
+      when: "'Movies' not in existing_library_titles"
+
+    # ========== CREATE MUSIC LIBRARY ==========
+    - name: Add Music library section
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/library/sections"
+        method: POST
+        headers:
+          X-Plex-Token: "{{ plex_api_key }}"
+        body_format: form-urlencoded
+        body:
+          name: "Music"
+          type: "artist"
+          agent: "tv.plex.agents.music"
+          scanner: "Plex Music"
+          language: "en-US"
+          "location[0]": "/media/music"
+        status_code: [200, 201]
+      register: add_music_result
+      when: "'Music' not in existing_library_titles"
+
+    # ========== VERIFY LIBRARIES ==========
+    - name: Get updated library sections
+      ansible.builtin.uri:
+        url: "{{ plex_url }}/library/sections"
+        method: GET
+        headers:
+          X-Plex-Token: "{{ plex_api_key }}"
+          Accept: "application/json"
+        status_code: [200]
+        return_content: true
+      register: final_sections
+
+    - name: Extract final library titles
+      ansible.builtin.set_fact:
+        final_library_titles: "{{ final_sections.json.MediaContainer.Directory | default([]) | map(attribute='title') | list }}"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Plex Media Libraries Configured"
+          - "=========================================="
+          - "TV Shows:  {{ 'created' if 'TV Shows' not in existing_library_titles else 'exists' }} -> /media/tv"
+          - "Movies:    {{ 'created' if 'Movies' not in existing_library_titles else 'exists' }} -> /media/movies"
+          - "Music:     {{ 'created' if 'Music' not in existing_library_titles else 'exists' }} -> /media/music"
+          - "Final libraries: {{ final_library_titles | join(', ') }}"
+          - "=========================================="

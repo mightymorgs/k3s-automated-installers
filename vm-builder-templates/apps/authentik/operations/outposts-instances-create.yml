@@ -1,0 +1,268 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/operations/outposts-instances-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "authentik.outposts.instances.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/operations/outposts-instances-create.yml"
+#     category: "platform"
+#     subsystem: "authentik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "authentik"
+#       supported_versions: ["2023.x", "2024.x", "2025.x"]
+#       version_range: ">=2023.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - authentik: "2024.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from OpenAPI schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_authentik_operations"
+#   dependencies: ["authentik_deployed", "authentik_admin_token_available", "oauth2_provider_created"]
+#   provides: ["authentik_outpost_created"]
+#   tags: ["authentik", "outposts", "proxy", "phase5", "sso"]
+#   estimated_duration: 45
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create an outpost in Authentik to deploy the proxy/LDAP/RADIUS frontend.
+#     Outposts handle the actual authentication flow for applications.
+#     This operation is idempotent - if an outpost with the same name exists,
+#     it will be updated with new provider list if different.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.authentik.admin_token"
+#         purpose: "Authentik API admin token for authentication"
+#       - path: "_state.apps.{app_name}.oauth.provider_id"
+#         purpose: "Provider IDs to include in the outpost"
+#
+#     writes:
+#       - path: "_state.apps.authentik.outpost.pk"
+#         example: "abc123-uuid"
+#       - path: "_state.apps.authentik.outpost.name"
+#         example: "homelab-proxy-outpost"
+#       - path: "_state.apps.authentik.outpost.providers"
+#         example: [1, 2, 3]
+
+- name: Authentik - Create Outpost Instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    authentik_base_url: "{{ authentik_url }}"
+    authentik_api_base: "{{ authentik_base_url }}/api/v3"
+    endpoint: "/outposts/instances/"
+
+    # Required fields (must be provided by caller)
+    # name: Outpost display name (required)
+    # type: Outpost type - proxy, ldap, radius, rac (required)
+    # providers: List of provider IDs to include (required)
+    # config: Outpost configuration object (required)
+
+    # Default outpost type
+    outpost_type: "{{ type_input | default('proxy') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - name is defined and name | length > 0
+          - outpost_type in ['proxy', 'ldap', 'radius', 'rac']
+          - providers is defined and providers | length > 0
+        fail_msg: "Required inputs missing or invalid: name, type (proxy|ldap|radius|rac), providers"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Authentik admin token
+      ansible.builtin.set_fact:
+        authentik_admin_token: "{{ inventory._state.apps.authentik.admin_token }}"
+      no_log: true
+
+    # ===== STEP 3: Build Default Config If Not Provided =====
+    - name: Build default outpost config
+      ansible.builtin.set_fact:
+        outpost_config: >-
+          {{
+            config_input | default({
+              'authentik_host': authentik_base_url,
+              'authentik_host_insecure': false,
+              'authentik_host_browser': '',
+              'log_level': 'info',
+              'object_naming_template': 'ak-outpost-%(name)s',
+              'docker_network': null,
+              'docker_map_ports': true,
+              'docker_labels': null,
+              'container_image': null,
+              'kubernetes_replicas': 1,
+              'kubernetes_namespace': 'authentik',
+              'kubernetes_ingress_annotations': {},
+              'kubernetes_ingress_secret_name': 'authentik-outpost-tls',
+              'kubernetes_service_type': 'ClusterIP',
+              'kubernetes_disabled_components': [],
+              'kubernetes_image_pull_secrets': []
+            })
+          }}
+      no_log: false
+
+    # ===== STEP 4: Check for Existing Outpost (Idempotency) =====
+    - name: Check if outpost already exists
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+        status_code: [200]
+      register: existing_outposts
+      no_log: false
+
+    - name: Filter for existing outpost by name
+      ansible.builtin.set_fact:
+        existing_outpost: >-
+          {{
+            existing_outposts.json.results
+            | selectattr('name', 'equalto', name)
+            | list
+            | first
+            | default(none)
+          }}
+      no_log: false
+
+    - name: Check if providers list has changed
+      ansible.builtin.set_fact:
+        providers_changed: >-
+          {{
+            existing_outpost is not none and
+            (existing_outpost.providers | sort) != (providers | sort)
+          }}
+      when: existing_outpost is not none
+      no_log: false
+
+    - name: Skip creation if outpost exists with same providers
+      ansible.builtin.debug:
+        msg: "Outpost '{{ name }}' already exists with ID {{ existing_outpost.pk }}, providers unchanged"
+      when: existing_outpost is not none and not (providers_changed | default(false))
+
+    # ===== STEP 5: Create or Update Outpost =====
+    - name: Create outpost in Authentik
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ name }}"
+          type: "{{ outpost_type }}"
+          providers: "{{ providers }}"
+          config: "{{ outpost_config }}"
+          service_connection: "{{ service_connection | default(omit) }}"
+          managed: "{{ managed | default(omit) }}"
+        status_code: [200, 201]
+      register: create_result
+      no_log: true
+      when: existing_outpost is none
+
+    - name: Update outpost providers if changed
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}{{ existing_outpost.pk }}/"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ name }}"
+          type: "{{ outpost_type }}"
+          providers: "{{ providers }}"
+          config: "{{ outpost_config }}"
+          service_connection: "{{ service_connection | default(omit) }}"
+        status_code: [200]
+      register: update_result
+      no_log: true
+      when: existing_outpost is not none and (providers_changed | default(false))
+
+    - name: Set outpost_id from result
+      ansible.builtin.set_fact:
+        outpost_id: >-
+          {{
+            existing_outpost.pk if existing_outpost is not none
+            else create_result.json.pk
+          }}
+        outpost_status: >-
+          {{
+            'existing' if (existing_outpost is not none and not (providers_changed | default(false)))
+            else ('updated' if providers_changed | default(false) else 'created')
+          }}
+      no_log: false
+
+    # ===== STEP 6: Write Result to BWS._state =====
+    - name: Update BWS inventory with outpost details
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge outpost details into _state.apps.authentik.outpost
+        UPDATED=$(echo "$CURRENT" | jq --arg outpost_id "{{ outpost_id }}" \
+          --arg outpost_name "{{ name }}" \
+          --argjson providers '{{ providers | to_json }}' \
+          --arg outpost_type "{{ outpost_type }}" \
+          '
+          if ._state.apps.authentik == null then ._state.apps.authentik = {} else . end |
+          if ._state.apps.authentik.outpost == null then ._state.apps.authentik.outpost = {} else . end |
+          ._state.apps.authentik.outpost.pk = $outpost_id |
+          ._state.apps.authentik.outpost.name = $outpost_name |
+          ._state.apps.authentik.outpost.type = $outpost_type |
+          ._state.apps.authentik.outpost.providers = $providers
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: existing_outpost is none or (providers_changed | default(false))
+
+    # ===== STEP 7: Output Result =====
+    - name: Display outpost creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ outpost_status }}"
+          outpost_id: "{{ outpost_id }}"
+          name: "{{ name }}"
+          type: "{{ outpost_type }}"
+          providers: "{{ providers }}"
+          providers_changed: "{{ providers_changed | default(false) }}"

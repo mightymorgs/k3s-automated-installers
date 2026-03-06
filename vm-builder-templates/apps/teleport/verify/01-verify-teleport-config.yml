@@ -1,0 +1,832 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/verify/teleport-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "teleport_configuration_verified"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/verify/01-verify-teleport-config.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "teleport"
+#       supported_versions: ["15.x", "16.x"]
+#       version_range: ">=15.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - teleport: "16.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies Teleport cluster health, auth connectors, roles, users, apps, and nodes"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_teleport_verification"
+#   dependencies: ["teleport_deployed"]
+#   provides: ["teleport_config_verified"]
+#   tags: ["teleport", "verification", "health-check", "sso", "access-control", "phase4"]
+#   estimated_duration: 90
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Comprehensive verification of Teleport cluster configuration. Validates cluster
+#     health, auth connectors (OIDC/SAML/GitHub), RBAC roles, users with role assignments,
+#     registered applications, and connected nodes. Provides a detailed health report
+#     with optional fail_on_unhealthy behavior.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.teleport.admin_token"
+#         purpose: "Teleport API admin token for authentication"
+#       - path: "_state.apps.teleport.proxy_url"
+#         purpose: "Teleport proxy URL for API calls"
+#       - path: "_state.apps.teleport.roles"
+#         purpose: "Expected roles to verify"
+#       - path: "_state.apps.teleport.users"
+#         purpose: "Expected users to verify"
+#       - path: "_state.apps.teleport.oidc_connectors"
+#         purpose: "Expected OIDC connectors to verify"
+#       - path: "_state.apps.teleport.saml_connectors"
+#         purpose: "Expected SAML connectors to verify"
+#       - path: "_state.apps.teleport.github_connectors"
+#         purpose: "Expected GitHub connectors to verify"
+#       - path: "_state.apps.teleport.registered_apps"
+#         purpose: "Expected registered applications to verify"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - Teleport Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    teleport_base_url: "{{ teleport_proxy_url }}"
+    teleport_api_base: "{{ teleport_base_url }}/v1"
+
+    # Expected resources to verify (can be overridden by caller or BWS state)
+    expected_roles: "{{ expected_roles_input | default([]) }}"
+    expected_users: "{{ expected_users_input | default([]) }}"
+    expected_oidc_connectors: "{{ expected_oidc_connectors_input | default([]) }}"
+    expected_saml_connectors: "{{ expected_saml_connectors_input | default([]) }}"
+    expected_github_connectors: "{{ expected_github_connectors_input | default([]) }}"
+    expected_apps: "{{ expected_apps_input | default([]) }}"
+
+    # Verification options
+    fail_on_unhealthy: "{{ fail_on_unhealthy_input | default(false) }}"
+    fail_on_missing: "{{ fail_on_missing_input | default(false) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying Teleport Configuration"
+          - "=========================================="
+          - "Proxy URL: {{ teleport_base_url }}"
+          - "Expected Roles: {{ expected_roles | length }}"
+          - "Expected Users: {{ expected_users | length }}"
+          - "Expected OIDC Connectors: {{ expected_oidc_connectors | length }}"
+          - "Expected SAML Connectors: {{ expected_saml_connectors | length }}"
+          - "Expected GitHub Connectors: {{ expected_github_connectors | length }}"
+          - "Expected Apps: {{ expected_apps | length }}"
+          - "Fail on Unhealthy: {{ fail_on_unhealthy }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+      failed_when: false
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+      when: bws_result.rc == 0
+
+    - name: Set BWS available flag
+      ansible.builtin.set_fact:
+        bws_available: "{{ bws_result.rc == 0 }}"
+
+    - name: Extract Teleport admin token
+      ansible.builtin.set_fact:
+        teleport_token: "{{ inventory._state.apps.teleport.admin_token | default('') }}"
+      no_log: true
+      when: bws_available
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        teleport_base_url: "{{ inventory._state.apps.teleport.proxy_url }}"
+        teleport_api_base: "{{ inventory._state.apps.teleport.proxy_url }}/v1"
+      when:
+        - bws_available
+        - inventory._state.apps.teleport.proxy_url is defined
+
+    - name: Load expected resources from BWS state if not provided
+      ansible.builtin.set_fact:
+        expected_roles: >-
+          {{
+            expected_roles if expected_roles | length > 0
+            else (inventory._state.apps.teleport.roles | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_users: >-
+          {{
+            expected_users if expected_users | length > 0
+            else (inventory._state.apps.teleport.users | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_oidc_connectors: >-
+          {{
+            expected_oidc_connectors if expected_oidc_connectors | length > 0
+            else (inventory._state.apps.teleport.oidc_connectors | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_saml_connectors: >-
+          {{
+            expected_saml_connectors if expected_saml_connectors | length > 0
+            else (inventory._state.apps.teleport.saml_connectors | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_github_connectors: >-
+          {{
+            expected_github_connectors if expected_github_connectors | length > 0
+            else (inventory._state.apps.teleport.github_connectors | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_apps: >-
+          {{
+            expected_apps if expected_apps | length > 0
+            else (inventory._state.apps.teleport.registered_apps | default({}) | dict2items | map(attribute='key') | list)
+          }}
+      when: bws_available
+
+    # ===== STEP 2: Check Teleport Cluster Health (Ping Endpoint) =====
+    - name: Check Teleport cluster health via ping endpoint
+      ansible.builtin.uri:
+        url: "{{ teleport_base_url }}/webapi/ping"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: ping_check
+      failed_when: false
+
+    - name: Record cluster health result
+      ansible.builtin.set_fact:
+        check_cluster_health:
+          api_reachable: "{{ ping_check.status | default(0) == 200 }}"
+          cluster_name: "{{ ping_check.json.cluster_name | default('unknown') }}"
+          server_version: "{{ ping_check.json.server_version | default('unknown') }}"
+          min_client_version: "{{ ping_check.json.min_client_version | default('unknown') }}"
+          auth_type: "{{ ping_check.json.auth.type | default('unknown') }}"
+          auth_second_factor: "{{ ping_check.json.auth.second_factor | default('unknown') }}"
+          auth_preferred_local_mfa: "{{ ping_check.json.auth.preferred_local_mfa | default('unknown') }}"
+          proxy_public_addr: "{{ ping_check.json.proxy_public_addr | default('unknown') }}"
+
+    - name: Display cluster health
+      ansible.builtin.debug:
+        msg:
+          - "Cluster Reachable: {{ check_cluster_health.api_reachable }}"
+          - "Cluster Name: {{ check_cluster_health.cluster_name }}"
+          - "Server Version: {{ check_cluster_health.server_version }}"
+
+    - name: Assert Teleport API is accessible
+      ansible.builtin.assert:
+        that:
+          - check_cluster_health.api_reachable | bool
+        fail_msg: "Teleport API is not accessible at {{ teleport_base_url }}"
+        success_msg: "Teleport API is accessible"
+
+    # ===== STEP 3: Verify Auth Connectors - OIDC =====
+    - name: List all OIDC connectors
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/oidc"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: oidc_connectors_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract OIDC connector names
+      ansible.builtin.set_fact:
+        existing_oidc_connectors: >-
+          {{
+            oidc_connectors_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+      when: oidc_connectors_list.status | default(0) == 200
+
+    - name: Check expected OIDC connectors exist
+      ansible.builtin.set_fact:
+        oidc_connector_results: >-
+          {{
+            oidc_connector_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_oidc_connectors | default([]))
+            }]
+          }}
+      loop: "{{ expected_oidc_connectors }}"
+      when: expected_oidc_connectors | length > 0
+
+    # ===== STEP 4: Verify Auth Connectors - SAML =====
+    - name: List all SAML connectors
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/saml"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: saml_connectors_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract SAML connector names
+      ansible.builtin.set_fact:
+        existing_saml_connectors: >-
+          {{
+            saml_connectors_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+      when: saml_connectors_list.status | default(0) == 200
+
+    - name: Check expected SAML connectors exist
+      ansible.builtin.set_fact:
+        saml_connector_results: >-
+          {{
+            saml_connector_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_saml_connectors | default([]))
+            }]
+          }}
+      loop: "{{ expected_saml_connectors }}"
+      when: expected_saml_connectors | length > 0
+
+    # ===== STEP 5: Verify Auth Connectors - GitHub =====
+    - name: List all GitHub connectors
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/github"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: github_connectors_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract GitHub connector names
+      ansible.builtin.set_fact:
+        existing_github_connectors: >-
+          {{
+            github_connectors_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+      when: github_connectors_list.status | default(0) == 200
+
+    - name: Check expected GitHub connectors exist
+      ansible.builtin.set_fact:
+        github_connector_results: >-
+          {{
+            github_connector_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_github_connectors | default([]))
+            }]
+          }}
+      loop: "{{ expected_github_connectors }}"
+      when: expected_github_connectors | length > 0
+
+    # ===== STEP 6: Verify Roles =====
+    - name: List all roles
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/roles"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: roles_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract role names
+      ansible.builtin.set_fact:
+        existing_roles: >-
+          {{
+            roles_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+      when: roles_list.status | default(0) == 200
+
+    - name: Check expected roles exist
+      ansible.builtin.set_fact:
+        role_results: >-
+          {{
+            role_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_roles | default([]))
+            }]
+          }}
+      loop: "{{ expected_roles }}"
+      when: expected_roles | length > 0
+
+    - name: Get role details for existing expected roles
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/roles/{{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: role_details_results
+      loop: "{{ expected_roles }}"
+      when:
+        - teleport_token | default('') | length > 0
+        - expected_roles | length > 0
+        - item in (existing_roles | default([]))
+      failed_when: false
+      no_log: false
+
+    - name: Build role details summary
+      ansible.builtin.set_fact:
+        role_details_summary: >-
+          {{
+            role_details_summary | default([]) + [{
+              'name': item.item,
+              'version': item.json.version | default('unknown'),
+              'allow_logins': item.json.spec.allow.logins | default([]),
+              'found': item.status == 200
+            }]
+          }}
+      loop: "{{ role_details_results.results | default([]) }}"
+      when:
+        - item.json is defined
+
+    # ===== STEP 7: Verify Users =====
+    - name: List all users
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/users"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: users_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract user names
+      ansible.builtin.set_fact:
+        existing_users: >-
+          {{
+            users_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+      when: users_list.status | default(0) == 200
+
+    - name: Check expected users exist
+      ansible.builtin.set_fact:
+        user_results: >-
+          {{
+            user_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_users | default([]))
+            }]
+          }}
+      loop: "{{ expected_users }}"
+      when: expected_users | length > 0
+
+    - name: Get user details for existing expected users
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/users/{{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: user_details_results
+      loop: "{{ expected_users }}"
+      when:
+        - teleport_token | default('') | length > 0
+        - expected_users | length > 0
+        - item in (existing_users | default([]))
+      failed_when: false
+      no_log: false
+
+    - name: Build user details summary
+      ansible.builtin.set_fact:
+        user_details_summary: >-
+          {{
+            user_details_summary | default([]) + [{
+              'name': item.item,
+              'roles': item.json.spec.roles | default([]),
+              'traits_logins': item.json.spec.traits.logins | default([]),
+              'found': item.status == 200
+            }]
+          }}
+      loop: "{{ user_details_results.results | default([]) }}"
+      when:
+        - item.json is defined
+
+    # ===== STEP 8: Verify Registered Apps =====
+    - name: List all registered apps
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/apps"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: apps_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract app names
+      ansible.builtin.set_fact:
+        existing_apps: >-
+          {{
+            apps_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+      when: apps_list.status | default(0) == 200
+
+    - name: Check expected apps exist
+      ansible.builtin.set_fact:
+        app_results: >-
+          {{
+            app_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_apps | default([]))
+            }]
+          }}
+      loop: "{{ expected_apps }}"
+      when: expected_apps | length > 0
+
+    - name: Get app details for existing expected apps
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/apps/{{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: app_details_results
+      loop: "{{ expected_apps }}"
+      when:
+        - teleport_token | default('') | length > 0
+        - expected_apps | length > 0
+        - item in (existing_apps | default([]))
+      failed_when: false
+      no_log: false
+
+    - name: Build app details summary
+      ansible.builtin.set_fact:
+        app_details_summary: >-
+          {{
+            app_details_summary | default([]) + [{
+              'name': item.item,
+              'uri': item.json.spec.uri | default('unknown'),
+              'public_addr': item.json.spec.public_addr | default('not configured'),
+              'found': item.status == 200
+            }]
+          }}
+      loop: "{{ app_details_results.results | default([]) }}"
+      when:
+        - item.json is defined
+
+    # ===== STEP 9: Verify Connected Nodes =====
+    - name: List all connected nodes
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}/nodes"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: nodes_list
+      failed_when: false
+      no_log: false
+      when: teleport_token | default('') | length > 0
+
+    - name: Extract node details
+      ansible.builtin.set_fact:
+        existing_nodes: >-
+          {{
+            nodes_list.json.items | default([])
+            | map(attribute='metadata')
+            | map(attribute='name')
+            | list
+          }}
+        node_count: "{{ nodes_list.json.items | default([]) | length }}"
+      when: nodes_list.status | default(0) == 200
+
+    - name: Build node summary
+      ansible.builtin.set_fact:
+        node_details_summary: >-
+          {{
+            nodes_list.json.items | default([]) | map('combine', {}) | list
+          }}
+      when: nodes_list.status | default(0) == 200
+
+    # ===== STEP 10: Calculate Verification Results =====
+    - name: Calculate OIDC connector verification result
+      ansible.builtin.set_fact:
+        all_oidc_connectors_exist: >-
+          {{
+            (oidc_connector_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate SAML connector verification result
+      ansible.builtin.set_fact:
+        all_saml_connectors_exist: >-
+          {{
+            (saml_connector_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate GitHub connector verification result
+      ansible.builtin.set_fact:
+        all_github_connectors_exist: >-
+          {{
+            (github_connector_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate role verification result
+      ansible.builtin.set_fact:
+        all_roles_exist: >-
+          {{
+            (role_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate user verification result
+      ansible.builtin.set_fact:
+        all_users_exist: >-
+          {{
+            (user_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate app verification result
+      ansible.builtin.set_fact:
+        all_apps_exist: >-
+          {{
+            (app_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        cluster_healthy: "{{ check_cluster_health.api_reachable | bool }}"
+        all_connectors_exist: >-
+          {{
+            all_oidc_connectors_exist | bool and
+            all_saml_connectors_exist | bool and
+            all_github_connectors_exist | bool
+          }}
+        all_checks_passed: >-
+          {{
+            check_cluster_health.api_reachable | bool and
+            all_oidc_connectors_exist | bool and
+            all_saml_connectors_exist | bool and
+            all_github_connectors_exist | bool and
+            all_roles_exist | bool and
+            all_users_exist | bool and
+            all_apps_exist | bool
+          }}
+
+    # ===== STEP 11: Verification Summary =====
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          teleport_url: "{{ teleport_base_url }}"
+          bws_available: "{{ bws_available }}"
+          cluster:
+            healthy: "{{ cluster_healthy }}"
+            name: "{{ check_cluster_health.cluster_name }}"
+            version: "{{ check_cluster_health.server_version }}"
+            auth_type: "{{ check_cluster_health.auth_type }}"
+            second_factor: "{{ check_cluster_health.auth_second_factor }}"
+          auth_connectors:
+            oidc:
+              total: "{{ existing_oidc_connectors | default([]) | length }}"
+              expected: "{{ expected_oidc_connectors | length }}"
+              found: "{{ oidc_connector_results | default([]) | selectattr('exists') | list | length }}"
+              all_exist: "{{ all_oidc_connectors_exist }}"
+              connectors: "{{ existing_oidc_connectors | default([]) }}"
+            saml:
+              total: "{{ existing_saml_connectors | default([]) | length }}"
+              expected: "{{ expected_saml_connectors | length }}"
+              found: "{{ saml_connector_results | default([]) | selectattr('exists') | list | length }}"
+              all_exist: "{{ all_saml_connectors_exist }}"
+              connectors: "{{ existing_saml_connectors | default([]) }}"
+            github:
+              total: "{{ existing_github_connectors | default([]) | length }}"
+              expected: "{{ expected_github_connectors | length }}"
+              found: "{{ github_connector_results | default([]) | selectattr('exists') | list | length }}"
+              all_exist: "{{ all_github_connectors_exist }}"
+              connectors: "{{ existing_github_connectors | default([]) }}"
+          roles:
+            total: "{{ existing_roles | default([]) | length }}"
+            expected: "{{ expected_roles | length }}"
+            found: "{{ role_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_roles_exist }}"
+            details: "{{ role_details_summary | default([]) }}"
+          users:
+            total: "{{ existing_users | default([]) | length }}"
+            expected: "{{ expected_users | length }}"
+            found: "{{ user_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_users_exist }}"
+            details: "{{ user_details_summary | default([]) }}"
+          apps:
+            total: "{{ existing_apps | default([]) | length }}"
+            expected: "{{ expected_apps | length }}"
+            found: "{{ app_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_apps_exist }}"
+            details: "{{ app_details_summary | default([]) }}"
+          nodes:
+            total: "{{ node_count | default(0) }}"
+            names: "{{ existing_nodes | default([]) }}"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Teleport Configuration Verification Summary"
+          - "=========================================="
+          - ""
+          - "CLUSTER HEALTH:"
+          - "  Reachable: {{ 'YES' if cluster_healthy else 'NO' }}"
+          - "  Cluster Name: {{ check_cluster_health.cluster_name }}"
+          - "  Server Version: {{ check_cluster_health.server_version }}"
+          - "  Auth Type: {{ check_cluster_health.auth_type }}"
+          - "  Second Factor: {{ check_cluster_health.auth_second_factor }}"
+          - ""
+          - "AUTH CONNECTORS:"
+          - "  OIDC: {{ existing_oidc_connectors | default([]) | length }} total, {{ expected_oidc_connectors | length }} expected, {{ all_oidc_connectors_exist }}"
+          - "  SAML: {{ existing_saml_connectors | default([]) | length }} total, {{ expected_saml_connectors | length }} expected, {{ all_saml_connectors_exist }}"
+          - "  GitHub: {{ existing_github_connectors | default([]) | length }} total, {{ expected_github_connectors | length }} expected, {{ all_github_connectors_exist }}"
+          - ""
+          - "ROLES:"
+          - "  Total in Teleport: {{ existing_roles | default([]) | length }}"
+          - "  Expected: {{ expected_roles | length }}"
+          - "  Found: {{ role_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_roles_exist }}"
+          - ""
+          - "USERS:"
+          - "  Total in Teleport: {{ existing_users | default([]) | length }}"
+          - "  Expected: {{ expected_users | length }}"
+          - "  Found: {{ user_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_users_exist }}"
+          - ""
+          - "REGISTERED APPS:"
+          - "  Total in Teleport: {{ existing_apps | default([]) | length }}"
+          - "  Expected: {{ expected_apps | length }}"
+          - "  Found: {{ app_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_apps_exist }}"
+          - ""
+          - "CONNECTED NODES:"
+          - "  Total: {{ node_count | default(0) }}"
+          - "  Nodes: {{ existing_nodes | default([]) | join(', ') if (existing_nodes | default([]) | length) > 0 else 'none' }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Display role details
+      ansible.builtin.debug:
+        msg:
+          - "ROLE DETAILS:"
+          - "{{ role_details_summary | default([]) | to_nice_yaml }}"
+      when: role_details_summary is defined and role_details_summary | length > 0
+
+    - name: Display user details
+      ansible.builtin.debug:
+        msg:
+          - "USER DETAILS:"
+          - "{{ user_details_summary | default([]) | to_nice_yaml }}"
+      when: user_details_summary is defined and user_details_summary | length > 0
+
+    - name: Display app details
+      ansible.builtin.debug:
+        msg:
+          - "APP DETAILS:"
+          - "{{ app_details_summary | default([]) | to_nice_yaml }}"
+      when: app_details_summary is defined and app_details_summary | length > 0
+
+    - name: Display missing resources if any
+      ansible.builtin.debug:
+        msg:
+          - "MISSING RESOURCES:"
+          - "  OIDC Connectors: {{ oidc_connector_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  SAML Connectors: {{ saml_connector_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  GitHub Connectors: {{ github_connector_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Roles: {{ role_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Users: {{ user_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Apps: {{ app_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+      when: not all_checks_passed
+
+    # ===== STEP 12: Health Report Generation =====
+    - name: Generate health report
+      ansible.builtin.set_fact:
+        health_report:
+          timestamp: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+          teleport_url: "{{ teleport_base_url }}"
+          overall_status: "{{ 'healthy' if all_checks_passed else 'unhealthy' }}"
+          cluster_healthy: "{{ cluster_healthy }}"
+          checks:
+            cluster_reachable:
+              status: "{{ 'pass' if cluster_healthy else 'fail' }}"
+              message: "{{ 'Cluster is reachable and responding' if cluster_healthy else 'Cluster is not reachable' }}"
+            auth_connectors:
+              status: "{{ 'pass' if all_connectors_exist else 'fail' }}"
+              oidc_configured: "{{ (existing_oidc_connectors | default([]) | length) > 0 }}"
+              saml_configured: "{{ (existing_saml_connectors | default([]) | length) > 0 }}"
+              github_configured: "{{ (existing_github_connectors | default([]) | length) > 0 }}"
+            roles:
+              status: "{{ 'pass' if all_roles_exist else 'fail' }}"
+              count: "{{ existing_roles | default([]) | length }}"
+            users:
+              status: "{{ 'pass' if all_users_exist else 'fail' }}"
+              count: "{{ existing_users | default([]) | length }}"
+            apps:
+              status: "{{ 'pass' if all_apps_exist else 'fail' }}"
+              count: "{{ existing_apps | default([]) | length }}"
+            nodes:
+              status: "{{ 'pass' if (node_count | default(0) | int) >= 0 else 'unknown' }}"
+              count: "{{ node_count | default(0) }}"
+          summary:
+            version: "{{ check_cluster_health.server_version }}"
+            cluster_name: "{{ check_cluster_health.cluster_name }}"
+            total_roles: "{{ existing_roles | default([]) | length }}"
+            total_users: "{{ existing_users | default([]) | length }}"
+            total_apps: "{{ existing_apps | default([]) | length }}"
+            total_nodes: "{{ node_count | default(0) }}"
+            total_oidc_connectors: "{{ existing_oidc_connectors | default([]) | length }}"
+            total_saml_connectors: "{{ existing_saml_connectors | default([]) | length }}"
+            total_github_connectors: "{{ existing_github_connectors | default([]) | length }}"
+
+    - name: Display health report
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Teleport Health Report"
+          - "=========================================="
+          - "{{ health_report | to_nice_yaml }}"
+
+    # ===== STEP 13: Conditional Failure =====
+    - name: Fail if cluster is unhealthy and fail_on_unhealthy is set
+      ansible.builtin.fail:
+        msg: >-
+          Teleport cluster is unhealthy. Cluster must be reachable.
+          See health report above for details.
+      when: not cluster_healthy and fail_on_unhealthy | bool
+
+    - name: Fail if required resources are missing and fail_on_missing is set
+      ansible.builtin.fail:
+        msg: >-
+          Teleport configuration verification failed. Expected resources are missing.
+          See summary above for details.
+      when: not all_checks_passed and fail_on_missing | bool
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "Teleport configuration verification complete - all checks passed"
+      when: all_checks_passed
+
+    - name: Validation passed with warnings
+      ansible.builtin.debug:
+        msg:
+          - "Teleport configuration verification complete with warnings"
+          - "Some expected resources are missing but fail_on_missing is not set"
+          - "Review the summary above for details"
+      when: not all_checks_passed and not fail_on_missing | bool

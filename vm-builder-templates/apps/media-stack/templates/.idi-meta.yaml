@@ -1,0 +1,15 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  namespace.yaml.j2:
+    summary: 'Jinja2 template: namespace.yaml.j2'
+    source: inferred
+    confidence: medium
+  services.yaml.j2:
+    summary: 'Jinja2 template: services.yaml.j2'
+    source: inferred
+    confidence: medium
+  shared-pvc.yaml.j2:
+    summary: 'Jinja2 template: shared-pvc.yaml.j2'
+    source: inferred
+    confidence: medium

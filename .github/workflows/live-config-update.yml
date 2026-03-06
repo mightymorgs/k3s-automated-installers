@@ -1,0 +1,190 @@
+---
+name: Live Config Update
+# Purpose: Re-render J2 templates with updated _config values and apply to running app
+# Runs on: Self-hosted runner on the target VM
+#
+# Flow:
+#   1. Read updated config from BWS inventory (_config + apps.config)
+#   2. Re-render J2 templates for the app
+#   3. kubectl apply the updated manifests
+#   4. Wait for rollout to complete
+#   5. Write configured_at timestamp to BWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_hostname:
+        description: VM hostname (must match runner label)
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-gcp-latest)
+        required: true
+        type: string
+      app_id:
+        description: App to update (e.g., sonarr, grafana, authentik)
+        required: true
+        type: string
+
+jobs:
+  update-config:
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Validate app has templates
+        id: validate
+        run: |
+          APP="${{ inputs.app_id }}"
+          TEMPLATES_DIR="vm-builder/vm-builder-templates/apps/${APP}/templates"
+          INSTALL_DIR="vm-builder/vm-builder-templates/apps/${APP}/install"
+
+          if [ ! -d "$TEMPLATES_DIR" ]; then
+            echo "ERROR: No templates directory at $TEMPLATES_DIR"
+            exit 1
+          fi
+
+          # Find the install playbook to use for re-rendering
+          INSTALL_PLAYBOOK=""
+          if [ -f "$INSTALL_DIR/01-deploy.yml" ]; then
+            INSTALL_PLAYBOOK="$INSTALL_DIR/01-deploy.yml"
+          elif [ -f "$INSTALL_DIR/01-apply-kustomize.yml" ]; then
+            INSTALL_PLAYBOOK="$INSTALL_DIR/01-apply-kustomize.yml"
+          elif [ -f "$INSTALL_DIR/01-deploy-server.yml" ]; then
+            INSTALL_PLAYBOOK="$INSTALL_DIR/01-deploy-server.yml"
+          elif [ -f "$INSTALL_DIR/01-deploy-kubectl.yml" ]; then
+            INSTALL_PLAYBOOK="$INSTALL_DIR/01-deploy-kubectl.yml"
+          fi
+
+          if [ -z "$INSTALL_PLAYBOOK" ]; then
+            echo "ERROR: No install playbook found in $INSTALL_DIR"
+            exit 1
+          fi
+
+          echo "templates_dir=$TEMPLATES_DIR" >> "$GITHUB_OUTPUT"
+          echo "install_playbook=$INSTALL_PLAYBOOK" >> "$GITHUB_OUTPUT"
+          echo "Using install playbook: $INSTALL_PLAYBOOK"
+
+      - name: Read updated config from BWS
+        id: config
+        run: |
+          APP="${{ inputs.app_id }}"
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "" ]; then
+            echo "No inventory found, using defaults"
+            echo '{}' > /tmp/app-config.json
+          else
+            INVENTORY=$(get_val "$SECRET_ID")
+
+            # Merge _config (global) + apps.config[app] (per-app) into extra vars
+            APP_CONFIG=$(echo "$INVENTORY" | jq -c --arg app "$APP" '
+              (._config // {}) * (.apps.config[$app] // {})
+            ')
+
+            # Inject top-level ingress fields from BWS inventory into app config.
+            # J2 templates for traefik/authentik/awx reference {{ domain }} directly —
+            # it lives at ingress.domain in the BWS inventory, not in _config.{app}.
+            INGRESS_DOMAIN=$(echo "$INVENTORY" | jq -r '.ingress.domain // empty')
+            if [ -n "$INGRESS_DOMAIN" ]; then
+              APP_CONFIG=$(echo "$APP_CONFIG" | jq -c --arg d "$INGRESS_DOMAIN" '.domain = $d')
+              echo "  Injected ingress.domain=$INGRESS_DOMAIN into extra-vars"
+            fi
+
+            echo "$APP_CONFIG" > /tmp/app-config.json
+
+            CONFIG_COUNT=$(echo "$APP_CONFIG" | jq 'keys | length')
+            echo "App: $APP — $CONFIG_COUNT config value(s)"
+            if [ "$CONFIG_COUNT" -gt 0 ]; then
+              echo "$APP_CONFIG" | jq '.'
+            fi
+
+            # Also extract API keys for config playbooks that need them
+            echo "$INVENTORY" | jq '
+              [._state.apps // {} | to_entries[] |
+               select(.value | type == "object") |
+               select(.value.api_key != null and (.value.api_key | length) > 0) |
+               {key: (.key + "_api_key"), value: .value.api_key}
+              ] | from_entries
+            ' > /tmp/bws-app-state.json
+
+            # Mask API keys
+            for key in $(jq -r 'values[]' /tmp/bws-app-state.json 2>/dev/null); do
+              echo "::add-mask::$key"
+            done
+          fi
+
+      - name: Re-deploy ${{ inputs.app_id }} with updated config
+        run: |
+          APP="${{ inputs.app_id }}"
+          PLAYBOOK="${{ steps.validate.outputs.install_playbook }}"
+
+          echo "=========================================="
+          echo "Live Config Update: $APP"
+          echo "=========================================="
+
+          ansible-playbook "$PLAYBOOK" \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e inventory_secret_name="${{ inputs.inventory_key }}" \
+            -e @/tmp/app-config.json
+
+          echo ""
+          echo "=========================================="
+          echo "$APP config update applied"
+          echo "=========================================="
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Get app workload type and wait for rollout
+        run: |
+          APP="${{ inputs.app_id }}"
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          NAMESPACE=$(echo "$REGISTRY" | jq -r --arg app "$APP" \
+            '.apps[$app].ingress.namespace // "default"')
+
+          echo "Checking rollout status in namespace $NAMESPACE..."
+
+          # Try StatefulSet first, then Deployment
+          if kubectl -n "$NAMESPACE" get statefulset "$APP" >/dev/null 2>&1; then
+            echo "Waiting for StatefulSet $APP rollout..."
+            kubectl -n "$NAMESPACE" rollout status statefulset "$APP" --timeout=300s
+          elif kubectl -n "$NAMESPACE" get deployment "$APP" >/dev/null 2>&1; then
+            echo "Waiting for Deployment $APP rollout..."
+            kubectl -n "$NAMESPACE" rollout status deployment "$APP" --timeout=300s
+          else
+            echo "No StatefulSet or Deployment named $APP found — skipping rollout wait"
+          fi
+
+      - name: Write configured_at to BWS
+        run: |
+          APP="${{ inputs.app_id }}"
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "" ]; then
+            echo "No inventory found — skipping state update"
+            exit 0
+          fi
+
+          CURRENT=$(get_val "$SECRET_ID")
+
+          UPDATED=$(echo "$CURRENT" | jq --arg app "$APP" '
+            ._state.apps[$app].configured_at = (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+          ')
+
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "$APP configured_at timestamp written to BWS"

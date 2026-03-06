@@ -1,0 +1,17 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-langfuse-config.yml:
+    summary: Verify that Langfuse is properly configured. Checks that the API is accessible
+      with valid credentials, expected prompts are created, and datasets exist. Provides
+      a comprehensive health check for Langfuse LLM observability setup.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ langfuse_api_base }}/projects'
+    - '{{ langfuse_api_base }}/prompts?limit=100'
+    - '{{ langfuse_api_base }}/prompts/{{ item | urlencode }}'
+    - '{{ langfuse_api_base }}/datasets?limit=100'
+    - '{{ langfuse_api_base }}/datasets/{{ item | urlencode }}'
+    - '{{ langfuse_api_base }}/traces?limit=1'
+    - '{{ langfuse_api_base }}/scores?limit=1'

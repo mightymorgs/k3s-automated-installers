@@ -1,0 +1,277 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/operations/dashboard-import"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "grafana.dashboards.db.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/operations/dashboard-import.yml"
+#     category: "platform"
+#     subsystem: "grafana"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "grafana"
+#       supported_versions: ["10.x", "11.x"]
+#       version_range: ">=10.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - grafana: "11.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Grafana API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_grafana_operations"
+#   dependencies: ["grafana_deployed", "grafana_admin_token_available"]
+#   provides: ["grafana_dashboard_imported"]
+#   tags: ["grafana", "dashboards", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Import a dashboard into Grafana. This operation is idempotent -
+#     if overwrite is false and dashboard exists, it will be skipped.
+#     Supports importing from JSON file, inline JSON, or Grafana.com ID.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_token"
+#         purpose: "Grafana API admin token for authentication"
+#       - path: "_state.apps.grafana.url"
+#         purpose: "Grafana base URL"
+#       - path: "_state.apps.grafana.folders.{folder_name}.uid"
+#         purpose: "Target folder UID if specified"
+#
+#     writes:
+#       - path: "_state.apps.grafana.dashboards.{dashboard_title}.id"
+#         example: 1
+#       - path: "_state.apps.grafana.dashboards.{dashboard_title}.uid"
+#         example: "node-exporter-full"
+#       - path: "_state.apps.grafana.dashboards.{dashboard_title}.url"
+#         example: "/d/node-exporter-full/node-exporter"
+
+- name: Grafana - Import Dashboard
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    grafana_base_url: "{{ grafana_url }}"
+    grafana_api_base: "{{ grafana_base_url }}/api"
+    endpoint: "/dashboards/db"
+
+    # Dashboard source - provide ONE of the following:
+    # dashboard_json: Inline dashboard JSON object (required if others not provided)
+    # dashboard_file: Path to dashboard JSON file (required if others not provided)
+    # grafana_com_id: Grafana.com dashboard ID (required if others not provided)
+
+    # Optional fields with sensible defaults
+    overwrite: "{{ overwrite_input | default(true) }}"
+    folder_uid: "{{ folder_uid_input | default(omit) }}"
+    folder_id: "{{ folder_id_input | default(omit) }}"
+    message: "{{ message_input | default('Imported via Ansible IDI playbook') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate at least one dashboard source is provided
+      ansible.builtin.assert:
+        that:
+          - dashboard_json is defined or dashboard_file is defined or grafana_com_id is defined
+        fail_msg: >-
+          At least one dashboard source required: dashboard_json, dashboard_file, or grafana_com_id
+        success_msg: "Dashboard source validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Grafana admin token
+      ansible.builtin.set_fact:
+        grafana_admin_token: >-
+          {{
+            inventory._state.apps.grafana.admin_token | default(grafana_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        grafana_base_url: "{{ inventory._state.apps.grafana.url }}"
+        grafana_api_base: "{{ inventory._state.apps.grafana.url }}/api"
+      when: inventory._state.apps.grafana.url is defined
+
+    # ===== STEP 3: Load Dashboard from Source =====
+    - name: Load dashboard from file
+      ansible.builtin.set_fact:
+        dashboard_model: "{{ lookup('file', dashboard_file) | from_json }}"
+      when: dashboard_file is defined
+      no_log: false
+
+    - name: Use inline dashboard JSON
+      ansible.builtin.set_fact:
+        dashboard_model: "{{ dashboard_json }}"
+      when: dashboard_json is defined and dashboard_file is not defined
+      no_log: false
+
+    - name: Fetch dashboard from Grafana.com
+      ansible.builtin.uri:
+        url: "https://grafana.com/api/dashboards/{{ grafana_com_id }}"
+        method: GET
+        status_code: [200]
+        validate_certs: true
+      register: grafana_com_response
+      when: grafana_com_id is defined and dashboard_json is not defined and dashboard_file is not defined
+      no_log: false
+
+    - name: Parse Grafana.com dashboard
+      ansible.builtin.set_fact:
+        dashboard_model: "{{ grafana_com_response.json.json }}"
+      when: grafana_com_id is defined and dashboard_json is not defined and dashboard_file is not defined
+
+    # ===== STEP 4: Extract Dashboard UID and Title =====
+    - name: Extract dashboard UID and title
+      ansible.builtin.set_fact:
+        dashboard_uid: "{{ dashboard_model.uid | default(omit) }}"
+        dashboard_title: "{{ dashboard_model.title | default('Untitled Dashboard') }}"
+
+    # ===== STEP 5: Check for Existing Dashboard (Idempotency) =====
+    - name: Check if dashboard already exists by UID
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/dashboards/uid/{{ dashboard_uid }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_dashboard
+      when: dashboard_uid is defined and dashboard_uid | length > 0
+      no_log: false
+
+    - name: Set existing dashboard fact
+      ansible.builtin.set_fact:
+        dashboard_exists: >-
+          {{
+            (existing_dashboard.status | default(404)) == 200
+          }}
+        existing_dashboard_data: >-
+          {{
+            existing_dashboard.json.dashboard if (existing_dashboard.status | default(404)) == 200 else {}
+          }}
+
+    - name: Skip import if dashboard exists and overwrite is false
+      ansible.builtin.debug:
+        msg: >-
+          Dashboard '{{ dashboard_title }}' already exists with UID {{ dashboard_uid }}.
+          Skipping import (overwrite={{ overwrite }}).
+      when: dashboard_exists and not overwrite | bool
+
+    # ===== STEP 6: Prepare Dashboard for Import =====
+    - name: Prepare dashboard model for import
+      ansible.builtin.set_fact:
+        dashboard_for_import: >-
+          {{ dashboard_model | combine({'id': None}) }}
+      when: not dashboard_exists or overwrite | bool
+
+    # ===== STEP 7: Build Import Payload =====
+    - name: Build dashboard import payload
+      ansible.builtin.set_fact:
+        import_payload:
+          dashboard: "{{ dashboard_for_import }}"
+          overwrite: "{{ overwrite }}"
+          message: "{{ message }}"
+          folderUid: "{{ folder_uid | default(omit) }}"
+          folderId: "{{ folder_id | default(omit) }}"
+      when: not dashboard_exists or overwrite | bool
+      no_log: false
+
+    # ===== STEP 8: Import Dashboard =====
+    - name: Import dashboard into Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ import_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: import_result
+      no_log: true
+      when: not dashboard_exists or overwrite | bool
+
+    - name: Set dashboard result from import or existing
+      ansible.builtin.set_fact:
+        result_dashboard_id: >-
+          {{ existing_dashboard_data.id if (dashboard_exists and not overwrite | bool) else import_result.json.id }}
+        result_dashboard_uid: >-
+          {{ existing_dashboard_data.uid if (dashboard_exists and not overwrite | bool) else import_result.json.uid }}
+        result_dashboard_url: >-
+          {{ import_result.json.url | default('/d/' + (import_result.json.uid | default('unknown'))) }}
+      when: import_result is defined or dashboard_exists
+      no_log: false
+
+    # ===== STEP 9: Write Result to BWS._state =====
+    - name: Derive dashboard key name for BWS writeback
+      ansible.builtin.set_fact:
+        dashboard_key: "{{ dashboard_title | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with dashboard info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge dashboard info into _state.apps.grafana.dashboards
+        UPDATED=$(echo "$CURRENT" | jq --arg db "{{ dashboard_key }}" \
+          --argjson db_id {{ result_dashboard_id | default(0) }} \
+          --arg db_uid "{{ result_dashboard_uid | default('') }}" \
+          --arg db_url "{{ result_dashboard_url | default('') }}" \
+          '
+          if ._state.apps.grafana == null then ._state.apps.grafana = {} else . end |
+          if ._state.apps.grafana.dashboards == null then ._state.apps.grafana.dashboards = {} else . end |
+          if ._state.apps.grafana.dashboards[$db] == null then ._state.apps.grafana.dashboards[$db] = {} else . end |
+          ._state.apps.grafana.dashboards[$db].id = $db_id |
+          ._state.apps.grafana.dashboards[$db].uid = $db_uid |
+          ._state.apps.grafana.dashboards[$db].url = $db_url
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: (not dashboard_exists or overwrite | bool) and import_result is defined
+
+    # ===== STEP 10: Output Result =====
+    - name: Display dashboard import result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'skipped' if (dashboard_exists and not overwrite | bool) else 'imported' }}"
+          dashboard_id: "{{ result_dashboard_id | default('N/A') }}"
+          dashboard_uid: "{{ result_dashboard_uid | default('N/A') }}"
+          title: "{{ dashboard_title }}"
+          url: "{{ result_dashboard_url | default('N/A') }}"
+          folder_uid: "General"

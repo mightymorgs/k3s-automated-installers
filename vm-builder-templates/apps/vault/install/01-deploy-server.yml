@@ -1,0 +1,534 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/01-deploy-server"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/install/01-deploy-server.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vault"
+#       supported_versions: ["1.15.x", "1.16.x", "1.17.x", "1.18.x"]
+#       version_range: ">=1.15.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - vault: "1.18.x"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-02-04"
+#         notes: "Deploys Vault with auto-init and unseal via BWS"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260204_kubectl_migration"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["vault_server_deployed"]
+#   tags: ["vault", "secrets", "golden-master", "hashicorp"]
+#   estimated_duration: 600
+#   parallel_safe: false
+#   idempotent: true
+#   description: Deploy HashiCorp Vault server to K3s cluster (Phase 4 handles init/unseal)
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.vault.url"
+#         example: "http://127.0.0.1:30820"
+#       - path: "_state.apps.vault.nodeport"
+#         example: 30820
+#       - path: "_state.apps.vault.status"
+#         example: "installed"
+#       - path: "_state.apps.vault.installed_at"
+#         example: "2026-03-03T12:00:00Z"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "vault"
+#     service_name: "vault"
+#     service_port: 8200
+#     namespace: "vault"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#     bypass_paths:
+#       - "/v1"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Vault"
+#     icon: "lock"
+#     category: "Security"
+#     description: "Secrets management and encryption"
+#     docs_url: "https://developer.hashicorp.com/vault/docs"
+#     port: 8200
+#     nodeport: 30820
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     vault_version:
+#       label: "Vault Version"
+#       description: "Vault container image tag"
+#       type: "string"
+#       default: "1.18"
+#     vault_replicas:
+#       label: "Replicas"
+#       description: "Number of Vault replicas"
+#       type: "integer"
+#       default: "1"
+#     vault_cpu_requests:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "250m"
+#     vault_cpu_limits:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "500m"
+#     vault_memory_requests:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "256Mi"
+#     vault_memory_limits:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "512Mi"
+#     vault_storage_size:
+#       label: "Storage Size"
+#       description: "Persistent volume size for Vault data"
+#       type: "string"
+#       default: "10Gi"
+#     vault_storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass name for Vault PVC"
+#       type: "string"
+#       default: "longhorn"
+#     vault_nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "string"
+#       default: "30820"
+#     vault_enable_nodeport:
+#       label: "Enable NodePort"
+#       description: "Create NodePort service for external access"
+#       type: "boolean"
+#       default: "true"
+#     vault_api_port:
+#       label: "API Port"
+#       description: "Vault API listener port"
+#       type: "integer"
+#       default: "8200"
+#     vault_cluster_port:
+#       label: "Cluster Port"
+#       description: "Vault cluster communication port"
+#       type: "integer"
+#       default: "8201"
+#     vault_ui_enabled:
+#       label: "Enable UI"
+#       description: "Enable the Vault web UI"
+#       type: "boolean"
+#       default: "true"
+#     vault_storage_backend:
+#       label: "Storage Backend"
+#       description: "Vault storage backend type"
+#       type: "string"
+#       default: "file"
+#     vault_storage_path:
+#       label: "Storage Path"
+#       description: "Path for file storage backend"
+#       type: "string"
+#       default: "/vault/data"
+#     vault_tls_disable:
+#       label: "Disable TLS"
+#       description: "Disable TLS on listener (1=disabled)"
+#       type: "integer"
+#       default: "1"
+#     vault_disable_mlock:
+#       label: "Disable mlock"
+#       description: "Disable mlock system call"
+#       type: "boolean"
+#       default: "true"
+#     namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace for Vault"
+#       type: "string"
+#       default: "vault"
+
+- name: Deploy HashiCorp Vault Server
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  vars:
+    app_name: vault
+    app_namespace: "vault"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/vault-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    vault_api_url: "http://127.0.0.1:{{ vault_nodeport | default(30820) }}"
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+    # vars:
+    #   namespace              - Kubernetes namespace (default: vault)
+    #   vault_version          - Vault container image tag (default: 1.18)
+    #   vault_replicas         - Number of replicas (default: 1)
+    #   vault_cpu_requests     - CPU request (default: 250m)
+    #   vault_cpu_limits       - CPU limit (default: 500m)
+    #   vault_memory_requests  - Memory request (default: 256Mi)
+    #   vault_memory_limits    - Memory limit (default: 512Mi)
+    #   vault_storage_size     - PVC size (default: 10Gi)
+    #   vault_storage_class    - StorageClass (default: longhorn)
+    #   vault_nodeport         - NodePort port (default: 30820)
+    #   vault_enable_nodeport  - Create NodePort service (default: true)
+    #   vault_api_port         - API listener port (default: 8200)
+    #   vault_cluster_port     - Cluster port (default: 8201)
+    #   vault_ui_enabled       - Enable web UI (default: true)
+    #   vault_storage_backend  - Storage backend type (default: file)
+    #   vault_storage_path     - File backend path (default: /vault/data)
+    #   vault_tls_disable      - Disable TLS on listener (default: 1)
+    #   vault_listener_address - Listener bind address (default: 0.0.0.0:8200)
+    #   vault_disable_mlock    - Disable mlock (default: true)
+    #   vault_fs_group         - Pod fsGroup (default: 1000)
+    #   vault_run_as_user      - Pod runAsUser (default: 100)
+    #   vault_liveness_initial_delay  - Liveness probe initial delay (default: 60)
+    #   vault_liveness_period         - Liveness probe period (default: 10)
+    #   vault_readiness_initial_delay - Readiness probe initial delay (default: 30)
+    #   vault_readiness_period        - Readiness probe period (default: 5)
+
+  tasks:
+    # ========================================
+    # RENDER J2 TEMPLATES
+    # ========================================
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render ServiceAccount template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/serviceaccount.yaml.j2"
+        dest: "{{ render_dir }}/serviceaccount.yaml"
+        mode: '0644'
+
+    - name: Render ConfigMap template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/config.yaml.j2"
+        dest: "{{ render_dir }}/configmap.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/statefulset.yaml.j2"
+        dest: "{{ render_dir }}/statefulset.yaml"
+        mode: '0644'
+
+    # ========================================
+    # APPLY MANIFESTS
+    # ========================================
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========================================
+    # PVC SAFETY GATE
+    # ========================================
+    - name: Check for existing Bound PVC
+      ansible.builtin.command: >-
+        kubectl get pvc -n {{ app_namespace }}
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[0].status.phase}'
+      register: existing_pvc
+      changed_when: false
+      failed_when: false
+
+    - name: Downgrade kubectl action if PVC risk detected
+      ansible.builtin.set_fact:
+        kubectl_action: "apply"
+      when:
+        - existing_pvc.rc == 0
+        - existing_pvc.stdout == 'Bound'
+        - kubectl_action == 'replace --force'
+        - not (danger_full_replace | default(false) | bool)
+
+    - name: Report PVC safety decision
+      ansible.builtin.debug:
+        msg: >-
+          PVC safety: existing_pvc={{ existing_pvc.stdout | default('none') }},
+          kubectl_action={{ kubectl_action }}
+
+    - name: Delete existing vault services if type conflicts exist
+      ansible.builtin.shell: |
+        # kubectl apply cannot change service type or clusterIP
+        # Delete existing services so apply can recreate with correct types
+        for svc in vault vault-ui vault-nodeport; do
+          if kubectl -n {{ app_namespace }} get service "$svc" >/dev/null 2>&1; then
+            kubectl -n {{ app_namespace }} delete service "$svc" --ignore-not-found=true
+            echo "Deleted conflicting service: $svc"
+          fi
+        done
+      register: svc_cleanup
+      changed_when: "'Deleted' in svc_cleanup.stdout"
+
+    - name: Delete existing StatefulSet if present (immutable spec fields)
+      ansible.builtin.shell: |
+        # StatefulSet spec fields (selector, volumeClaimTemplates, serviceName) are immutable.
+        # On re-deploy, delete the StatefulSet and its pod so the new STS creates a fresh
+        # pod with correct labels (needed for service routing).
+        if kubectl -n {{ app_namespace }} get statefulset vault >/dev/null 2>&1; then
+          kubectl -n {{ app_namespace }} delete statefulset vault --wait=true --timeout=60s
+          echo "deleted statefulset"
+        else
+          echo "no existing statefulset"
+        fi
+        # Also clean up any orphaned vault pods (from previous --cascade=orphan runs)
+        # that block the new StatefulSet from creating vault-0.
+        if kubectl -n {{ app_namespace }} get pod vault-0 >/dev/null 2>&1; then
+          kubectl -n {{ app_namespace }} delete pod vault-0 --wait=true --timeout=60s
+          echo "deleted orphaned pod"
+        fi
+      register: sts_cleanup
+      changed_when: "'deleted' in sts_cleanup.stdout"
+
+    - name: Patch PVC labels for StatefulSet adoption
+      ansible.builtin.shell: |
+        # Patch PVC labels so new StatefulSet controller can adopt existing PVC
+        if kubectl -n {{ app_namespace }} get pvc data-vault-0 >/dev/null 2>&1; then
+          kubectl -n {{ app_namespace }} label pvc data-vault-0 app.kubernetes.io/component=secrets-management app.kubernetes.io/name=vault --overwrite
+          echo "patched"
+        else
+          echo "no existing pvc"
+        fi
+      register: pvc_patch
+      changed_when: "'patched' in pvc_patch.stdout"
+
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg:
+          - "{{ ns_apply.stdout_lines | default([]) }}"
+          - "Protected: {{ protected_apply.stdout_lines | default([]) }}"
+          - "Workloads: {{ workload_apply.stdout_lines | default([]) }}"
+
+    # ========================================
+    # WAIT FOR READY
+    # ========================================
+    - name: Wait for Vault PVC to be bound
+      ansible.builtin.shell: |
+        for i in $(seq 1 60); do
+          PHASE=$(kubectl -n {{ app_namespace }} get pvc data-vault-0 -o jsonpath='{.status.phase}' 2>/dev/null)
+          if [ "$PHASE" = "Bound" ]; then
+            echo "Bound"
+            exit 0
+          fi
+          echo "Waiting for PVC... ($PHASE)"
+          sleep 10
+        done
+        echo "Timeout"
+        exit 1
+      register: pvc_wait
+      changed_when: false
+
+    - name: Wait for Vault pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name={{ app_name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_wait.rc == 0
+
+    # ========================================
+    # VERIFY DEPLOYMENT
+    # ========================================
+    - name: Verify Vault API is accessible
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/seal-status"
+        method: GET
+        status_code: [200, 503]
+        return_content: true
+      register: vault_seal_status
+      retries: 12
+      delay: "{{ retry_interval_seconds }}"
+      until: vault_seal_status.status in [200, 503]
+
+    - name: Display Vault deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: hashicorp/vault:{{ vault_version | default('1.18') }}"
+          - "API: {{ vault_api_url }}"
+          - "Initialized: {{ vault_seal_status.json.initialized | default(false) }}"
+          - "Sealed: {{ vault_seal_status.json.sealed | default(true) }}"
+          - "=========================================="
+          - ""
+          - "Next: Phase 4 will initialize and unseal Vault"
+
+    # ========================================
+    # WRITE STATE TO BWS INVENTORY
+    # ========================================
+    - name: Write Vault deploy state to BWS inventory
+      when: inventory_secret_name is defined and inventory_secret_name | length > 0
+      block:
+        - name: Verify BWS_ACCESS_TOKEN is set for write-back
+          ansible.builtin.assert:
+            that:
+              - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+            fail_msg: "BWS_ACCESS_TOKEN environment variable must be set for state write-back"
+
+        - name: Get BWS inventory secret ID
+          ansible.builtin.shell: |
+            bws secret list --output json | \
+              jq -r --arg k "{{ inventory_secret_name }}" '.[] | select(.key==$k) | .id'
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_secret_id
+          changed_when: false
+          no_log: true
+
+        - name: Fail if BWS inventory secret not found
+          ansible.builtin.assert:
+            that:
+              - bws_secret_id.stdout | length > 0
+            fail_msg: "BWS inventory secret '{{ inventory_secret_name }}' not found. Cannot write Vault state."
+
+        - name: Read current BWS inventory value
+          ansible.builtin.shell: |
+            bws secret get "{{ bws_secret_id.stdout }}" --output json | jq -r '.value'
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_current_inventory
+          changed_when: false
+          no_log: true
+
+        - name: Update inventory with Vault deploy state
+          ansible.builtin.shell: |
+            UPDATED=$(echo '{{ bws_current_inventory.stdout }}' | jq -c \
+              --arg url "{{ vault_api_url }}" \
+              --arg nodeport "{{ vault_nodeport | default('30820') }}" \
+              --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '
+                ._state.apps.vault.url = $url |
+                ._state.apps.vault.nodeport = ($nodeport | tonumber) |
+                ._state.apps.vault.status = "installed" |
+                ._state.apps.vault.installed_at = $ts
+              ')
+            bws secret edit --value "$UPDATED" "{{ bws_secret_id.stdout }}"
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_write_result
+          no_log: true
+
+        - name: Verify BWS inventory was updated
+          ansible.builtin.shell: |
+            bws secret get "{{ bws_secret_id.stdout }}" --output json | \
+              jq -r '.value' | jq -r '._state.apps.vault.status'
+          environment:
+            BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+          register: bws_verify
+          changed_when: false
+          no_log: true
+          failed_when: bws_verify.stdout != 'installed'
+
+        - name: Display BWS write-back result
+          ansible.builtin.debug:
+            msg: "Vault deploy state written to BWS inventory '{{ inventory_secret_name }}' (_state.apps.vault)"
+
+    # ========================================
+    # CLEANUP
+    # ========================================
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

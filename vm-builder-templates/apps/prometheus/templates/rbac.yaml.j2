@@ -1,0 +1,43 @@
+---
+# Prometheus RBAC (J2 template)
+# ServiceAccount, ClusterRole, ClusterRoleBinding for cluster-wide metrics scraping
+# Defaults match k8s-base/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ service_account_name | default('prometheus') }}
+  namespace: {{ app_namespace | default('observability') }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ service_account_name | default('prometheus') }}
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ service_account_name | default('prometheus') }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ service_account_name | default('prometheus') }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ service_account_name | default('prometheus') }}
+    namespace: {{ app_namespace | default('observability') }}

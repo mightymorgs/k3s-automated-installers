@@ -1,0 +1,11 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  certificates-create.yml:
+    summary: Create a Cloudflare Origin CA certificate for a specific hostname. Generates
+      a CSR, requests the certificate via Cloudflare API, stores the result in a Kubernetes
+      TLS secret, and writes certificate metadata to BWS._state.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ cloudflare_api_url }}/certificates'

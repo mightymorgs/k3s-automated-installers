@@ -1,0 +1,415 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/radarr/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/radarr/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "radarr"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "radarr"
+#       supported_versions: ["latest", "5.x"]
+#       version_range: ">=5.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - radarr: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-02-04"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260204_j2_vertical_slice"
+#   dependencies: ["k3s_server_installed", "media_shared_storage_deployed"]
+#   provides: ["radarr_deployed"]
+#   tags: ["radarr", "pvr", "movies", "media", "arr-stack"]
+#   estimated_duration: 120
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Deploy Radarr movie PVR to K3s cluster via J2 templates.
+#     Requires shared media storage. Accessible via NodePort 30878.
+#
+#   # ========== CREDENTIALS (v3.2) ==========
+#   credentials:
+#     secret_name: "radarr-credentials"
+#     fields:
+#       api_key:
+#         bws_field: "api_key"
+#         source: "k8s-secret"
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.radarr.api_key"
+#         example: "hex-api-key"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "radarr"
+#     service_name: "radarr"
+#     service_port: 7878
+#     namespace: "media-stack"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#     bypass_paths:
+#       - "/api"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Radarr"
+#     icon: "film"
+#     category: "Media Management"
+#     description: "Movie collection manager and PVR"
+#     docs_url: "https://radarr.video/"
+#     port: 7878
+#     nodeport: 30878
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     app_name:
+#       label: "App Name"
+#       description: "Kubernetes resource name"
+#       type: "string"
+#       default: "radarr"
+#     app_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace"
+#       type: "string"
+#       default: "media-stack"
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for Radarr"
+#       type: "string"
+#       default: "lscr.io/linuxserver/radarr:latest"
+#     image_pull_policy:
+#       label: "Image Pull Policy"
+#       description: "Kubernetes image pull policy"
+#       type: "choice"
+#       default: "IfNotPresent"
+#       options: ["Always", "IfNotPresent", "Never"]
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of pod replicas"
+#       type: "string"
+#       default: "1"
+#     timezone:
+#       label: "Timezone"
+#       description: "Container timezone (TZ database name)"
+#       type: "string"
+#       default: "Australia/Sydney"
+#     puid:
+#       label: "PUID"
+#       description: "Process user ID for file permissions"
+#       type: "string"
+#       default: "1000"
+#     pgid:
+#       label: "PGID"
+#       description: "Process group ID for file permissions"
+#       type: "string"
+#       default: "1000"
+#     container_port:
+#       label: "Container Port"
+#       description: "Internal container port"
+#       type: "string"
+#       default: "7878"
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "choice"
+#       default: "NodePort"
+#       options: ["NodePort", "ClusterIP", "LoadBalancer"]
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "string"
+#       default: "30878"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "200m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "512Mi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "1000m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "1Gi"
+#     health_path:
+#       label: "Health Check Path"
+#       description: "HTTP path for liveness and readiness probes"
+#       type: "string"
+#       default: "/ping"
+#     liveness_initial_delay:
+#       label: "Liveness Initial Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "string"
+#       default: "60"
+#     readiness_initial_delay:
+#       label: "Readiness Initial Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "string"
+#       default: "30"
+#     storage_class:
+#       label: "Storage Class"
+#       description: "Kubernetes storage class for config PVC"
+#       type: "string"
+#       default: "longhorn"
+#     config_storage_size:
+#       label: "Config Storage"
+#       description: "Persistent volume size for app config"
+#       type: "string"
+#       default: "1Gi"
+#     media_mount_path:
+#       label: "Media Mount Path"
+#       description: "Container path for media library"
+#       type: "string"
+#       default: "/media"
+#     media_subpath:
+#       label: "Media SubPath"
+#       description: "PVC subpath for media library"
+#       type: "string"
+#       default: "media"
+#     downloads_mount_path:
+#       label: "Downloads Mount Path"
+#       description: "Container path for downloads"
+#       type: "string"
+#       default: "/downloads"
+#     downloads_subpath:
+#       label: "Downloads SubPath"
+#       description: "PVC subpath for downloads"
+#       type: "string"
+#       default: "downloads"
+#     media_pvc_name:
+#       label: "Media PVC Name"
+#       description: "Name of the shared media PersistentVolumeClaim"
+#       type: "string"
+#       default: "media-shared-pvc"
+
+- name: Deploy Radarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: radarr
+    app_namespace: "media-stack"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/radarr-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    container_port: 7878
+    health_path: "/ping"
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+
+  tasks:
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/statefulset.yaml.j2"
+        dest: "{{ render_dir }}/statefulset.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Wait for pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app={{ app_name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_wait.rc == 0
+
+    # ========== EXTRACT API KEY AND CREATE K8S SECRET ==========
+    - name: Get pod name
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods -l app={{ app_name }}
+        -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout | length > 0
+
+    - name: Wait for Radarr to generate config
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} exec {{ app_pod.stdout }} --
+        test -f /config/config.xml
+      register: config_check
+      retries: 12
+      delay: "{{ retry_interval_seconds }}"
+      until: config_check.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Extract API key from config.xml
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} exec {{ app_pod.stdout }} --
+        sed -n 's/.*<ApiKey>\(.*\)<\/ApiKey>.*/\1/p' /config/config.xml
+      register: api_key_raw
+      changed_when: false
+      no_log: true
+      when: config_check.rc == 0
+
+    - name: Create radarr-credentials K8s Secret
+      ansible.builtin.shell: >-
+        kubectl create secret generic radarr-credentials
+        --from-literal=api_key={{ api_key_raw.stdout }}
+        -n {{ app_namespace }}
+        --dry-run=client -o yaml | kubectl apply -f -
+      register: secret_create
+      changed_when: "'created' in secret_create.stdout or 'configured' in secret_create.stdout"
+      no_log: true
+      when: config_check.rc == 0 and api_key_raw.stdout | default('') | length > 0
+
+    - name: Render PushSecret template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/pushsecret.yaml.j2"
+        dest: "{{ render_dir }}/pushsecret.yaml"
+        mode: '0644'
+
+    - name: Apply PushSecret
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ render_dir }}/pushsecret.yaml
+      register: pushsecret_apply
+      changed_when: "'created' in pushsecret_apply.stdout or 'configured' in pushsecret_apply.stdout"
+
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Radarr Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ image | default('lscr.io/linuxserver/radarr:latest') }}"
+          - "Access URL: http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30878) }}"
+          - "=========================================="
+
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

@@ -1,0 +1,251 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/loki/09-enable-prometheus-remote-write"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/loki/config/09-enable-prometheus-remote-write.yml"
+#     category: "apps"
+#     subsystem: "loki"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["loki_deployed", "prometheus_deployed"]
+#   provides: ["loki_prometheus_remote_write_configured"]
+#   tags: ["loki", "prometheus", "remote-write", "ruler", "phase4"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Loki's ruler to push Loki-derived metrics to Prometheus
+#     via remote_write. Also enables the remote write receiver on the
+#     Prometheus deployment. Patches both the Loki ConfigMap and the
+#     Prometheus deployment args, then restarts both services.
+#     Idempotent: checks existing config before patching.
+#   requires_apps: ["loki", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Enable Loki Ruler Remote Write to Prometheus
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    loki_namespace: "observability"
+    prometheus_namespace: "prometheus"
+    # loki_url: from BWS _state via Phase 4 extra-vars
+    # prometheus_url: from BWS _state via Phase 4 extra-vars
+    prometheus_remote_write_url: "{{ prometheus_url }}/api/v1/write"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF LOKI IS DEPLOYED ==========
+    - name: Check if Loki pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ loki_namespace }} -l app=loki --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Loki not deployed
+      ansible.builtin.meta: end_play
+      when: loki_pod_check.rc != 0 or loki_pod_check.stdout | length == 0
+
+    # ========== CHECK IF PROMETHEUS IS DEPLOYED ==========
+    - name: Check if Prometheus pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ prometheus_namespace }} -l app.kubernetes.io/name=prometheus --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Prometheus not deployed
+      ansible.builtin.meta: end_play
+      when: prometheus_pod_check.rc != 0 or prometheus_pod_check.stdout | length == 0
+
+    # ========== GET CURRENT LOKI CONFIG ==========
+    - name: Get current Loki ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap loki-config -n {{ loki_namespace }}
+          -o jsonpath='{.data.loki\.yaml}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_loki_config_raw
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Loki ConfigMap not found
+      ansible.builtin.meta: end_play
+      when: current_loki_config_raw.rc != 0 or current_loki_config_raw.stdout | length == 0
+
+    - name: Store current Loki config
+      ansible.builtin.set_fact:
+        current_loki_config: "{{ current_loki_config_raw.stdout }}"
+
+    # ========== CHECK IF REMOTE WRITE ALREADY CONFIGURED IN LOKI ==========
+    - name: Check if remote_write already in Loki ruler config
+      ansible.builtin.set_fact:
+        loki_remote_write_configured: "{{ 'remote_write' in current_loki_config and 'api/v1/write' in current_loki_config }}"
+
+    - name: Note Loki remote_write already configured
+      ansible.builtin.debug:
+        msg: "Loki ruler remote_write already present in config - skipping Loki patch"
+      when: loki_remote_write_configured
+
+    # ========== PATCH LOKI CONFIGMAP WITH REMOTE WRITE ==========
+    - name: Patch Loki ConfigMap with ruler remote_write section
+      when: not loki_remote_write_configured
+      block:
+        - name: Build ruler remote_write config block
+          ansible.builtin.set_fact:
+            ruler_remote_write_block: |
+              ruler:
+                remote_write:
+                  enabled: true
+                  client:
+                    url: {{ prometheus_remote_write_url }}
+
+        - name: Append ruler remote_write config to loki.yaml in ConfigMap
+          ansible.builtin.shell: |
+            # Get current loki.yaml from ConfigMap
+            CURRENT=$(kubectl get configmap loki-config -n {{ loki_namespace }} \
+              -o jsonpath='{.data.loki\.yaml}')
+
+            # Check if remote_write already exists
+            if echo "$CURRENT" | grep -q "remote_write:"; then
+              echo "ALREADY_CONFIGURED"
+              exit 0
+            fi
+
+            # Check if ruler section already exists (may have alertmanager_url but not remote_write)
+            if echo "$CURRENT" | grep -q "^ruler:"; then
+              # Ruler exists — inject remote_write under the existing ruler section
+              TMPFILE=$(mktemp)
+              echo "$CURRENT" | sed '/^ruler:/a\
+                remote_write:\
+                  enabled: true\
+                  client:\
+                    url: {{ prometheus_remote_write_url }}' > "$TMPFILE"
+            else
+              # No ruler section — append entire block
+              TMPFILE=$(mktemp)
+              cat > "$TMPFILE" <<'YAMLEOF'
+            {{ current_loki_config }}
+
+            {{ ruler_remote_write_block }}
+            YAMLEOF
+            fi
+
+            # Replace the ConfigMap data
+            kubectl create configmap loki-config \
+              -n {{ loki_namespace }} \
+              --from-file=loki.yaml="$TMPFILE" \
+              --dry-run=client -o yaml | \
+              kubectl apply -f -
+
+            rm -f "$TMPFILE"
+            echo "PATCHED"
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: loki_config_patch
+          changed_when: "'PATCHED' in loki_config_patch.stdout"
+
+    # ========== RESTART LOKI TO PICK UP CONFIG ==========
+    - name: Restart Loki StatefulSet to pick up new config
+      ansible.builtin.command:
+        cmd: kubectl rollout restart statefulset/loki -n {{ loki_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_restart
+      changed_when: "'restarted' in loki_restart.stdout"
+      when: not loki_remote_write_configured
+
+    - name: Wait for Loki rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/loki -n {{ loki_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not loki_remote_write_configured
+
+    # ========== ENABLE PROMETHEUS REMOTE WRITE RECEIVER ==========
+    - name: Check if Prometheus has remote-write-receiver enabled
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ prometheus_namespace }}
+          -l app.kubernetes.io/name=prometheus
+          -o jsonpath='{.items[0].spec.template.spec.containers[0].args}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_args
+      changed_when: false
+      failed_when: false
+
+    - name: Check if remote write receiver already enabled
+      ansible.builtin.set_fact:
+        prometheus_rw_receiver_enabled: "{{ 'web.enable-remote-write-receiver' in (prometheus_args.stdout | default('')) }}"
+
+    - name: Get Prometheus deployment name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ prometheus_namespace }}
+          -l app.kubernetes.io/name=prometheus
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_deploy_name
+      changed_when: false
+      when: not prometheus_rw_receiver_enabled
+
+    - name: Patch Prometheus deployment to enable remote write receiver
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ prometheus_deploy_name.stdout }}
+          -n {{ prometheus_namespace }}
+          --type=json
+          -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--web.enable-remote-write-receiver"}]'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_patch
+      changed_when: "'patched' in prometheus_patch.stdout"
+      when: not prometheus_rw_receiver_enabled
+
+    - name: Wait for Prometheus rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/{{ prometheus_deploy_name.stdout }} -n {{ prometheus_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not prometheus_rw_receiver_enabled
+
+    # ========== VERIFY LOKI IS HEALTHY ==========
+    - name: Verify Loki ready endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/ready"
+        method: GET
+        return_content: false
+      register: loki_health
+      retries: 10
+      delay: 6
+      until: loki_health.status is defined and loki_health.status == 200
+      failed_when: false
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Loki Ruler <-> Prometheus Remote Write"
+          - "=========================================="
+          - "Loki ruler remote_write: {{ 'Already configured' if loki_remote_write_configured else 'Patched and restarted' }}"
+          - "Prometheus remote write receiver: {{ 'Already enabled' if prometheus_rw_receiver_enabled else 'Enabled via patch' }}"
+          - "Remote Write URL: {{ prometheus_remote_write_url }}"
+          - "Loki health: {{ 'OK' if (loki_health.status | default(0)) == 200 else 'Check manually' }}"
+          - "=========================================="

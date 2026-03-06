@@ -1,0 +1,353 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-datasources.yml:
+    summary: Configure Grafana datasources by reading BWS._state for Loki and Prometheus
+      URLs. Wires Grafana to available datasources via API (no kubectl). Updates BWS._state
+      with wiring status.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ loki_url }}'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ prometheus_url }}'
+    references_services:
+    - loki
+    - prometheus
+  04-configure-api.yml:
+    summary: Enable anonymous access for Grafana in Tailscale mode. Patches the Grafana
+      deployment with GF_AUTH_ANONYMOUS_ENABLED=true so users on the tailnet can access
+      dashboards without logging in. Tailscale provides the authentication layer.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+  04-configure-datasources.yml:
+    summary: Configure Grafana datasources via API
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/datasources'
+    - http://prometheus.prometheus:9090
+    - '{{ grafana_url }}/api/datasources'
+    - http://loki.loki:3100
+    - '{{ grafana_url }}/api/datasources'
+    - http://alertmanager.alertmanager:9093
+    - '{{ grafana_url }}/api/datasources'
+    - http://elasticsearch.elastic:9200
+  05-wire-prometheus.yml:
+    summary: 'Add Prometheus as the default datasource in Grafana via the HTTP API.
+      Uses Grafana basic auth (admin user) and internal K8s DNS for the Prometheus
+      URL. Idempotent: 409 means datasource already exists.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ prometheus_internal_url }}'
+    requires_apps:
+    - prometheus
+    references_services:
+    - prometheus
+  06-wire-loki.yml:
+    summary: 'Add Loki as a datasource in Grafana via the HTTP API. Uses Grafana basic
+      auth (admin user) and internal K8s DNS for the Loki URL. Idempotent: checks
+      for existing datasource before creating.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ loki_internal_url }}'
+    requires_apps:
+    - loki
+    references_services:
+    - loki
+  07-wire-alertmanager.yml:
+    summary: 'Add Alertmanager as a datasource in Grafana via the HTTP API. Configures
+      the Prometheus implementation type so Grafana can query Alertmanager''s API
+      for alert status and silences. Idempotent: checks for existing datasource before
+      creating.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ alertmanager_internal_url }}'
+    requires_apps:
+    - alertmanager
+    references_services:
+    - alertmanager
+  08-wire-elastic.yml:
+    summary: 'Add Elasticsearch as a datasource in Grafana via the HTTP API. Uses
+      internal K8s DNS for the Elasticsearch URL. Configures the logs-* index pattern
+      with @timestamp as the time field. Idempotent: checks for existing datasource
+      before creating.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ elastic_internal_url }}'
+    requires_apps:
+    - elastic
+    references_services:
+    - elastic
+  09-wire-alertmanager-unified.yml:
+    summary: 'Configure Grafana unified alerting to send alerts to Alertmanager. This
+      is the push direction (Grafana -> Alertmanager). The existing 07-wire-alertmanager.yml
+      adds Alertmanager as a datasource (pull). This playbook enables unified alerting
+      via environment variables on the Grafana deployment, disables legacy alerting,
+      and configures the external Alertmanager URL. Idempotent: checks current env
+      vars before patching.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/health'
+    requires_apps:
+    - alertmanager
+    references_services:
+    - alertmanager
+  10-enable-metrics.yml:
+    summary: Enable Prometheus metrics scraping for Grafana. Sets the GF_METRICS_ENABLED=true
+      environment variable to activate the built-in /metrics endpoint on port 3000,
+      then adds pod-level Prometheus scrape annotations so Prometheus auto-discovers
+      and scrapes the metrics endpoint via its kubernetes-pods scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+  11-dashboard-traefik.yml:
+    summary: 'Import Traefik v3 Overview dashboard (Grafana.com #17346) into Grafana
+      via the HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - traefik
+  12-dashboard-longhorn.yml:
+    summary: 'Import Longhorn v1 dashboard (Grafana.com #16888) into Grafana via the
+      HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - longhorn
+    - prometheus
+  13-dashboard-certmanager.yml:
+    summary: 'Import cert-manager dashboard (Grafana.com #20842) into Grafana via
+      the HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - cert-manager
+    - prometheus
+  14-dashboard-vault.yml:
+    summary: 'Import Vault Overview dashboard (Grafana.com #12904) into Grafana via
+      the HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - vault
+  15-dashboard-argocd.yml:
+    summary: 'Import ArgoCD Overview dashboard (Grafana.com #14584) into Grafana via
+      the HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - argocd
+    - prometheus
+  16-dashboard-authentik.yml:
+    summary: 'Import Authentik dashboard (Grafana.com #14837) into Grafana via the
+      HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - authentik
+    - prometheus
+  17-dashboard-teleport.yml:
+    summary: 'Import Teleport dashboard (Grafana.com #15399) into Grafana via the
+      HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - teleport
+  18-dashboard-sonarr.yml:
+    summary: 'Import Sonarr v3 dashboard (Grafana.com #12530) into Grafana via the
+      HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - sonarr
+  19-dashboard-radarr.yml:
+    summary: 'Import Radarr v3 dashboard (Grafana.com #12896) into Grafana via the
+      HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - radarr
+  20-dashboard-qbittorrent.yml:
+    summary: 'Import qBittorrent Dashboard (Grafana.com #15116) into Grafana via the
+      HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - qbittorrent
+  21-dashboard-sabnzbd.yml:
+    summary: 'Import SABnzbd dashboard (Grafana.com #9567) into Grafana via the HTTP
+      API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent: uses
+      overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - prometheus
+    - sabnzbd
+  22-dashboard-plex.yml:
+    summary: 'Import Plex Template dashboard (Grafana.com #17891) into Grafana via
+      the HTTP API. Uses basic auth and the /api/dashboards/import endpoint. Idempotent:
+      uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/import'
+    requires_apps:
+    - plex
+    - prometheus
+  23-dashboard-jellyfin.yml:
+    summary: 'Import Jellyfin Overview dashboard into Grafana via the HTTP API. No
+      Grafana.com dashboard exists for Jellyfin; uses a minimal inline dashboard JSON
+      with placeholder panels. Replace with a community dashboard JSON (e.g. rebelcore/jellyfin_grafana)
+      when available. Idempotent: uses overwrite=true so re-runs update the existing
+      dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/db'
+    requires_apps:
+    - jellyfin
+    - prometheus
+  24-dashboard-prowlarr.yml:
+    summary: 'Import Prowlarr dashboard into Grafana via the HTTP API. No Grafana.com
+      dashboard exists for Prowlarr; uses a minimal inline dashboard JSON with placeholder
+      panels. Replace with the Exportarr community dashboard JSON when available.
+      Idempotent: uses overwrite=true so re-runs update the existing dashboard.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/dashboards/db'
+    requires_apps:
+    - prometheus
+    - prowlarr
+  25-datasource-neo4j.yml:
+    summary: Install the Neo4j community datasource plugin in Grafana and add Neo4j
+      as a datasource via the Grafana HTTP API. Requires a Grafana pod restart to
+      load the plugin after installation. Uses internal K8s DNS bolt:// protocol for
+      Neo4j connectivity.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/plugins'
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ neo4j_bolt_url }}'
+    requires_apps:
+    - neo4j
+    references_services:
+    - neo4j-bolt
+  26-datasource-langfuse.yml:
+    summary: Install the Grafana Infinity datasource plugin and add Langfuse as a
+      datasource for querying Langfuse metrics via its HTTP API. Requires a Grafana
+      pod restart to load the plugin. Uses internal K8s DNS for Langfuse connectivity.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/plugins'
+    - '{{ grafana_url }}/api/health'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ grafana_url }}/api/datasources'
+    - '{{ langfuse_internal_url }}'
+    requires_apps:
+    - langfuse
+    references_services:
+    - langfuse
+depends_on_apps:
+- alertmanager
+- argocd
+- authentik
+- cert-manager
+- elastic
+- jellyfin
+- langfuse
+- loki
+- longhorn
+- neo4j
+- neo4j-bolt
+- plex
+- prometheus
+- prowlarr
+- qbittorrent
+- radarr
+- sabnzbd
+- sonarr
+- teleport
+- traefik
+- vault

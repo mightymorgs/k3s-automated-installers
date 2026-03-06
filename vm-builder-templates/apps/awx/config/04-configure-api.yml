@@ -1,0 +1,256 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "awx"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["awx_deployed"]
+#   provides: ["awx_api_configured"]
+#   tags: ["awx", "api", "configuration", "csrf", "tailscale", "zero-touch"]
+#   estimated_duration: 90
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure AWX Django settings for Tailscale Ingress mode.
+#     Sets CSRF_TRUSTED_ORIGINS, REMOTE_HOST_HEADERS, and ALLOWED_HOSTS
+#     via the AWX REST API so that requests proxied through the Tailscale
+#     operator are not blocked by Django CSRF protection.
+#     Tailscale provides the authentication layer.
+#   requires_apps: ["awx"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.awx.configured"
+#         example: true
+#       - path: "_state.apps.awx.api_key"
+#         example: "<persistent-token>"
+#         description: "Persistent API token for downstream wiring (alertmanager, argocd)"
+
+- name: Configure AWX for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    awx_namespace: "awx"
+    app_namespace: "{{ awx_namespace }}"
+    # awx_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== CHECK IF AWX IS DEPLOYED ==========
+    - name: Check if AWX pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=awx --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: awx_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if AWX not deployed
+      ansible.builtin.debug:
+        msg: "AWX not deployed - skipping API configuration"
+      when: awx_pod_check.rc != 0 or awx_pod_check.stdout | length == 0
+
+    - name: End play if AWX not available
+      ansible.builtin.meta: end_play
+      when: awx_pod_check.rc != 0 or awx_pod_check.stdout | length == 0
+
+    # ========== GET ADMIN PASSWORD FROM BWS ==========
+    - name: Fail if AWX admin password not available from BWS
+      ansible.builtin.fail:
+        msg: "awx_admin_password not in Phase 4 extra-vars. Check Phase 3 credential extraction."
+      when: awx_admin_password is not defined or awx_admin_password | length == 0
+
+    # ========== VERIFY AWX API CONNECTIVITY ==========
+    - name: Wait for AWX API to be accessible
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/ping/"
+        method: GET
+        return_content: false
+      register: awx_ping
+      retries: 10
+      delay: 10
+      until: awx_ping.status is defined and awx_ping.status == 200
+      failed_when: false
+
+    - name: Fail if AWX API not accessible
+      ansible.builtin.fail:
+        msg: "AWX API not accessible after retries (last status: {{ awx_ping.status | default('unknown') }})"
+      when: awx_ping.status is not defined or awx_ping.status != 200
+
+    # ========== IDEMPOTENCY: CHECK FOR EXISTING PERSISTENT TOKEN ==========
+    - name: Check if persistent AWX API key already exists in BWS
+      ansible.builtin.set_fact:
+        _awx_key_exists: "{{ awx_api_key is defined and awx_api_key | length > 0 }}"
+
+    # ========== GET API TOKEN ==========
+    - name: Get AWX API token
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/tokens/"
+        method: POST
+        user: admin
+        password: "{{ awx_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          description: "Ansible automation token - Tailscale config"
+          scope: "write"
+        status_code: [201]
+      register: awx_token
+      no_log: true
+
+    - name: Set API token fact
+      ansible.builtin.set_fact:
+        awx_api_token: "{{ awx_token.json.token }}"
+        awx_token_id: "{{ awx_token.json.id }}"
+      no_log: true
+
+    # ========== CONFIGURE CSRF AND HOST SETTINGS ==========
+    # AWX is a Django app with CSRF protection. When accessed via Tailscale
+    # Ingress, the origin/referer headers contain the Tailscale hostname
+    # which Django does not recognize. We configure:
+    #   - CSRF_TRUSTED_ORIGINS: wildcard to trust all HTTPS/HTTP origins
+    #     (Tailscale is the auth boundary, not CSRF)
+    #   - REMOTE_HOST_HEADERS: trust X-Forwarded-For from Tailscale proxy
+    #   - ALLOWED_HOSTS: wildcard since Tailscale handles access control
+
+    - name: Get current system settings
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/settings/system/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        status_code: [200]
+      register: current_settings
+
+    - name: Configure CSRF trusted origins and host headers for Tailscale
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/settings/system/"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: >-
+          {{ current_settings.json | combine({
+            'CSRF_TRUSTED_ORIGINS': ['https://*', 'http://*'],
+            'REMOTE_HOST_HEADERS': ['HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR'],
+            'ALLOWED_HOSTS': ['*']
+          }) }}
+        status_code: [200]
+      register: settings_update
+
+    # ========== VERIFY SETTINGS APPLIED ==========
+    - name: Verify updated system settings
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/settings/system/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        status_code: [200]
+      register: verified_settings
+
+    - name: Assert CSRF origins are set
+      ansible.builtin.assert:
+        that:
+          - "'https://*' in verified_settings.json.CSRF_TRUSTED_ORIGINS"
+          - "'HTTP_X_FORWARDED_FOR' in verified_settings.json.REMOTE_HOST_HEADERS"
+          - "'*' in verified_settings.json.ALLOWED_HOSTS"
+        fail_msg: "AWX system settings were not applied correctly"
+        success_msg: "AWX CSRF and host settings verified"
+
+    # ========== VERIFY AWX API STILL ACCESSIBLE ==========
+    - name: Verify AWX API is still accessible after config change
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/ping/"
+        method: GET
+        return_content: false
+      register: post_config_ping
+      retries: 5
+      delay: 5
+      until: post_config_ping.status is defined and post_config_ping.status == 200
+      failed_when: false
+
+    - name: Fail if AWX API not accessible after config
+      ansible.builtin.fail:
+        msg: "AWX API not accessible after settings update (status: {{ post_config_ping.status | default('unknown') }})"
+      when: post_config_ping.status is not defined or post_config_ping.status != 200
+
+    # ========== CREATE PERSISTENT API TOKEN FOR DOWNSTREAM PLAYBOOKS ==========
+    # alertmanager/config/05-wire-awx.yml and argocd/config/05-wire-awx.yml
+    # both need awx_api_key from BWS _state.apps.awx.api_key.
+    # This token is SEPARATE from the ephemeral token used above for config.
+
+    - name: Skip persistent token creation — already in BWS
+      ansible.builtin.debug:
+        msg: "Persistent AWX API key already exists in BWS ({{ awx_api_key[:8] }}…) — skipping creation"
+      when: _awx_key_exists | bool
+
+    - name: Create persistent API token for downstream wiring
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/tokens/"
+        method: POST
+        user: admin
+        password: "{{ awx_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          description: "BWS persistent token - alertmanager/argocd wiring"
+          scope: "write"
+        status_code: [201]
+      register: persistent_token_response
+      no_log: true
+      when: not (_awx_key_exists | bool)
+
+    - name: Write persistent AWX API key to BWS
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        INV_ID=$(jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE")
+        CURRENT=$(bws secret get "$INV_ID" --output json | jq -r '.value')
+        UPDATED=$(echo "$CURRENT" | jq --arg key "{{ persistent_token_response.json.token }}" '._state.apps.awx.api_key = $key')
+        bws secret edit "$INV_ID" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      no_log: true
+      changed_when: true
+      when: not (_awx_key_exists | bool)
+
+    - name: Report persistent token status
+      ansible.builtin.debug:
+        msg: "Persistent AWX API key {{ _awx_key_exists | bool | ternary('already existed', 'created and written to BWS') }}"
+
+    # ========== CLEAN UP EPHEMERAL TOKEN ==========
+    - name: Revoke ephemeral API token
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/tokens/{{ awx_token_id }}/"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ awx_api_token }}"
+        status_code: [204]
+      no_log: true
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "AWX API Configuration Complete"
+          - "=========================================="
+          - "CSRF_TRUSTED_ORIGINS: ['https://*', 'http://*']"
+          - "REMOTE_HOST_HEADERS: ['HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR']"
+          - "ALLOWED_HOSTS: ['*']"
+          - "Auth Layer: Tailscale (Django CSRF relaxed)"
+          - "API Endpoint: {{ awx_url }}/api/v2/"
+          - "Post-Config Health: {{ post_config_ping.status }}"
+          - "Persistent API Key: {{ _awx_key_exists | bool | ternary('pre-existing', 'newly created → BWS') }}"
+          - "=========================================="

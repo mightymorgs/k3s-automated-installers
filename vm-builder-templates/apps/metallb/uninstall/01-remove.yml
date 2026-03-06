@@ -1,0 +1,73 @@
+---
+- name: Uninstall MetalLB
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: metallb
+    app_namespace: "metallb-system"
+  tasks:
+    - name: Check namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+      register: ns_check
+
+    - name: Skip if namespace does not exist
+      ansible.builtin.meta: end_play
+      when: ns_check.resources | length == 0
+
+    # Delete MetalLB custom resources first
+    - name: Delete IPAddressPools
+      ansible.builtin.shell: |
+        kubectl delete ipaddresspool --all -n {{ app_namespace }} 2>/dev/null || true
+      changed_when: false
+      failed_when: false
+
+    - name: Delete L2Advertisements
+      ansible.builtin.shell: |
+        kubectl delete l2advertisement --all -n {{ app_namespace }} 2>/dev/null || true
+      changed_when: false
+      failed_when: false
+
+    - name: Delete all Deployments in metallb-system
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ app_namespace }}"
+      register: metallb_deployments
+
+    - name: Remove MetalLB Deployments
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      loop: "{{ metallb_deployments.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Delete all DaemonSets in metallb-system
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        namespace: "{{ app_namespace }}"
+      register: metallb_daemonsets
+
+    - name: Remove MetalLB DaemonSets
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: DaemonSet
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      loop: "{{ metallb_daemonsets.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"

@@ -1,0 +1,243 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/loki/08-configure-alert-rules"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/loki/config/08-configure-alert-rules.yml"
+#     category: "apps"
+#     subsystem: "loki"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_alert_rules"
+#   dependencies: ["loki_deployed", "alertmanager_deployed", "loki_alertmanager_wired"]
+#   provides: ["loki_alert_rules_configured"]
+#   tags: ["loki", "alertmanager", "alerting", "logql", "rules", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Push LogQL alert rules to the Loki Ruler via its HTTP API. The ruler
+#     must already be configured with alertmanager_url and enable_api: true
+#     (done by loki/config/05-wire-alertmanager.yml). Rules cover five
+#     log-based alerts: arr import failures, download client disconnects,
+#     vault audit errors, authentication failure spikes, and cert renewal
+#     errors. Uses the Loki Ruler API (POST /loki/api/v1/rules/{namespace})
+#     to create or update rules. Idempotent: checks existing rules before
+#     pushing.
+#   requires_apps: ["loki", "alertmanager"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Configure Loki LogQL Alert Rules
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    authentik_namespace: "authentik"
+    cert_manager_namespace: "cert-manager"
+    loki_namespace: "observability"
+    sonarr_namespace: "media-stack"
+    vault_namespace: "vault"
+    alertmanager_namespace: "alertmanager"
+    media_stack_namespace: "{{ sonarr_namespace }}"
+    vault_alert_namespace: "{{ vault_namespace }}"
+    # loki_url: from BWS _state via Phase 4 extra-vars
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    # Loki ruler namespace for rule grouping (not K8s namespace)
+    ruler_namespace: homelab
+
+    # LogQL alert rules YAML body for the Ruler API
+    ruler_rules_yaml: |
+      groups:
+        - name: log-alerts
+          rules:
+            - alert: ArrImportFailure
+              expr: 'count_over_time({namespace="{{ media_stack_namespace }}", app=~"sonarr|radarr"} |= "Import failed" [5m]) > 0'
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Import failure detected in {{ '{{' }} $labels.app {{ '}}' }}"
+                description: "Media import errors in the last 5 minutes"
+
+            - alert: DownloadClientDisconnected
+              expr: 'count_over_time({namespace="{{ media_stack_namespace }}"} |= "Unable to connect to" [5m]) > 3'
+              for: 5m
+              labels:
+                severity: critical
+              annotations:
+                summary: "Download client disconnected"
+                description: "Media apps lost connection to download client"
+
+            - alert: VaultAuditFailure
+              expr: 'count_over_time({namespace="{{ vault_alert_namespace }}"} |= "error" |= "audit" [5m]) > 0'
+              for: 5m
+              labels:
+                severity: critical
+              annotations:
+                summary: "Vault audit backend errors detected"
+                description: "Vault audit logging errors in the last 5 minutes"
+
+            - alert: AuthenticationFailureSpike
+              expr: 'count_over_time({namespace="{{ authentik_namespace }}"} |= "login_failed" [5m]) > 10'
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Authentication failure spike"
+                description: "More than 10 failed logins in 5 minutes (possible brute force)"
+
+            - alert: CertRenewalError
+              expr: 'count_over_time({namespace="{{ cert_manager_namespace }}"} |= "error" |= "renew" [5m]) > 0'
+              for: 10m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Certificate renewal errors"
+                description: "cert-manager renewal errors detected in logs"
+
+  tasks:
+    # ========== CHECK IF LOKI IS DEPLOYED ==========
+    - name: Check if Loki pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ loki_namespace }} -l app=loki --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Loki not deployed
+      ansible.builtin.meta: end_play
+      when: loki_pod_check.rc != 0 or loki_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ALERTMANAGER IS DEPLOYED ==========
+    - name: Check if Alertmanager pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ alertmanager_namespace }} -l app.kubernetes.io/name=alertmanager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: alertmanager_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Alertmanager not deployed
+      ansible.builtin.meta: end_play
+      when: alertmanager_pod_check.rc != 0 or alertmanager_pod_check.stdout | length == 0
+
+    # ========== VERIFY LOKI RULER API IS AVAILABLE ==========
+    # The ruler API must be enabled (enable_api: true) by 05-wire-alertmanager.yml.
+    - name: Check Loki ruler API availability
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/loki/api/v1/rules"
+        method: GET
+        status_code: [200, 404]
+      register: ruler_api_check
+      failed_when: false
+
+    - name: End play if Loki ruler API not available
+      ansible.builtin.meta: end_play
+      when: ruler_api_check.status is not defined or ruler_api_check.status not in [200, 404]
+
+    # ========== CHECK IF RULES ALREADY EXIST ==========
+    # GET /loki/api/v1/rules/{namespace} returns existing rules for comparison.
+    - name: Get existing rules for namespace
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/loki/api/v1/rules/{{ ruler_namespace }}"
+        method: GET
+        return_content: true
+        status_code: [200, 404]
+      register: existing_rules
+      failed_when: false
+
+    - name: Compute desired rules hash
+      ansible.builtin.set_fact:
+        desired_rules_hash: "{{ ruler_rules_yaml | hash('sha256') }}"
+
+    # Check if existing rules contain our group. If the ruler returns 404
+    # or the response does not include the "log-alerts" group name, we
+    # need to push rules.
+    - name: Determine if rules need update
+      ansible.builtin.set_fact:
+        rules_need_update: >-
+          {{
+            existing_rules.status == 404 or
+            existing_rules.content is not defined or
+            'log-alerts' not in (existing_rules.content | default(''))
+          }}
+
+    - name: Note rules already configured
+      ansible.builtin.debug:
+        msg: "Loki ruler rules for '{{ ruler_namespace }}' already contain log-alerts group - verifying content"
+      when: not rules_need_update
+
+    # ========== PUSH RULES VIA RULER API ==========
+    # POST /loki/api/v1/rules/{namespace} creates or replaces the rule
+    # group for the given namespace. Content-Type must be application/yaml.
+    - name: Push LogQL alert rules to Loki ruler
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/loki/api/v1/rules/{{ ruler_namespace }}"
+        method: POST
+        body: "{{ ruler_rules_yaml }}"
+        body_format: raw
+        headers:
+          Content-Type: "application/yaml"
+        status_code: [200, 202, 204]
+      register: push_result
+
+    - name: Fail if rules push failed
+      ansible.builtin.fail:
+        msg: "Failed to push LogQL rules to Loki ruler (status: {{ push_result.status | default('unknown') }})"
+      when: push_result.status is not defined or push_result.status not in [200, 202, 204]
+
+    # ========== VERIFY RULES LOADED ==========
+    - name: Wait for rules to appear in Loki ruler
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/loki/api/v1/rules"
+        method: GET
+        return_content: true
+        status_code: [200]
+      register: verify_rules
+      retries: 6
+      delay: 5
+      until: >-
+        verify_rules.status is defined and
+        verify_rules.status == 200 and
+        'log-alerts' in (verify_rules.content | default(''))
+      failed_when: false
+
+    - name: Warn if rules verification failed
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Could not verify rules loaded in Loki ruler.
+          Rules were pushed successfully but may take time to appear.
+          Check {{ loki_url }}/loki/api/v1/rules manually.
+      when: >-
+        verify_rules.status is not defined or
+        verify_rules.status != 200 or
+        'log-alerts' not in (verify_rules.content | default(''))
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display alert rules result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Loki LogQL Alert Rules Configuration"
+          - "=========================================="
+          - "Ruler Namespace: {{ ruler_namespace }}"
+          - "Loki URL: {{ loki_url }}"
+          - "API Endpoint: POST /loki/api/v1/rules/{{ ruler_namespace }}"
+          - "Rules Group: log-alerts"
+          - "Alert Rules: 5"
+          - "  - ArrImportFailure (warning)"
+          - "  - DownloadClientDisconnected (critical)"
+          - "  - VaultAuditFailure (critical)"
+          - "  - AuthenticationFailureSpike (warning)"
+          - "  - CertRenewalError (warning)"
+          - "Content Hash: {{ desired_rules_hash[:12] }}"
+          - "Push Status: {{ push_result.status | default('unknown') }}"
+          - "=========================================="

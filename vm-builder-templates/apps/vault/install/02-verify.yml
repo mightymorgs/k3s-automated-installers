@@ -1,0 +1,105 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vault"
+#       supported_versions: ["1.15.x", "1.16.x", "1.17.x", "1.18.x"]
+#       version_range: ">=1.15.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - vault: "1.18.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-02-04"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260204_kubectl_migration"
+#   dependencies: ["vault_deployed"]
+#   provides: ["vault_verified", "vault_healthy"]
+#   tags: ["vault", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify Vault deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.vault.verified"
+#         example: true
+
+- name: Verify Vault Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  vars:
+    app_name: vault
+    app_namespace: "vault"
+    vault_api_url: "http://127.0.0.1:{{ vault_nodeport | default(30820) }}"
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. POD PHASE CHECK ==========
+    - name: Check pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.rc != 0 or pod_phase.stdout != 'Running'
+      retries: 6
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_phase.rc == 0 and pod_phase.stdout == 'Running'
+
+    # ========== 2. SERVICE EXISTENCE CHECK ==========
+    - name: Check service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc {{ app_name }}
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 3. HEALTH CHECK ==========
+    - name: Test Vault API health
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/seal-status"
+        method: GET
+        status_code: [200, 503]
+        return_content: true
+      register: seal_status
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: seal_status.status in [200, 503]
+
+    # ========== 4. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name }} Verification Summary"
+          - "=========================================="
+          - "Pod Phase:      {{ pod_phase.stdout | default('UNKNOWN') }} — {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "API Status:     {{ seal_status.status | default('unreachable') }} — {{ 'OK' if seal_status.status in [200, 503] else 'FAILED' }}"
+          - "Initialized:    {{ seal_status.json.initialized | default('unknown') }}"
+          - "Sealed:         {{ seal_status.json.sealed | default('unknown') }}"
+          - "Service:        {{ service_check.stdout | default('NONE') }} — {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

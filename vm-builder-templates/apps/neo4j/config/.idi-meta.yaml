@@ -1,0 +1,16 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Disable Neo4j built-in authentication for Tailscale Ingress mode. Sets
+      NEO4J_AUTH=none and NEO4J_dbms_security_auth__enabled=false on the StatefulSet
+      so Neo4j Browser and Bolt do not require login. Tailscale provides the authentication
+      layer.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ neo4j_url }}'
+    references_services:
+    - neo4j-bolt
+depends_on_apps:
+- neo4j-bolt

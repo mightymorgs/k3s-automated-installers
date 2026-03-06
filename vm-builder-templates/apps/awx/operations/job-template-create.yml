@@ -1,0 +1,287 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/operations/job-template-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "awx.job_templates.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/operations/job-template-create.yml"
+#     category: "platform"
+#     subsystem: "awx"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["23.x", "24.x"]
+#       version_range: ">=23.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - awx: "24.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from AWX API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_awx_operations"
+#   dependencies: ["awx_deployed", "awx_project_created", "awx_inventory_created"]
+#   provides: ["awx_job_template_created"]
+#   tags: ["awx", "job-template", "playbook", "automation", "operations"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an AWX job template for playbook execution. This operation is
+#     idempotent - if a job template with the same name exists, it will be skipped.
+#     Supports all job template options including credentials, survey, and launch settings.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.token"
+#         purpose: "AWX API token for authentication"
+#       - path: "_state.apps.awx.projects.{project_name}.id"
+#         purpose: "Project ID for the job template"
+#       - path: "_state.apps.awx.inventories.{inventory_name}.id"
+#         purpose: "Inventory ID for the job template"
+#
+#     writes:
+#       - path: "_state.apps.awx.job_templates.{template_name}.id"
+#         example: 25
+#       - path: "_state.apps.awx.job_templates.{template_name}.status"
+#         example: "created"
+
+- name: AWX - Create Job Template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    awx_base_url: "{{ awx_url }}"
+    awx_api_base: "{{ awx_base_url }}/api/v2"
+
+    # Required fields
+    # job_template_name: Name of the job template (required)
+    # awx_inventory_id: Inventory ID (required)
+    # project_id: Project ID (required)
+
+    # Optional fields with sensible defaults
+    job_template_description: "{{ job_template_description_input | default('') }}"
+    playbook: "{{ playbook_input | default('') }}"
+    job_type: "{{ job_type_input | default('run') }}"
+    forks: "{{ forks_input | default(0) }}"
+    limit_pattern: "{{ limit_pattern_input | default('') }}"
+    verbosity: "{{ verbosity_input | default(0) }}"
+    extra_vars: "{{ extra_vars_input | default('') }}"
+    job_tags: "{{ job_tags_input | default('') }}"
+    skip_tags: "{{ skip_tags_input | default('') }}"
+    timeout_seconds: "{{ timeout_seconds_input | default(0) }}"
+    become_enabled: "{{ become_enabled_input | default(false) }}"
+    diff_mode: "{{ diff_mode_input | default(false) }}"
+    allow_simultaneous: "{{ allow_simultaneous_input | default(false) }}"
+    ask_variables_on_launch: "{{ ask_variables_on_launch_input | default(false) }}"
+    ask_limit_on_launch: "{{ ask_limit_on_launch_input | default(false) }}"
+    ask_inventory_on_launch: "{{ ask_inventory_on_launch_input | default(false) }}"
+    ask_credential_on_launch: "{{ ask_credential_on_launch_input | default(false) }}"
+    credential_ids: "{{ credential_ids_input | default([]) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - job_template_name is defined and job_template_name | length > 0
+          - awx_inventory_id is defined
+          - project_id is defined
+        fail_msg: >-
+          Required inputs missing: job_template_name, awx_inventory_id, and project_id are required.
+        success_msg: "All required inputs validated: job_template_name={{ job_template_name }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and AWX Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract AWX token
+      ansible.builtin.set_fact:
+        awx_token: "{{ inventory._state.apps.awx.token }}"
+      no_log: true
+
+    - name: Validate AWX token is available
+      ansible.builtin.assert:
+        that:
+          - awx_token | length > 0
+        fail_msg: "AWX token not found in BWS _state. Ensure AWX is configured."
+        success_msg: "AWX token retrieved from BWS _state"
+
+    # ===== STEP 4: Check for Existing Job Template (Idempotency) =====
+    - name: Check if job template already exists by name
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/?name={{ job_template_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: existing_template
+      no_log: false
+
+    - name: Set job template exists flag
+      ansible.builtin.set_fact:
+        job_template_exists: "{{ existing_template.json.count > 0 }}"
+        existing_template_id: "{{ existing_template.json.results[0].id | default(0) }}"
+
+    - name: Skip creation if job template exists
+      ansible.builtin.debug:
+        msg: >-
+          Job template '{{ job_template_name }}' already exists with ID: {{ existing_template_id }}
+      when: job_template_exists
+
+    # ===== STEP 5: Create Job Template =====
+    - name: Build job template payload
+      ansible.builtin.set_fact:
+        template_payload:
+          name: "{{ job_template_name }}"
+          description: "{{ job_template_description }}"
+          inventory: "{{ awx_inventory_id }}"
+          project: "{{ project_id }}"
+          playbook: "{{ playbook }}"
+          job_type: "{{ job_type }}"
+          forks: "{{ forks }}"
+          limit: "{{ limit_pattern }}"
+          verbosity: "{{ verbosity }}"
+          extra_vars: "{{ extra_vars }}"
+          job_tags: "{{ job_tags }}"
+          skip_tags: "{{ skip_tags }}"
+          timeout: "{{ timeout_seconds }}"
+          become_enabled: "{{ become_enabled }}"
+          diff_mode: "{{ diff_mode }}"
+          allow_simultaneous: "{{ allow_simultaneous }}"
+          ask_variables_on_launch: "{{ ask_variables_on_launch }}"
+          ask_limit_on_launch: "{{ ask_limit_on_launch }}"
+          ask_inventory_on_launch: "{{ ask_inventory_on_launch }}"
+          ask_credential_on_launch: "{{ ask_credential_on_launch }}"
+      when: not job_template_exists
+
+    - name: Create AWX job template
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ template_payload }}"
+        status_code: [201]
+        validate_certs: false
+      register: create_result
+      when: not job_template_exists
+      no_log: false
+
+    - name: Set created job template ID
+      ansible.builtin.set_fact:
+        created_template_id: "{{ create_result.json.id }}"
+      when: not job_template_exists
+
+    # ===== STEP 6: Associate Credentials (if provided) =====
+    - name: Associate credentials with job template
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/{{ created_template_id }}/credentials/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          id: "{{ item }}"
+        status_code: [204]
+        validate_certs: false
+      loop: "{{ credential_ids }}"
+      when:
+        - not job_template_exists
+        - credential_ids | length > 0
+      no_log: false
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Update BWS inventory with job template info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Merge job template info into _state.apps.awx.job_templates
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ job_template_name }}" \
+          --argjson id {{ created_template_id | default(existing_template_id) }} \
+          --arg status "{{ 'created' if not job_template_exists else 'existing' }}" \
+          --argjson project_id {{ project_id }} \
+          --argjson inventory_id {{ awx_inventory_id }} \
+          --arg playbook "{{ playbook }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.awx == null then ._state.apps.awx = {} else . end |
+          if ._state.apps.awx.job_templates == null then ._state.apps.awx.job_templates = {} else . end |
+          ._state.apps.awx.job_templates[$name] = {
+            "id": $id,
+            "status": $status,
+            "project_id": $project_id,
+            "inventory_id": $inventory_id,
+            "playbook": $playbook,
+            "created_at": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 8: Output Result =====
+    - name: Display job template creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if job_template_exists else 'created' }}"
+          job_template_name: "{{ job_template_name }}"
+          job_template_id: "{{ existing_template_id if job_template_exists else created_template_id }}"
+          project_id: "{{ project_id }}"
+          inventory_id: "{{ awx_inventory_id }}"
+          playbook: "{{ playbook }}"
+          credentials_associated: "{{ credential_ids | length }}"

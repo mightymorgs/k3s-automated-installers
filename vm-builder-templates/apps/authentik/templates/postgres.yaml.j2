@@ -1,0 +1,91 @@
+---
+# PostgreSQL for Authentik
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ postgres_host | default('authentik-postgres') }}
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app.kubernetes.io/name: {{ postgres_host | default('authentik-postgres') }}
+    app.kubernetes.io/part-of: {{ app_name | default('authentik') }}
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  serviceName: {{ postgres_host | default('authentik-postgres') }}
+  replicas: {{ postgres_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ postgres_host | default('authentik-postgres') }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ postgres_host | default('authentik-postgres') }}
+        app.kubernetes.io/part-of: {{ app_name | default('authentik') }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ postgres_image | default('postgres:16-alpine') }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ postgres_db | default('authentik') }}
+            - name: POSTGRES_USER
+              value: {{ postgres_user | default('authentik') }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: {{ postgres_port | default(5432) }}
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: {{ postgres_cpu_request | default('100m') }}
+              memory: {{ postgres_memory_request | default('256Mi') }}
+            limits:
+              cpu: {{ postgres_cpu_limit | default('500m') }}
+              memory: {{ postgres_memory_limit | default('512Mi') }}
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ postgres_user | default('authentik') }}"]
+            initialDelaySeconds: {{ postgres_liveness_initial_delay | default(30) }}
+            periodSeconds: {{ postgres_liveness_period | default(10) }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ postgres_user | default('authentik') }}"]
+            initialDelaySeconds: {{ postgres_readiness_initial_delay | default(5) }}
+            periodSeconds: {{ postgres_readiness_period | default(5) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: {{ postgres_host | default('authentik-postgres') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ postgres_storage_size | default('10Gi') }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ postgres_host | default('authentik-postgres') }}
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app.kubernetes.io/name: {{ postgres_host | default('authentik-postgres') }}
+    app.kubernetes.io/part-of: {{ app_name | default('authentik') }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ postgres_host | default('authentik-postgres') }}
+  ports:
+    - name: postgres
+      port: {{ postgres_port | default(5432) }}
+      targetPort: postgres
+      protocol: TCP

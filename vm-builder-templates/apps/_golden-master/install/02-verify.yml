@@ -1,0 +1,173 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/_golden-master/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/_golden-master/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "_golden-master"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "golden-master"
+#       supported_versions: ["latest"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - golden_master: "latest"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "reference"
+#         test_date: "2026-03-04"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260304_golden_master"
+#   dependencies: ["app_deployed"]
+#   provides: ["app_verified", "app_healthy"]
+#   tags: ["golden-master", "verify", "healthcheck"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >
+#     Canonical verify playbook — reference implementation for all 32 apps.
+#     Validates pod readiness, health endpoint, service existence.
+#     Uses block/rescue for structured diagnostics, retries for transient failures,
+#     and ready-pod selection (not just Running phase).
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.{{ app_name }}.verified"
+#         example: true
+
+- name: "Verify {{ app_name | default('golden-master') }} Deployment"
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    # App identity — override per app
+    app_name: "golden-master"
+    app_namespace: "golden-master"
+
+    # Health check configuration — override per app
+    container_port: 8080
+    health_path: "/healthz"
+    # Optional: regex pattern to validate health response body
+    # health_response_pattern: '"status"\s*:\s*"ok"'
+
+    # Global timeout constants (arch review addition)
+    # Used instead of magic numbers for consistency across all apps
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. POD PHASE CHECK ==========
+    # Strict check that at least one pod has reached Running phase.
+    # failed_when ensures pipeline stops immediately if pods are in CrashLoopBackOff.
+    - name: Check pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.stdout != 'Running'
+
+    # ========== 2. GET READY POD NAME ==========
+    # Arch review: select pods where containerStatuses[0].ready==true,
+    # not just phase=Running. A Running pod may still have failing readiness
+    # probes, which would cause kubectl exec to connect to an unhealthy container.
+    # awk '{print $1}' selects the first ready pod when multiple exist.
+    - name: Get ready pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/name={{ app_name }}
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 3. HEALTH CHECK (block/rescue) ==========
+    # Uses block/rescue for structured failure diagnostics.
+    # Does NOT use ignore-errors — failures propagate.
+    # Does NOT suppress failures — health checks must be hard failures.
+    - name: Health check block
+      block:
+        # Auto-detect curl vs wget inside the container.
+        # Many minimal images ship wget (busybox/alpine) but not curl.
+        # --max-time / --timeout prevent hanging on unresponsive endpoints
+        # (arch review addition: explicit probe timeouts).
+        - name: Test health endpoint (auto-detect curl/wget)
+          ansible.builtin.command: >-
+            kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} --
+            /bin/sh -c "command -v curl >/dev/null
+            && curl -sf --max-time {{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}
+            || wget -q -O - --timeout={{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}"
+          register: health_check
+          changed_when: false
+          failed_when: health_check.rc != 0
+          retries: 3
+          delay: "{{ retry_interval_seconds }}"
+          until: health_check.rc == 0
+
+        # Optional response body validation — only runs when health_response_pattern is defined.
+        # Uses Ansible's search() test for regex matching against stdout.
+        - name: Validate health response body
+          ansible.builtin.assert:
+            that:
+              - health_check.stdout is search(health_response_pattern)
+            fail_msg: >-
+              Health response did not match expected pattern '{{ health_response_pattern }}'.
+              Got: {{ health_check.stdout | truncate(300) }}
+          when: health_response_pattern is defined
+
+      rescue:
+        - name: Capture failure diagnostics
+          ansible.builtin.set_fact:
+            health_failure:
+              app: "{{ app_name }}"
+              namespace: "{{ app_namespace }}"
+              pod: "{{ app_pod.stdout | default('unknown') }}"
+              endpoint: "http://127.0.0.1:{{ container_port }}{{ health_path }}"
+              rc: "{{ health_check.rc | default('N/A') }}"
+              stderr: "{{ health_check.stderr | default('') | truncate(500) }}"
+              stdout: "{{ health_check.stdout | default('') | truncate(500) }}"
+
+        - name: Fail with diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Health check failed for {{ app_name }}.
+              Diagnostics: {{ health_failure | to_nice_json }}
+
+    # ========== 4. SERVICE EXISTENCE CHECK ==========
+    - name: Check service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc {{ app_name }}
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 5. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "{{ app_name }} Verification Summary"
+          - "=========================================="
+          - "Pod Phase:      {{ pod_phase.stdout | default('UNKNOWN') }} — {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "Ready Pod:      {{ app_pod.stdout | default('NONE') }} — {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Health Check:   {{ health_path }} — {{ 'OK' if health_check.rc == 0 else 'FAILED' }}"
+          - "Service:        {{ service_check.stdout | default('NONE') }} — {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

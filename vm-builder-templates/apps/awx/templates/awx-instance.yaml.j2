@@ -1,0 +1,82 @@
+---
+# AWX Instance CRD (J2 template)
+# Defaults match k8s-base/awx-instance.yaml
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: {{ app_name | default('awx') }}
+  namespace: {{ app_namespace | default('awx') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('awx') }}
+    app.kubernetes.io/component: automation-platform
+    app.kubernetes.io/part-of: golden-master
+spec:
+  # Service configuration
+  service_type: {{ service_type | default('ClusterIP') }}
+
+  # Ingress configuration (disabled - using Traefik IngressRoute instead)
+  ingress_type: none
+
+  # PostgreSQL storage configuration
+  postgres_storage_class: {{ storage_class | default('longhorn') }}
+  postgres_storage_requirements:
+    requests:
+      storage: {{ postgres_storage_size | default('10Gi') }}
+
+  # Projects persistence (for SCM/Git checkouts)
+  projects_persistence: true
+  projects_storage_class: {{ storage_class | default('longhorn') }}
+  projects_storage_size: {{ projects_storage_size | default('10Gi') }}
+  projects_existing_claim: ""
+
+  # Resource requirements for AWX web pods
+  web_resource_requirements:
+    requests:
+      cpu: {{ web_cpu_request | default('250m') }}
+      memory: {{ web_memory_request | default('512Mi') }}
+    limits:
+      cpu: {{ web_cpu_limit | default('1000m') }}
+      memory: {{ web_memory_limit | default('2Gi') }}
+
+  # Resource requirements for AWX task pods
+  task_resource_requirements:
+    requests:
+      cpu: {{ task_cpu_request | default('250m') }}
+      memory: {{ task_memory_request | default('512Mi') }}
+    limits:
+      cpu: {{ task_cpu_limit | default('1000m') }}
+      memory: {{ task_memory_limit | default('2Gi') }}
+
+  # Resource requirements for execution environment
+  ee_resource_requirements:
+    requests:
+      cpu: {{ ee_cpu_request | default('100m') }}
+      memory: {{ ee_memory_request | default('128Mi') }}
+    limits:
+      cpu: {{ ee_cpu_limit | default('500m') }}
+      memory: {{ ee_memory_limit | default('512Mi') }}
+
+  # Resource requirements for Redis
+  redis_resource_requirements:
+    requests:
+      cpu: {{ redis_cpu_request | default('100m') }}
+      memory: {{ redis_memory_request | default('128Mi') }}
+    limits:
+      cpu: {{ redis_cpu_limit | default('500m') }}
+      memory: {{ redis_memory_limit | default('512Mi') }}
+
+  # Replicas
+  web_replicas: {{ web_replicas | default(1) }}
+  task_replicas: {{ task_replicas | default(1) }}
+
+  # Admin account configuration
+  admin_user: {{ admin_user | default('admin') }}
+
+  # Auto-upgrade PostgreSQL when needed
+  postgres_data_volume_init: true
+
+  # Hostname for external access
+  hostname: {{ hostname }}
+
+  # Security context
+  create_preload_data: {{ create_preload_data | default(true) | lower }}

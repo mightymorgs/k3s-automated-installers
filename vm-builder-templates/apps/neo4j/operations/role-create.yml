@@ -1,0 +1,384 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/neo4j/operations/role-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "neo4j.roles.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/neo4j/operations/role-create.yml"
+#     category: "platform"
+#     subsystem: "neo4j"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "neo4j"
+#       supported_versions: ["5.x"]
+#       version_range: ">=5.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - neo4j: "5.26.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Neo4j Cypher/HTTP API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_neo4j_operations"
+#   dependencies: ["neo4j_deployed", "neo4j_ready"]
+#   provides: ["neo4j_role_created"]
+#   tags: ["neo4j", "roles", "security", "rbac", "cypher", "operations", "phase4", "enterprise"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a new role in Neo4j via the HTTP Transaction API. This operation is
+#     idempotent - uses CREATE ROLE IF NOT EXISTS. Optionally grants privileges
+#     and assigns the role to users. Note: Custom roles require Neo4j Enterprise.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.neo4j.password"
+#         purpose: "Neo4j admin password for API authentication"
+#       - path: "_state.apps.neo4j.url"
+#         purpose: "Neo4j HTTP endpoint URL"
+#
+#     writes:
+#       - path: "_state.apps.neo4j.roles.{role_name}.created"
+#         example: true
+#       - path: "_state.apps.neo4j.roles.{role_name}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+#       - path: "_state.apps.neo4j.roles.{role_name}.privileges"
+#         example: ["MATCH (*)", "WRITE"]
+
+- name: Neo4j - Create Role
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    neo4j_base_url: "{{ neo4j_url }}"
+    neo4j_admin_user: "{{ neo4j_admin_user_input | default('neo4j') }}"
+
+    # Role configuration (required)
+    # role_name: Name for the new role (required)
+
+    # Optional configuration
+    # grant_users: List of usernames to grant this role to (optional)
+    # privileges: List of privilege specifications (optional, enterprise only)
+    #   Each privilege: { type: "read|write|all", database: "neo4j" }
+    grant_users: "{{ grant_users_input | default([]) }}"
+    privileges: "{{ privileges_input | default([]) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - role_name is defined and role_name | length > 0
+        fail_msg: >-
+          Required inputs: role_name (string).
+          Example: -e "role_name=app_reader"
+          Optional: -e "grant_users=['user1','user2']" -e "privileges=[{'type':'read','database':'neo4j'}]"
+        success_msg: "All required inputs validated: role_name={{ role_name }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Neo4j Credentials =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Neo4j credentials
+      ansible.builtin.set_fact:
+        neo4j_admin_password: "{{ inventory._state.apps.neo4j.password }}"
+        neo4j_url: "{{ inventory._state.apps.neo4j.url | default(neo4j_base_url) }}"
+      no_log: true
+
+    - name: Validate Neo4j credentials are available
+      ansible.builtin.assert:
+        that:
+          - neo4j_admin_password | length > 0
+        fail_msg: "Neo4j admin password not found in BWS _state. Deploy Neo4j first."
+        success_msg: "Neo4j credentials retrieved from BWS _state"
+
+    # ===== STEP 4: Check if Role Already Exists (for reporting) =====
+    - name: Check if role already exists
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW ROLES YIELD role WHERE role = $roleName RETURN role"
+              parameters:
+                roleName: "{{ role_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: check_role_result
+      no_log: false
+
+    - name: Determine if role exists
+      ansible.builtin.set_fact:
+        role_exists: "{{ check_role_result.json.results[0].data | length > 0 }}"
+
+    - name: Display role status
+      ansible.builtin.debug:
+        msg: "Role '{{ role_name }}': {{ 'Already exists' if role_exists else 'Does not exist (will create)' }}"
+
+    # ===== STEP 5: Create Role =====
+    - name: Create role in Neo4j (IF NOT EXISTS for idempotency)
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "CREATE ROLE $roleName IF NOT EXISTS"
+              parameters:
+                roleName: "{{ role_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: create_role_result
+      no_log: false
+
+    - name: Check for Neo4j errors in create response
+      ansible.builtin.assert:
+        that:
+          - create_role_result.json.errors | length == 0
+        fail_msg: "Failed to create role: {{ create_role_result.json.errors | map(attribute='message') | join(', ') }}"
+        success_msg: "Role '{{ role_name }}' created/confirmed successfully"
+
+    # ===== STEP 6: Grant Privileges (if specified) =====
+    - name: Grant read privilege on database
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "GRANT MATCH {*} ON GRAPH {{ item.database | default('neo4j') }} TO $roleName"
+              parameters:
+                roleName: "{{ role_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: grant_read_result
+      loop: "{{ privileges | selectattr('type', 'equalto', 'read') | list }}"
+      when: privileges | length > 0
+      failed_when: >-
+        grant_read_result.json.errors | length > 0 and
+        'already exists' not in (grant_read_result.json.errors | map(attribute='message') | join(' '))
+      no_log: false
+
+    - name: Grant write privilege on database
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "GRANT WRITE ON GRAPH {{ item.database | default('neo4j') }} TO $roleName"
+              parameters:
+                roleName: "{{ role_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: grant_write_result
+      loop: "{{ privileges | selectattr('type', 'equalto', 'write') | list }}"
+      when: privileges | length > 0
+      failed_when: >-
+        grant_write_result.json.errors | length > 0 and
+        'already exists' not in (grant_write_result.json.errors | map(attribute='message') | join(' '))
+      no_log: false
+
+    - name: Grant all privileges on database
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "GRANT ALL ON GRAPH {{ item.database | default('neo4j') }} TO $roleName"
+              parameters:
+                roleName: "{{ role_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: grant_all_result
+      loop: "{{ privileges | selectattr('type', 'equalto', 'all') | list }}"
+      when: privileges | length > 0
+      failed_when: >-
+        grant_all_result.json.errors | length > 0 and
+        'already exists' not in (grant_all_result.json.errors | map(attribute='message') | join(' '))
+      no_log: false
+
+    # ===== STEP 7: Grant Role to Users (if specified) =====
+    - name: Grant role to users
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "GRANT ROLE $roleName TO $username"
+              parameters:
+                roleName: "{{ role_name }}"
+                username: "{{ item }}"
+        status_code: [200]
+        validate_certs: false
+      register: grant_role_result
+      loop: "{{ grant_users }}"
+      when: grant_users | length > 0
+      failed_when: >-
+        grant_role_result.json.errors | length > 0 and
+        'already has' not in (grant_role_result.json.errors | map(attribute='message') | join(' '))
+      no_log: false
+
+    # ===== STEP 8: Verify Role Exists =====
+    - name: Verify role exists after creation
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW ROLES YIELD role WHERE role = $roleName RETURN role"
+              parameters:
+                roleName: "{{ role_name }}"
+        status_code: [200]
+        validate_certs: false
+      register: verify_role_result
+      no_log: false
+
+    - name: Assert role verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_role_result.json.results[0].data | length > 0
+        fail_msg: "Failed to verify role '{{ role_name }}' after creation"
+        success_msg: "Role '{{ role_name }}' verified successfully"
+
+    # ===== STEP 9: Write Role Status to BWS._state =====
+    - name: Update BWS inventory with role status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.neo4j.roles.{role_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ role_name }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          --argjson was_existing {{ role_exists | lower }} \
+          --argjson privileges '{{ privileges | to_json }}' \
+          --argjson grant_users '{{ grant_users | to_json }}' \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.neo4j == null then ._state.apps.neo4j = {} else . end |
+          if ._state.apps.neo4j.roles == null then ._state.apps.neo4j.roles = {} else . end |
+          ._state.apps.neo4j.roles[$name] = {
+            "created": $created,
+            "created_timestamp": $timestamp,
+            "was_existing": $was_existing,
+            "privileges": $privileges,
+            "granted_to_users": $grant_users
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 10: Output Result =====
+    - name: Display role creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if role_exists else 'created' }}"
+          role_name: "{{ role_name }}"
+          privileges_granted: "{{ privileges | length }}"
+          users_granted: "{{ grant_users }}"
+          message: >-
+            Role '{{ role_name }}' {{ 'already existed' if role_exists else 'created successfully' }}.
+            {{ privileges | length }} privilege(s) granted.
+            Granted to {{ grant_users | length }} user(s).
+            Status recorded in BWS _state.
+          note: >-
+            Custom roles with privileges require Neo4j Enterprise Edition.
+            Community Edition has only built-in roles: PUBLIC, reader, editor, publisher, architect, admin.

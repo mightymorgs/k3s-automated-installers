@@ -1,0 +1,23 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  00-render-manifests.yml:
+    summary: Render Vault Kubernetes manifests from J2 templates using BWS inventory
+      variables
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ playbook_dir }}/../../../../../templates/k8s/platform/vault/statefulset.yaml.j2'
+    - '{{ playbook_dir }}/../../../../../templates/k8s/platform/vault/service.yaml.j2'
+    - '{{ playbook_dir }}/../../../../../templates/k8s/platform/vault/config.yaml.j2'
+    wiring:
+      reads_from: []
+      writes_to:
+      - app: vault
+        field: status
+      - app: vault
+        field: url
+      - app: vault
+        field: root_token
+      - app: vault
+        field: unseal_keys

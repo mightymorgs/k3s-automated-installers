@@ -1,0 +1,25 @@
+---
+# Shared storage for media and downloads
+# Uses Longhorn with RWX support (requires Longhorn >= 1.5)
+# For single-node GCP VMs, this provides persistent storage across pod restarts
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-shared-pvc
+  namespace: media-stack
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+spec:
+  accessModes:
+    # Using RWX for multi-pod access
+    # Note: Longhorn RWX requires NFSv4 support enabled
+    # For single-node, can downgrade to RWO if issues occur
+    - ReadWriteMany
+  storageClassName: longhorn
+  resources:
+    requests:
+      # 100Gi for downloads and media library
+      # Adjust based on available disk space
+      storage: 100Gi

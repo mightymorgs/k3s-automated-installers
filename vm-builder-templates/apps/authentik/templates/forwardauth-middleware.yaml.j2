@@ -1,0 +1,32 @@
+---
+# Authentik ForwardAuth Middleware for Traefik
+# NOTE: This is a placeholder created at deploy time.
+# The actual ForwardAuth URL is configured by 02-wire-forwardauth.yml
+# which creates the middleware with the correct auth URL for the
+# ingress mode (Cloudflare or Tailscale).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ app_name | default('authentik') }}-forwardauth
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app: {{ app_name | default('authentik') }}
+    app.kubernetes.io/name: {{ app_name | default('authentik') }}
+    app.kubernetes.io/component: forwardauth-middleware
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  forwardAuth:
+    address: http://{{ app_name | default('authentik') }}.{{ app_namespace | default('authentik') }}.svc.cluster.local:{{ http_port | default(9000) }}/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-authentik-username
+      - X-authentik-groups
+      - X-authentik-email
+      - X-authentik-name
+      - X-authentik-uid
+      - X-authentik-jwt
+      - X-authentik-meta-jwks
+      - X-authentik-meta-outpost
+      - X-authentik-meta-provider
+      - X-authentik-meta-app
+      - X-authentik-meta-version

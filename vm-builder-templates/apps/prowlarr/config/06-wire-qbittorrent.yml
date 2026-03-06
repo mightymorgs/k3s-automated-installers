@@ -1,0 +1,179 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prowlarr/06-wire-qbittorrent"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prowlarr/config/06-wire-qbittorrent.yml"
+#     category: "apps"
+#     subsystem: "prowlarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["prowlarr_deployed", "qbittorrent_deployed"]
+#   provides: ["prowlarr_qbittorrent_wired"]
+#   tags: ["prowlarr", "qbittorrent", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Register qBittorrent as torrent download client in Prowlarr
+#   requires_apps: ["prowlarr", "qbittorrent"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.prowlarr.api_key"
+
+- name: Wire qBittorrent into Prowlarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    prowlarr_namespace: "media-stack"
+    qbittorrent_namespace: "media-stack"
+    app_namespace: "{{ prowlarr_namespace }}"
+    # prowlarr_url: from BWS _state via Phase 4 extra-vars
+    # qbittorrent_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF QBITTORRENT NOT INSTALLED ==========
+    - name: Skip if qbittorrent is not installed on this VM
+      when: qbittorrent_url is not defined
+      block:
+        - name: "qbittorrent not installed — skipping prowlarr <-> qbittorrent wiring"
+          ansible.builtin.debug:
+            msg: "qbittorrent is not installed on this VM (no qbittorrent_url in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if prowlarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "prowlarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: prowlarr_api_key is not defined or prowlarr_api_key | length == 0
+
+    # ========== VERIFY PROWLARR API ==========
+    - name: Verify Prowlarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Prowlarr API not accessible
+      ansible.builtin.fail:
+        msg: "Prowlarr API not accessible at {{ prowlarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== VERIFY QBITTORRENT API ==========
+    - name: Verify qBittorrent API is accessible
+      ansible.builtin.uri:
+        url: "{{ qbittorrent_url }}/api/v2/app/version"
+        method: GET
+        return_content: true
+      register: qbt_version
+      retries: 5
+      delay: 10
+      until: qbt_version.status is defined and qbt_version.status == 200
+      failed_when: false
+
+    - name: Fail if qBittorrent API not accessible
+      ansible.builtin.fail:
+        msg: "qBittorrent API not accessible at {{ qbittorrent_url }} (status: {{ qbt_version.status | default('no response') }}). App is installed but API unreachable."
+      when: qbt_version.status is not defined or qbt_version.status != 200
+
+    # ========== CHECK EXISTING DOWNLOAD CLIENTS ==========
+    - name: Get existing Prowlarr download clients
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/downloadclient"
+        method: GET
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_download_clients
+      changed_when: false
+
+    - name: Check if qBittorrent download client already exists
+      ansible.builtin.set_fact:
+        qbt_client_exists: >-
+          {{ (prowlarr_download_clients.json | selectattr('name', 'equalto', 'qBittorrent') | list | length) > 0 }}
+
+    # ========== ADD QBITTORRENT AS DOWNLOAD CLIENT ==========
+    - name: Add qBittorrent as download client in Prowlarr
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          enable: true
+          protocol: "torrent"
+          priority: 1
+          name: "qBittorrent"
+          implementation: "QBittorrent"
+          configContract: "QBittorrentSettings"
+          fields:
+            - name: "host"
+              value: "{{ qbittorrent_service_name }}.{{ qbittorrent_namespace }}.svc.cluster.local"
+            - name: "port"
+              value: "{{ qbittorrent_service_port }}"
+            - name: "useSsl"
+              value: false
+            - name: "urlBase"
+              value: ""
+            - name: "username"
+              value: ""
+            - name: "password"
+              value: ""
+            - name: "category"
+              value: "prowlarr"
+            - name: "priority"
+              value: 0
+            - name: "initialState"
+              value: 0
+            - name: "sequentialOrder"
+              value: false
+            - name: "firstAndLast"
+              value: false
+          categories:
+            - clientCategory: "tv-sonarr"
+              categories:
+                - 5000
+                - 5030
+                - 5040
+            - clientCategory: "movies-radarr"
+              categories:
+                - 2000
+                - 2030
+                - 2040
+        status_code: [200, 201]
+      register: add_qbt
+      changed_when: add_qbt.status in [200, 201]
+      when: not qbt_client_exists
+
+    - name: qBittorrent already configured in Prowlarr
+      ansible.builtin.debug:
+        msg: "qBittorrent download client already exists in Prowlarr - skipping"
+      when: qbt_client_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prowlarr <-> qBittorrent Wiring Complete"
+          - "=========================================="
+          - "qBittorrent version: {{ qbt_version.content | default('unknown') }}"
+          - "Download client: qBittorrent ({{ 'Added to Prowlarr' if not qbt_client_exists else 'Already configured' }})"
+          - "Category mappings: tv-sonarr (5000,5030,5040), movies-radarr (2000,2030,2040)"
+          - "=========================================="

@@ -1,0 +1,135 @@
+---
+name: Phase 2.5 - VM Self-Bootstrap to Golden Master
+# Purpose: Bootstrap VM with essential tools and Tailscale networking (BOOTSTRAP ONLY - NO K3S)
+# Scope: Installs BWS CLI, GitHub CLI, Ansible, joins Tailscale, verifies, writes state to BWS
+# Next Phase: User creates golden/bootstrap-v1 branch, then runs Phase 3 for K3s installation
+on:
+  workflow_call:
+    inputs:
+      vm_hostname:
+        description: VM hostname to bootstrap
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/vm-name)
+        required: true
+        type: string
+jobs:
+  bootstrap-on-vm:
+    # Target specific VM by hostname label (ensures job runs on correct VM)
+    # Runs directly on VM (not containerized) - orchestration playbook installs Ansible
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # Uses runner's SSH deploy key configured in cloud-init
+      - name: Verify running on correct VM
+        run: |
+          CURRENT_HOSTNAME=$(hostname)
+          EXPECTED_HOSTNAME="${{ inputs.vm_hostname }}"
+          echo "Current hostname: $CURRENT_HOSTNAME"
+          echo "Expected hostname: $EXPECTED_HOSTNAME"
+          if [ "$CURRENT_HOSTNAME" != "$EXPECTED_HOSTNAME" ]; then
+            echo "ERROR: Running on wrong host!"
+            echo "This workflow must run on the target VM."
+            exit 1
+          fi
+          echo "Hostname verification passed"
+      - name: Wait for cloud-init to complete
+        run: |
+          echo "Waiting for cloud-init to complete..."
+
+          # Wait up to 10 minutes for cloud-init to finish
+          # Parse status without jq (might not be installed yet)
+          # shellcheck disable=SC2016
+          timeout 600 bash -c 'while true; do
+            STATUS=$(cloud-init status 2>/dev/null | grep -oP "status: \K\w+" || echo "running")
+            echo "Cloud-init status: $STATUS"
+            if [[ "$STATUS" == "done" ]] || [[ "$STATUS" == "error" ]]; then
+              break
+            fi
+            sleep 5
+          done' || {
+            echo "ERROR: Cloud-init did not complete within 10 minutes"
+            cloud-init status --long 2>&1 || echo "Could not get cloud-init status"
+            exit 1
+          }
+
+          echo "Cloud-init completed"
+
+          # Show full status for debugging
+          cloud-init status --long 2>&1 || echo "Could not get detailed status"
+
+          # Verify critical packages were installed
+          echo "Verifying installed packages..."
+
+          if ! command -v ansible-playbook >/dev/null 2>&1; then
+            echo "ERROR: Ansible not found after cloud-init"
+            echo "Checking package installation:"
+            dpkg -l | grep -E "(ansible|jq|python3)" || echo "Packages not found"
+            exit 1
+          fi
+
+          echo "✓ Ansible: $(ansible --version | head -1)"
+          echo "✓ Python: $(python3 --version)"
+          echo "✓ jq: $(jq --version 2>/dev/null || echo 'not found')"
+      - name: Run Phase 2.5 bootstrap playbook
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/orchestration/phase2.5-vm-bootstrap.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e ansible_python_interpreter=/usr/bin/python3 \
+            -e inventory_secret_name="${{ inputs.inventory_key }}"
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      - name: Display bootstrap summary
+        run: |-
+          echo "=========================================="
+          echo "VM Bootstrap Complete - Golden Master Ready"
+          echo "=========================================="
+          echo "Hostname: ${{ inputs.vm_hostname }}"
+          echo "Inventory: ${{ inputs.inventory_key }}"
+          echo ""
+          echo "Tools Installed:"
+          bws --version || echo "  BWS: Not installed"
+          gh --version | head -1 || echo "  gh: Not installed"
+          ansible --version | head -1 || echo "  Ansible: Not installed"
+          tailscale version || echo "  Tailscale: Not installed"
+          echo ""
+          echo "Tailscale Status:"
+          tailscale status | head -5 || echo "  Not connected"
+          echo ""
+          echo "=========================================="
+          echo "Ready for snapshot as golden master"
+          echo "=========================================="
+      - name: Display Next Steps
+        run: |
+          echo "=========================================="
+          echo "Phase 2.5 Bootstrap Complete"
+          echo "=========================================="
+          echo ""
+          echo "VM is now in bootstrap state with:"
+          echo "  - BWS CLI installed"
+          echo "  - GitHub CLI installed"
+          echo "  - Ansible installed"
+          echo "  - Tailscale connected"
+          echo "  - State written to BWS"
+          echo ""
+          echo "Next Steps:"
+          echo "  1. Verify Tailscale connection:"
+          echo "     tailscale status"
+          echo ""
+          echo "  2. Test SSH access via Tailscale:"
+          echo "     ssh ubuntu@${{ inputs.vm_hostname }}.ts.net"
+          echo ""
+          echo "  3. Create golden branch (when satisfied):"
+          echo "     git checkout -b golden/bootstrap-v1"
+          echo "     git push origin golden/bootstrap-v1"
+          echo ""
+          echo "  4. Run Phase 3 to install K3s and apps:"
+          echo "     gh workflow run phase3-dynamic.yml -f vm_hostname=<hostname> -f selected_apps='[\"app1\",\"app2\"]'"
+          echo ""
+          echo "=========================================="

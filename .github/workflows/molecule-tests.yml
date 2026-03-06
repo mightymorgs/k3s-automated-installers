@@ -1,0 +1,95 @@
+---
+name: Molecule Tests
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Which test tier to run"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - tier1
+          - tier2
+          - tier3
+
+  push:
+    paths:
+      - 'vm-builder/vm-builder-templates/ansible/**'
+      - 'vm-builder/vm-builder-templates/apps/**'
+      - '.github/workflows/molecule-tests.yml'
+
+defaults:
+  run:
+    working-directory: vm-builder/vm-builder-templates/ansible
+
+jobs:
+  # ── Tier 1: Syntax + Variable Validation ──────────────────────────────────
+  tier1-syntax:
+    name: "Tier 1: Syntax & Variables"
+    runs-on: [self-hosted, molecule]
+    if: inputs.tier == 'all' || inputs.tier == 'tier1' || inputs.tier == ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Tier 1
+        run: molecule test -s tier1-syntax
+
+  # ── Tier 2: Golden Master Validation ─────────────────────────────────────
+  tier2-golden-master:
+    name: "Tier 2: Golden Master"
+    runs-on: [self-hosted, molecule]
+    needs: tier1-syntax
+    if: inputs.tier == 'all' || inputs.tier == 'tier2' || inputs.tier == ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run golden master validation (all apps)
+        run: ansible-playbook molecule/golden-master/converge.yml
+        env:
+          ANSIBLE_FORCE_COLOR: "1"
+
+  # ── Tier 3: Integration (Self-Hosted) ─────────────────────────────────────
+  tier3-integration:
+    name: "Tier 3: Integration (mediastack)"
+    runs-on: [self-hosted, molecule]
+    needs: tier1-syntax
+    if: inputs.tier == 'all' || inputs.tier == 'tier3'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare fixtures from BWS
+        run: ./molecule/prepare-fixtures.sh
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Run Tier 3 integration
+        run: molecule test -s integration-mediastack
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+          PY_COLORS: "1"
+          ANSIBLE_FORCE_COLOR: "1"
+
+  # ── Summary ───────────────────────────────────────────────────────────────
+  molecule-summary:
+    name: Molecule Summary
+    runs-on: [self-hosted, molecule]
+    needs: [tier1-syntax, tier2-golden-master, tier3-integration]
+    if: always()
+    steps:
+      - name: Build summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Molecule Test Summary
+
+          | Tier | Scope | Status |
+          |------|-------|--------|
+          | Tier 1 | Syntax + Variables | ${{ needs.tier1-syntax.result }} |
+          | Tier 2 | Golden Master (all apps) | ${{ needs.tier2-golden-master.result }} |
+          | Tier 3 | Integration (self-hosted) | ${{ needs.tier3-integration.result }} |
+          EOF
+      - name: Fail if any tier failed
+        if: contains(needs.*.result, 'failure')
+        run: exit 1

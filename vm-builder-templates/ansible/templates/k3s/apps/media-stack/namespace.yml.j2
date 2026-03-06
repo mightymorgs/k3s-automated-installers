@@ -1,0 +1,19 @@
+{#
+  Media Stack Namespace Template
+
+  Required Variables: None
+
+  Generated Resources:
+    - Namespace: media-stack
+
+  Usage:
+    ansible-playbook atomic/k3s/1.33/apps/01-deploy-media-stack.yml
+#}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: media-stack
+  labels:
+    name: media-stack
+    app.kubernetes.io/part-of: media-automation

@@ -1,0 +1,19 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: sabnzbd
+  namespace: media-stack
+  labels:
+    app: sabnzbd
+    app.kubernetes.io/name: sabnzbd
+    app.kubernetes.io/component: usenet-downloader
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`sabnzbd.local`) || PathPrefix(`/sabnzbd`)
+      kind: Rule
+      services:
+        - name: sabnzbd
+          port: 8080

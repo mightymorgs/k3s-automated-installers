@@ -1,0 +1,36 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: teleport-config
+  namespace: teleport
+  labels:
+    app.kubernetes.io/name: teleport
+    app.kubernetes.io/component: zero-trust-access
+data:
+  teleport.yaml: |
+    version: v3
+    teleport:
+      nodename: teleport
+      data_dir: /var/lib/teleport
+      log:
+        output: stderr
+        severity: INFO
+    auth_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3025
+      cluster_name: teleport.cluster.local
+      tokens:
+        - proxy,node:${TELEPORT_JOIN_TOKEN}
+    proxy_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3023
+      web_listen_addr: 0.0.0.0:3080
+      tunnel_listen_addr: 0.0.0.0:3024
+      public_addr: teleport.cluster.local:3080
+    ssh_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3022
+    kubernetes_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3027

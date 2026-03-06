@@ -1,0 +1,98 @@
+---
+# playbook_metadata:
+#   id: "atomic/hypervisor/qemu/02-configure-storage-pools"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/hypervisor/qemu/02-configure-storage-pools.yml"
+#     category: "hypervisor"
+#     subsystem: "qemu"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "libvirt"
+#       folder_version: null
+#       supported_versions: ["9.x", "10.x"]
+#       version_range: ">=9.0.0"
+#
+#     requires:
+#       qemu_kvm_installed: true
+#       libvirt_installed: true
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - libvirt: "10.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-22"
+#         notes: "Tested with default storage pool and Ubuntu 24.04 cloud image"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["qemu_kvm_installed", "libvirt_installed"]
+#   provides: ["libvirt_storage_configured"]
+#   tags: ["libvirt", "storage", "pool", "hypervisor", "cloud-image"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure libvirt storage pools for VM images.
+#     Creates default storage pool and downloads Ubuntu 24.04 cloud image.
+
+- name: Configure libvirt storage pools
+  hosts: hypervisor
+  become: true
+
+  tasks:
+    - name: Ensure libvirt images directory exists
+      ansible.builtin.file:
+        path: /var/lib/libvirt/images
+        state: directory
+        owner: libvirt-qemu
+        group: kvm
+        mode: '0750'
+
+    - name: Check if default storage pool exists
+      ansible.builtin.command:
+        cmd: virsh pool-info default
+      register: pool_check
+      changed_when: false
+      failed_when: false
+
+    - name: Define default storage pool
+      ansible.builtin.command:
+        cmd: >
+          virsh pool-define-as default dir
+          --source-path /dev/null
+          --target /var/lib/libvirt/images
+      when: pool_check.rc != 0
+      changed_when: true
+
+    - name: Start default storage pool
+      ansible.builtin.command:
+        cmd: virsh pool-start default
+      when: pool_check.rc != 0
+      changed_when: true
+
+    - name: Enable autostart for default storage pool
+      ansible.builtin.command:
+        cmd: virsh pool-autostart default
+      when: pool_check.rc != 0
+      changed_when: true
+
+    - name: Download Ubuntu 24.04 cloud image
+      ansible.builtin.get_url:
+        url: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img
+        dest: /var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img
+        mode: '0644'
+        owner: libvirt-qemu
+        group: kvm
+      register: cloud_image
+
+    - name: Display cloud image info
+      ansible.builtin.debug:
+        msg: "Ubuntu 24.04 cloud image ready at /var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"

@@ -1,0 +1,449 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/verify/01-verify-longhorn-storage"
+#   type: "atomic"
+#   generated_by: "idi"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/verify/01-verify-longhorn-storage.yml"
+#     category: "platform"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["v1.5.x", "v1.6.x", "v1.7.x"]
+#       version_range: ">=v1.5.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - longhorn: "v1.6.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated verification playbook"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_longhorn_operations"
+#   dependencies: []
+#   provides: ["longhorn_verified"]
+#   tags: ["longhorn", "storage", "verify", "health-check", "validation"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify Longhorn storage system health. Checks system pods, volumes,
+#     backups, and overall cluster health. Returns comprehensive status report.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#
+#     writes:
+#       - path: "_state.apps.longhorn.verified_at"
+#         example: "2026-01-27T12:00:00Z"
+#       - path: "_state.apps.longhorn.health.pods"
+#         example: "healthy"
+#       - path: "_state.apps.longhorn.health.volumes"
+#         example: "healthy"
+
+- name: Longhorn - Verify Storage System Health
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    longhorn_namespace: "{{ longhorn_namespace_input | default('longhorn-system') }}"
+    fail_on_unhealthy: "{{ fail_on_unhealthy_input | default(true) }}"
+
+  tasks:
+    # ===== SECTION 1: Verify System Pods =====
+    - name: "=== SECTION 1: Longhorn System Pods ==="
+      ansible.builtin.debug:
+        msg: "Checking Longhorn system pods..."
+
+    - name: Get Longhorn manager pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-manager
+      register: manager_pods
+
+    - name: Get Longhorn driver deployer pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-driver-deployer
+      register: driver_pods
+
+    - name: Get Longhorn CSI pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-csi-plugin
+      register: csi_pods
+
+    - name: Get Longhorn UI pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-ui
+      register: ui_pods
+
+    - name: Count running pods
+      ansible.builtin.set_fact:
+        manager_running: >-
+          {{ manager_pods.resources
+             | selectattr('status.phase', 'equalto', 'Running')
+             | list | length }}
+        manager_total: "{{ manager_pods.resources | length }}"
+        driver_running: >-
+          {{ driver_pods.resources
+             | selectattr('status.phase', 'equalto', 'Running')
+             | list | length }}
+        driver_total: "{{ driver_pods.resources | length }}"
+        csi_running: >-
+          {{ csi_pods.resources
+             | selectattr('status.phase', 'equalto', 'Running')
+             | list | length }}
+        csi_total: "{{ csi_pods.resources | length }}"
+        ui_running: >-
+          {{ ui_pods.resources
+             | selectattr('status.phase', 'equalto', 'Running')
+             | list | length }}
+        ui_total: "{{ ui_pods.resources | length }}"
+
+    - name: Display pod status
+      ansible.builtin.debug:
+        msg:
+          - "Manager pods: {{ manager_running }}/{{ manager_total }} running"
+          - "Driver pods: {{ driver_running }}/{{ driver_total }} running"
+          - "CSI pods: {{ csi_running }}/{{ csi_total }} running"
+          - "UI pods: {{ ui_running }}/{{ ui_total }} running"
+
+    - name: Determine pods health status
+      ansible.builtin.set_fact:
+        pods_healthy: >-
+          {{ (manager_running | int > 0) and
+             (driver_running | int > 0) and
+             (csi_running | int > 0) }}
+
+    - name: Assert pods are healthy
+      ansible.builtin.assert:
+        that:
+          - pods_healthy
+        fail_msg: "Longhorn system pods are not healthy. Check pod status in {{ longhorn_namespace }} namespace."
+        success_msg: "All critical Longhorn system pods are running"
+      when: fail_on_unhealthy
+
+    # ===== SECTION 2: Verify Volumes =====
+    - name: "=== SECTION 2: Longhorn Volumes ==="
+      ansible.builtin.debug:
+        msg: "Checking Longhorn volumes..."
+
+    - name: Get all Longhorn volumes
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Volume
+        namespace: "{{ longhorn_namespace }}"
+      register: all_volumes
+
+    - name: Categorize volumes by state
+      ansible.builtin.set_fact:
+        volumes_total: "{{ all_volumes.resources | length }}"
+        volumes_attached: >-
+          {{ all_volumes.resources
+             | selectattr('status.state', 'defined')
+             | selectattr('status.state', 'equalto', 'attached')
+             | list | length }}
+        volumes_detached: >-
+          {{ all_volumes.resources
+             | selectattr('status.state', 'defined')
+             | selectattr('status.state', 'equalto', 'detached')
+             | list | length }}
+        volumes_degraded: >-
+          {{ all_volumes.resources
+             | selectattr('status.robustness', 'defined')
+             | selectattr('status.robustness', 'equalto', 'degraded')
+             | list | length }}
+        volumes_faulted: >-
+          {{ all_volumes.resources
+             | selectattr('status.robustness', 'defined')
+             | selectattr('status.robustness', 'equalto', 'faulted')
+             | list | length }}
+        volumes_healthy: >-
+          {{ all_volumes.resources
+             | selectattr('status.robustness', 'defined')
+             | selectattr('status.robustness', 'equalto', 'healthy')
+             | list | length }}
+
+    - name: Display volume status
+      ansible.builtin.debug:
+        msg:
+          - "Total volumes: {{ volumes_total }}"
+          - "Attached: {{ volumes_attached }}"
+          - "Detached: {{ volumes_detached }}"
+          - "Healthy: {{ volumes_healthy }}"
+          - "Degraded: {{ volumes_degraded }}"
+          - "Faulted: {{ volumes_faulted }}"
+
+    - name: List degraded or faulted volumes
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - Unhealthy volume: {{ item.metadata.name }}
+          (state: {{ item.status.state | default('unknown') }},
+          robustness: {{ item.status.robustness | default('unknown') }})
+      loop: "{{ all_volumes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: >-
+        (item.status.robustness | default('')) in ['degraded', 'faulted']
+
+    - name: Determine volume health status
+      ansible.builtin.set_fact:
+        volumes_health_status: >-
+          {{ 'faulted' if (volumes_faulted | int > 0) else
+             ('degraded' if (volumes_degraded | int > 0) else 'healthy') }}
+
+    - name: Assert no faulted volumes
+      ansible.builtin.assert:
+        that:
+          - volumes_faulted | int == 0
+        fail_msg: "{{ volumes_faulted }} volume(s) are faulted. Immediate attention required."
+        success_msg: "No faulted volumes detected"
+      when: fail_on_unhealthy
+
+    # ===== SECTION 3: Verify Backups =====
+    - name: "=== SECTION 3: Longhorn Backups ==="
+      ansible.builtin.debug:
+        msg: "Checking Longhorn backups..."
+
+    - name: Get backup target configuration
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Setting
+        namespace: "{{ longhorn_namespace }}"
+        name: backup-target
+      register: backup_target_setting
+
+    - name: Display backup target status
+      ansible.builtin.debug:
+        msg: >-
+          Backup target: {{
+            backup_target_setting.resources[0].value | default('NOT CONFIGURED')
+            if backup_target_setting.resources | length > 0
+            else 'NOT CONFIGURED'
+          }}
+
+    - name: Get all Longhorn backups
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Backup
+        namespace: "{{ longhorn_namespace }}"
+      register: all_backups
+
+    - name: Categorize backups by state
+      ansible.builtin.set_fact:
+        backups_total: "{{ all_backups.resources | length }}"
+        backups_completed: >-
+          {{ all_backups.resources
+             | selectattr('status.state', 'defined')
+             | selectattr('status.state', 'equalto', 'Completed')
+             | list | length }}
+        backups_in_progress: >-
+          {{ all_backups.resources
+             | selectattr('status.state', 'defined')
+             | selectattr('status.state', 'equalto', 'InProgress')
+             | list | length }}
+        backups_error: >-
+          {{ all_backups.resources
+             | selectattr('status.state', 'defined')
+             | selectattr('status.state', 'equalto', 'Error')
+             | list | length }}
+
+    - name: Display backup status
+      ansible.builtin.debug:
+        msg:
+          - "Total backups: {{ backups_total }}"
+          - "Completed: {{ backups_completed }}"
+          - "In Progress: {{ backups_in_progress }}"
+          - "Error: {{ backups_error }}"
+
+    - name: List failed backups
+      ansible.builtin.debug:
+        msg: "WARNING - Failed backup: {{ item.metadata.name }} (error: {{ item.status.error | default('unknown') }})"
+      loop: "{{ all_backups.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: >-
+        (item.status.state | default('')) == 'Error'
+
+    # ===== SECTION 4: Verify Nodes =====
+    - name: "=== SECTION 4: Longhorn Nodes ==="
+      ansible.builtin.debug:
+        msg: "Checking Longhorn node status..."
+
+    - name: Get all Longhorn nodes
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Node
+        namespace: "{{ longhorn_namespace }}"
+      register: all_nodes
+
+    - name: Count node states
+      ansible.builtin.set_fact:
+        nodes_total: "{{ all_nodes.resources | length }}"
+        nodes_ready: >-
+          {{ all_nodes.resources
+             | selectattr('status.conditions', 'defined')
+             | list | length }}
+        nodes_schedulable: >-
+          {{ all_nodes.resources
+             | selectattr('spec.allowScheduling', 'defined')
+             | selectattr('spec.allowScheduling', 'equalto', true)
+             | list | length }}
+
+    - name: Display node status
+      ansible.builtin.debug:
+        msg:
+          - "Total nodes: {{ nodes_total }}"
+          - "Schedulable: {{ nodes_schedulable }}"
+
+    - name: List node disk status
+      ansible.builtin.debug:
+        msg: "Node: {{ item.metadata.name }} - Disks: {{ item.spec.disks | default({}) | length }}"
+      loop: "{{ all_nodes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    # ===== SECTION 5: Verify Storage Classes =====
+    - name: "=== SECTION 5: Storage Classes ==="
+      ansible.builtin.debug:
+        msg: "Checking Longhorn storage classes..."
+
+    - name: Get Longhorn storage classes
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+      register: all_storage_classes
+
+    - name: Filter Longhorn storage classes
+      ansible.builtin.set_fact:
+        longhorn_storage_classes: >-
+          {{ all_storage_classes.resources |
+             selectattr('provisioner', 'equalto', 'driver.longhorn.io') |
+             list }}
+
+    - name: Display storage classes
+      ansible.builtin.debug:
+        msg: >-
+          Storage class: {{ item.metadata.name }}
+          (default: {{
+            item.metadata.annotations['storageclass.kubernetes.io/is-default-class']
+            | default('false')
+          }})
+      loop: "{{ longhorn_storage_classes }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    # ===== SECTION 6: Summary Report =====
+    - name: "=== SECTION 6: Health Summary ==="
+      ansible.builtin.debug:
+        msg: "Generating health summary..."
+
+    - name: Compile health report
+      ansible.builtin.set_fact:
+        health_report:
+          timestamp: >-
+            {{ ansible_date_time.iso8601
+               | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}
+          namespace: "{{ longhorn_namespace }}"
+          system_pods:
+            status: "{{ 'healthy' if pods_healthy else 'unhealthy' }}"
+            manager: "{{ manager_running }}/{{ manager_total }}"
+            driver: "{{ driver_running }}/{{ driver_total }}"
+            csi: "{{ csi_running }}/{{ csi_total }}"
+            ui: "{{ ui_running }}/{{ ui_total }}"
+          volumes:
+            status: "{{ volumes_health_status }}"
+            total: "{{ volumes_total }}"
+            attached: "{{ volumes_attached }}"
+            detached: "{{ volumes_detached }}"
+            healthy: "{{ volumes_healthy }}"
+            degraded: "{{ volumes_degraded }}"
+            faulted: "{{ volumes_faulted }}"
+          backups:
+            target_configured: >-
+              {{ (backup_target_setting.resources | length > 0) and
+                 (backup_target_setting.resources[0].value
+                  | default('') | length > 0) }}
+            total: "{{ backups_total }}"
+            completed: "{{ backups_completed }}"
+            in_progress: "{{ backups_in_progress }}"
+            error: "{{ backups_error }}"
+          nodes:
+            total: "{{ nodes_total }}"
+            schedulable: "{{ nodes_schedulable }}"
+          storage_classes:
+            count: "{{ longhorn_storage_classes | length }}"
+          overall_status: >-
+            {{ 'unhealthy' if (not pods_healthy or volumes_faulted | int > 0) else
+               ('degraded' if (volumes_degraded | int > 0) else 'healthy') }}
+
+    - name: Display health report
+      ansible.builtin.debug:
+        var: health_report
+
+    # ===== STEP 7: Write Result to BWS._state (if configured) =====
+    - name: Update BWS inventory with verification results
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge health info into _state.apps.longhorn.health
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg pods "{{ 'healthy' if pods_healthy else 'unhealthy' }}" \
+          --arg volumes "{{ volumes_health_status }}" \
+          --arg overall "{{ health_report.overall_status }}" \
+          '
+          if ._state.apps.longhorn == null then ._state.apps.longhorn = {} else . end |
+          ._state.apps.longhorn.health = {
+            "pods": $pods,
+            "volumes": $volumes,
+            "overall": $overall
+          } |
+          ._state.apps.longhorn.verified_at = now | strftime("%Y-%m-%dT%H:%M:%SZ")
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when:
+        - inventory_secret_name | length > 0
+        - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+
+    # ===== Final Assertion =====
+    - name: Assert overall health
+      ansible.builtin.assert:
+        that:
+          - health_report.overall_status != 'unhealthy'
+        fail_msg: "Longhorn storage system is unhealthy. Review the health report above."
+        success_msg: "Longhorn storage system verification complete. Status: {{ health_report.overall_status }}"
+      when: fail_on_unhealthy

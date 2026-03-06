@@ -1,0 +1,24 @@
+---
+# AWX NodePort Service (J2 template)
+# Exposes AWX via NodePort for Tailscale access
+# The AWX operator creates a ClusterIP service; this adds NodePort exposure
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('awx') }}-nodeport
+  namespace: {{ app_namespace | default('awx') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('awx') }}
+    app.kubernetes.io/component: web
+spec:
+  type: {{ service_type_external | default('NodePort') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name | default('awx') }}-web
+  ports:
+    - name: http
+      port: {{ container_port | default(80) }}
+      targetPort: {{ container_port | default(80) }}
+{% if service_type_external | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30180) }}
+{% endif %}
+      protocol: TCP

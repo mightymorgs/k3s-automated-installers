@@ -1,0 +1,882 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/neo4j/verify/neo4j-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "neo4j_configuration_verified"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/neo4j/verify/01-verify-neo4j-config.yml"
+#     category: "platform"
+#     subsystem: "neo4j"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "neo4j"
+#       supported_versions: ["5.x"]
+#       version_range: ">=5.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - neo4j: "5.26.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies Neo4j configuration (cluster health, databases, users, roles, indexes, constraints)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_neo4j_verification"
+#   dependencies: ["neo4j_deployed"]
+#   provides: ["neo4j_config_verified"]
+#   tags: ["neo4j", "verification", "graph-database", "phase4"]
+#   estimated_duration: 90
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that Neo4j is properly configured. Checks cluster health, database status,
+#     user existence, role configuration, index states, and constraint validity.
+#     Provides a comprehensive health report for Neo4j graph database setup.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.neo4j.password"
+#         purpose: "Neo4j admin password for API authentication"
+#       - path: "_state.apps.neo4j.url"
+#         purpose: "Neo4j HTTP endpoint URL"
+#       - path: "_state.apps.neo4j.databases"
+#         purpose: "Expected databases to verify"
+#       - path: "_state.apps.neo4j.users"
+#         purpose: "Expected users to verify"
+#       - path: "_state.apps.neo4j.roles"
+#         purpose: "Expected roles to verify"
+#       - path: "_state.apps.neo4j.indexes"
+#         purpose: "Expected indexes to verify"
+#       - path: "_state.apps.neo4j.constraints"
+#         purpose: "Expected constraints to verify"
+#
+#     writes:
+#       - path: "_state.apps.neo4j.health.last_verified"
+#         example: "2026-01-27T12:30:00Z"
+#       - path: "_state.apps.neo4j.health.status"
+#         example: "healthy"
+#       - path: "_state.apps.neo4j.health.checks"
+#         example: {"cluster": "healthy", "databases": "healthy", "users": "healthy"}
+
+- name: Verify - Neo4j Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    neo4j_base_url: "{{ neo4j_url }}"
+    neo4j_admin_user: "{{ neo4j_admin_user_input | default('neo4j') }}"
+
+    # Expected resources to verify (can be overridden by caller or BWS state)
+    expected_databases: "{{ expected_databases_input | default([]) }}"
+    expected_users: "{{ expected_users_input | default([]) }}"
+    expected_roles: "{{ expected_roles_input | default([]) }}"
+    expected_indexes: "{{ expected_indexes_input | default([]) }}"
+    expected_constraints: "{{ expected_constraints_input | default([]) }}"
+
+    # Verification options
+    fail_on_unhealthy: "{{ fail_on_unhealthy_input | default(false) }}"
+    write_health_to_bws: "{{ write_health_to_bws_input | default(true) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying Neo4j Configuration"
+          - "=========================================="
+          - "Base URL: {{ neo4j_base_url }}"
+          - "Expected Databases: {{ expected_databases | length }}"
+          - "Expected Users: {{ expected_users | length }}"
+          - "Expected Roles: {{ expected_roles | length }}"
+          - "Expected Indexes: {{ expected_indexes | length }}"
+          - "Expected Constraints: {{ expected_constraints | length }}"
+          - "Fail on Unhealthy: {{ fail_on_unhealthy }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Neo4j credentials
+      ansible.builtin.set_fact:
+        neo4j_admin_password: "{{ inventory._state.apps.neo4j.password | default('') }}"
+        neo4j_url: "{{ inventory._state.apps.neo4j.url | default(neo4j_base_url) }}"
+      no_log: true
+
+    - name: Validate Neo4j credentials are available
+      ansible.builtin.assert:
+        that:
+          - neo4j_admin_password | length > 0
+        fail_msg: "Neo4j admin password not found in BWS _state. Deploy Neo4j first."
+        success_msg: "Neo4j credentials retrieved from BWS _state"
+
+    - name: Load expected resources from BWS state if not provided
+      ansible.builtin.set_fact:
+        expected_databases: >-
+          {{
+            expected_databases if expected_databases | length > 0
+            else (inventory._state.apps.neo4j.databases | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_users: >-
+          {{
+            expected_users if expected_users | length > 0
+            else (inventory._state.apps.neo4j.users | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_roles: >-
+          {{
+            expected_roles if expected_roles | length > 0
+            else (inventory._state.apps.neo4j.roles | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_indexes: >-
+          {{
+            expected_indexes if expected_indexes | length > 0
+            else (inventory._state.apps.neo4j.indexes | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_constraints: >-
+          {{
+            expected_constraints if expected_constraints | length > 0
+            else (inventory._state.apps.neo4j.constraints | default({}) | dict2items | map(attribute='key') | list)
+          }}
+
+    # ===== STEP 2: Verify Neo4j Cluster Health =====
+    - name: Check Neo4j API connectivity (basic health check)
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}"
+        method: GET
+        status_code: [200, 401, 403]
+        validate_certs: false
+        timeout: 30
+      register: api_connectivity
+      failed_when: false
+
+    - name: Evaluate API connectivity
+      ansible.builtin.set_fact:
+        api_accessible: "{{ api_connectivity.status is defined and api_connectivity.status in [200, 401, 403] }}"
+
+    - name: Display API connectivity result
+      ansible.builtin.debug:
+        msg: >-
+          API Connectivity: {{ 'SUCCESS' if api_accessible
+          else 'FAILED - ' + (api_connectivity.msg | default('unknown error')) }}
+
+    - name: Check cluster health via Cypher
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "CALL dbms.cluster.overview() YIELD id, addresses, role, groups RETURN count(*) AS nodeCount"
+        status_code: [200]
+        validate_certs: false
+      register: cluster_health_result
+      failed_when: false
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Check standalone instance health (if cluster query fails)
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "RETURN 1 AS healthcheck"
+        status_code: [200]
+        validate_certs: false
+      register: standalone_health_result
+      failed_when: false
+      no_log: true
+      when:
+        - api_accessible | bool
+        - cluster_health_result.json.errors | default([]) | length > 0
+
+    - name: Evaluate cluster health status
+      ansible.builtin.set_fact:
+        cluster_healthy: >-
+          {{
+            (cluster_health_result.json.errors | default([]) | length == 0 and
+             cluster_health_result.json.results | default([]) | length > 0)
+            or
+            (standalone_health_result.json.errors | default([]) | length == 0 and
+             standalone_health_result.json.results | default([]) | length > 0)
+            if api_accessible | bool
+            else false
+          }}
+        cluster_mode: >-
+          {{
+            'cluster' if (cluster_health_result.json.errors | default([]) | length == 0)
+            else 'standalone'
+          }}
+
+    - name: Display cluster health status
+      ansible.builtin.debug:
+        msg:
+          - "Cluster Health: {{ 'HEALTHY' if cluster_healthy else 'UNHEALTHY' }}"
+          - "Mode: {{ cluster_mode }}"
+
+    # ===== STEP 3: Verify Databases =====
+    - name: Get all databases
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: >-
+                SHOW DATABASES YIELD name, currentStatus, statusMessage, default, home
+                RETURN name, currentStatus, statusMessage, default, home
+        status_code: [200]
+        validate_certs: false
+      register: databases_result
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Parse database results
+      ansible.builtin.set_fact:
+        all_databases: >-
+          {{
+            databases_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('zip', ['name', 'currentStatus', 'statusMessage', 'default', 'home']) |
+            map('map', 'reverse') | map('list') | map('items2dict') | list
+          }}
+      when: api_accessible | bool
+
+    - name: Identify online and offline databases
+      ansible.builtin.set_fact:
+        online_databases: >-
+          {{ all_databases | selectattr('currentStatus', 'equalto', 'online') |
+             map(attribute='name') | list }}
+        offline_databases: >-
+          {{
+            all_databases | rejectattr('currentStatus', 'equalto', 'online') |
+            map(attribute='name') | list
+          }}
+        existing_database_names: "{{ all_databases | map(attribute='name') | list }}"
+      when: api_accessible | bool
+
+    - name: Check expected databases exist and are online
+      ansible.builtin.set_fact:
+        database_results: >-
+          {{
+            database_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_database_names,
+              'online': item in online_databases,
+              'status': (all_databases | selectattr('name', 'equalto', item) | list | first).currentStatus
+                        if item in existing_database_names else 'not_found'
+            }]
+          }}
+      loop: "{{ expected_databases }}"
+      when:
+        - api_accessible | bool
+        - expected_databases | length > 0
+
+    - name: Calculate database verification result
+      ansible.builtin.set_fact:
+        all_databases_healthy: >-
+          {{
+            (database_results | default([]) | selectattr('online', 'equalto', false) | list | length) == 0
+            and
+            (database_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Display database verification results
+      ansible.builtin.debug:
+        msg:
+          - "DATABASES:"
+          - "  Total in Neo4j: {{ all_databases | default([]) | length }}"
+          - "  Online: {{ online_databases | default([]) | length }}"
+          - >-
+            Offline/Stopping: {{ offline_databases | default([]) | join(', ')
+            if offline_databases | default([]) | length > 0 else 'None' }}
+          - "  Expected: {{ expected_databases | length }}"
+          - "  All Expected Healthy: {{ all_databases_healthy }}"
+
+    # ===== STEP 4: Verify Users =====
+    - name: Get all users
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW USERS YIELD user, roles, suspended RETURN user, roles, suspended"
+        status_code: [200]
+        validate_certs: false
+      register: users_result
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Parse user results
+      ansible.builtin.set_fact:
+        all_users: >-
+          {{
+            users_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('zip', ['user', 'roles', 'suspended']) |
+            map('map', 'reverse') | map('list') | map('items2dict') | list
+          }}
+        existing_user_names: >-
+          {{
+            users_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('first') | list
+          }}
+      when: api_accessible | bool
+
+    - name: Check expected users exist with expected roles
+      ansible.builtin.set_fact:
+        user_results: >-
+          {{
+            user_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_user_names,
+              'roles': (all_users | selectattr('user', 'equalto', item) | list | first).roles
+                       if item in existing_user_names else [],
+              'suspended': (all_users | selectattr('user', 'equalto', item) | list | first).suspended
+                           if item in existing_user_names else null
+            }]
+          }}
+      loop: "{{ expected_users }}"
+      when:
+        - api_accessible | bool
+        - expected_users | length > 0
+
+    - name: Calculate user verification result
+      ansible.builtin.set_fact:
+        all_users_exist: >-
+          {{
+            (user_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Display user verification results
+      ansible.builtin.debug:
+        msg:
+          - "USERS:"
+          - "  Total in Neo4j: {{ all_users | default([]) | length }}"
+          - "  Existing Users: {{ existing_user_names | default([]) | join(', ') }}"
+          - "  Expected: {{ expected_users | length }}"
+          - "  All Expected Exist: {{ all_users_exist }}"
+
+    # ===== STEP 5: Verify Roles =====
+    - name: Get all roles with privileges
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: "SHOW ROLES YIELD role RETURN role"
+        status_code: [200]
+        validate_certs: false
+      register: roles_result
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Parse role results
+      ansible.builtin.set_fact:
+        existing_role_names: >-
+          {{
+            roles_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('first') | list
+          }}
+      when: api_accessible | bool
+
+    - name: Check expected roles exist
+      ansible.builtin.set_fact:
+        role_results: >-
+          {{
+            role_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_role_names
+            }]
+          }}
+      loop: "{{ expected_roles }}"
+      when:
+        - api_accessible | bool
+        - expected_roles | length > 0
+
+    - name: Get role privileges for expected roles
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/system/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: >-
+                SHOW ROLE $roleName PRIVILEGES YIELD access, action, resource, segment
+                RETURN access, action, resource, segment
+              parameters:
+                roleName: "{{ item }}"
+        status_code: [200]
+        validate_certs: false
+      register: role_privileges_results
+      loop: "{{ expected_roles }}"
+      when:
+        - api_accessible | bool
+        - expected_roles | length > 0
+        - item in existing_role_names
+      failed_when: false
+      no_log: true
+
+    - name: Calculate role verification result
+      ansible.builtin.set_fact:
+        all_roles_exist: >-
+          {{
+            (role_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Display role verification results
+      ansible.builtin.debug:
+        msg:
+          - "ROLES:"
+          - "  Total in Neo4j: {{ existing_role_names | default([]) | length }}"
+          - "  Existing Roles: {{ existing_role_names | default([]) | join(', ') }}"
+          - "  Expected: {{ expected_roles | length }}"
+          - "  All Expected Exist: {{ all_roles_exist }}"
+
+    # ===== STEP 6: Verify Indexes =====
+    - name: Get all indexes
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/neo4j/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: >-
+                SHOW INDEXES YIELD name, state, type, labelsOrTypes, properties, failureMessage
+                RETURN name, state, type, labelsOrTypes, properties, failureMessage
+        status_code: [200]
+        validate_certs: false
+      register: indexes_result
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Parse index results
+      ansible.builtin.set_fact:
+        all_indexes: >-
+          {{
+            indexes_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('zip', ['name', 'state', 'type', 'labelsOrTypes', 'properties', 'failureMessage']) |
+            map('map', 'reverse') | map('list') | map('items2dict') | list
+          }}
+        existing_index_names: >-
+          {{
+            indexes_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('first') | list
+          }}
+      when: api_accessible | bool
+
+    - name: Identify indexes by state
+      ansible.builtin.set_fact:
+        online_indexes: >-
+          {{ all_indexes | selectattr('state', 'equalto', 'ONLINE') |
+             map(attribute='name') | list }}
+        populating_indexes: >-
+          {{ all_indexes | selectattr('state', 'equalto', 'POPULATING') |
+             map(attribute='name') | list }}
+        failed_indexes: >-
+          {{ all_indexes | selectattr('state', 'equalto', 'FAILED') |
+             map(attribute='name') | list }}
+      when: api_accessible | bool
+
+    - name: Check expected indexes exist and are online
+      ansible.builtin.set_fact:
+        index_results: >-
+          {{
+            index_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_index_names,
+              'online': item in online_indexes,
+              'state': (all_indexes | selectattr('name', 'equalto', item) | list | first).state
+                       if item in existing_index_names else 'not_found',
+              'type': (all_indexes | selectattr('name', 'equalto', item) | list | first).type
+                      if item in existing_index_names else 'unknown'
+            }]
+          }}
+      loop: "{{ expected_indexes }}"
+      when:
+        - api_accessible | bool
+        - expected_indexes | length > 0
+
+    - name: Calculate index verification result
+      ansible.builtin.set_fact:
+        all_indexes_healthy: >-
+          {{
+            (index_results | default([]) | selectattr('online', 'equalto', false) | list | length) == 0
+            and
+            (index_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Display index verification results
+      ansible.builtin.debug:
+        msg:
+          - "INDEXES:"
+          - "  Total in Neo4j: {{ all_indexes | default([]) | length }}"
+          - "  Online: {{ online_indexes | default([]) | length }}"
+          - >-
+            Populating: {{ populating_indexes | default([]) | join(', ')
+            if populating_indexes | default([]) | length > 0 else 'None' }}
+          - >-
+            Failed: {{ failed_indexes | default([]) | join(', ')
+            if failed_indexes | default([]) | length > 0 else 'None' }}
+          - "  Expected: {{ expected_indexes | length }}"
+          - "  All Expected Healthy: {{ all_indexes_healthy }}"
+
+    # ===== STEP 7: Verify Constraints =====
+    - name: Get all constraints
+      ansible.builtin.uri:
+        url: "{{ neo4j_url }}/db/neo4j/tx/commit"
+        method: POST
+        user: "{{ neo4j_admin_user }}"
+        password: "{{ neo4j_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          statements:
+            - statement: >-
+                SHOW CONSTRAINTS YIELD name, type, labelsOrTypes, properties, ownedIndex
+                RETURN name, type, labelsOrTypes, properties, ownedIndex
+        status_code: [200]
+        validate_certs: false
+      register: constraints_result
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Parse constraint results
+      ansible.builtin.set_fact:
+        all_constraints: >-
+          {{
+            constraints_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('zip', ['name', 'type', 'labelsOrTypes', 'properties', 'ownedIndex']) |
+            map('map', 'reverse') | map('list') | map('items2dict') | list
+          }}
+        existing_constraint_names: >-
+          {{
+            constraints_result.json.results[0].data | default([]) | map(attribute='row') |
+            map('first') | list
+          }}
+      when: api_accessible | bool
+
+    - name: Check expected constraints exist
+      ansible.builtin.set_fact:
+        constraint_results: >-
+          {{
+            constraint_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_constraint_names,
+              'type': (all_constraints | selectattr('name', 'equalto', item) | list | first).type
+                      if item in existing_constraint_names else 'not_found'
+            }]
+          }}
+      loop: "{{ expected_constraints }}"
+      when:
+        - api_accessible | bool
+        - expected_constraints | length > 0
+
+    - name: Calculate constraint verification result
+      ansible.builtin.set_fact:
+        all_constraints_exist: >-
+          {{
+            (constraint_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Display constraint verification results
+      ansible.builtin.debug:
+        msg:
+          - "CONSTRAINTS:"
+          - "  Total in Neo4j: {{ all_constraints | default([]) | length }}"
+          - >-
+            Existing: {{ existing_constraint_names | default([]) | join(', ')
+            if existing_constraint_names | default([]) | length > 0 else 'None' }}
+          - "  Expected: {{ expected_constraints | length }}"
+          - "  All Expected Exist: {{ all_constraints_exist }}"
+
+    # ===== STEP 8: Calculate Overall Health =====
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            api_accessible | bool and
+            cluster_healthy | bool and
+            all_databases_healthy | default(true) | bool and
+            all_users_exist | default(true) | bool and
+            all_roles_exist | default(true) | bool and
+            all_indexes_healthy | default(true) | bool and
+            all_constraints_exist | default(true) | bool
+          }}
+        health_status: >-
+          {{
+            'healthy' if (
+              api_accessible | bool and
+              cluster_healthy | bool and
+              all_databases_healthy | default(true) | bool and
+              all_users_exist | default(true) | bool and
+              all_roles_exist | default(true) | bool and
+              all_indexes_healthy | default(true) | bool and
+              all_constraints_exist | default(true) | bool
+            ) else 'unhealthy'
+          }}
+
+    # ===== STEP 9: Build Health Report =====
+    - name: Build health report
+      ansible.builtin.set_fact:
+        health_report:
+          neo4j_url: "{{ neo4j_url }}"
+          verified_at: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+          overall_status: "{{ health_status }}"
+          all_checks_passed: "{{ all_checks_passed }}"
+          cluster:
+            accessible: "{{ api_accessible }}"
+            healthy: "{{ cluster_healthy }}"
+            mode: "{{ cluster_mode }}"
+          databases:
+            total: "{{ all_databases | default([]) | length }}"
+            online: "{{ online_databases | default([]) | length }}"
+            offline: "{{ offline_databases | default([]) }}"
+            expected_count: "{{ expected_databases | length }}"
+            all_expected_healthy: "{{ all_databases_healthy | default(true) }}"
+            details: "{{ database_results | default([]) }}"
+          users:
+            total: "{{ all_users | default([]) | length }}"
+            existing: "{{ existing_user_names | default([]) }}"
+            expected_count: "{{ expected_users | length }}"
+            all_expected_exist: "{{ all_users_exist | default(true) }}"
+            details: "{{ user_results | default([]) }}"
+          roles:
+            total: "{{ existing_role_names | default([]) | length }}"
+            existing: "{{ existing_role_names | default([]) }}"
+            expected_count: "{{ expected_roles | length }}"
+            all_expected_exist: "{{ all_roles_exist | default(true) }}"
+            details: "{{ role_results | default([]) }}"
+          indexes:
+            total: "{{ all_indexes | default([]) | length }}"
+            online: "{{ online_indexes | default([]) | length }}"
+            populating: "{{ populating_indexes | default([]) }}"
+            failed: "{{ failed_indexes | default([]) }}"
+            expected_count: "{{ expected_indexes | length }}"
+            all_expected_healthy: "{{ all_indexes_healthy | default(true) }}"
+            details: "{{ index_results | default([]) }}"
+          constraints:
+            total: "{{ all_constraints | default([]) | length }}"
+            existing: "{{ existing_constraint_names | default([]) }}"
+            expected_count: "{{ expected_constraints | length }}"
+            all_expected_exist: "{{ all_constraints_exist | default(true) }}"
+            details: "{{ constraint_results | default([]) }}"
+
+    # ===== STEP 10: Display Verification Summary =====
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Neo4j Configuration Verification Summary"
+          - "=========================================="
+          - ""
+          - "Neo4j URL: {{ neo4j_url }}"
+          - "Cluster Mode: {{ cluster_mode }}"
+          - "API Accessible: {{ 'YES' if api_accessible else 'NO' }}"
+          - "Cluster Healthy: {{ 'YES' if cluster_healthy else 'NO' }}"
+          - ""
+          - "DATABASES:"
+          - "  Total: {{ all_databases | default([]) | length }}"
+          - "  Online: {{ online_databases | default([]) | length }}"
+          - "  Offline: {{ offline_databases | default([]) | length }}"
+          - "  Expected: {{ expected_databases | length }}"
+          - "  All Expected Healthy: {{ all_databases_healthy | default(true) }}"
+          - ""
+          - "USERS:"
+          - "  Total: {{ all_users | default([]) | length }}"
+          - "  Expected: {{ expected_users | length }}"
+          - "  All Expected Exist: {{ all_users_exist | default(true) }}"
+          - ""
+          - "ROLES:"
+          - "  Total: {{ existing_role_names | default([]) | length }}"
+          - "  Expected: {{ expected_roles | length }}"
+          - "  All Expected Exist: {{ all_roles_exist | default(true) }}"
+          - ""
+          - "INDEXES:"
+          - "  Total: {{ all_indexes | default([]) | length }}"
+          - "  Online: {{ online_indexes | default([]) | length }}"
+          - "  Populating: {{ populating_indexes | default([]) | length }}"
+          - "  Failed: {{ failed_indexes | default([]) | length }}"
+          - "  Expected: {{ expected_indexes | length }}"
+          - "  All Expected Healthy: {{ all_indexes_healthy | default(true) }}"
+          - ""
+          - "CONSTRAINTS:"
+          - "  Total: {{ all_constraints | default([]) | length }}"
+          - "  Expected: {{ expected_constraints | length }}"
+          - "  All Expected Exist: {{ all_constraints_exist | default(true) }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "Health Status: {{ health_status | upper }}"
+          - "=========================================="
+
+    - name: Display failed checks if any
+      ansible.builtin.debug:
+        msg:
+          - "FAILED CHECKS:"
+          - >-
+            Databases not online: {{ database_results | default([]) |
+            rejectattr('online') | map(attribute='name') | list }}
+          - >-
+            Users missing: {{ user_results | default([]) |
+            rejectattr('exists') | map(attribute='name') | list }}
+          - >-
+            Roles missing: {{ role_results | default([]) |
+            rejectattr('exists') | map(attribute='name') | list }}
+          - >-
+            Indexes not online: {{ index_results | default([]) |
+            rejectattr('online') | map(attribute='name') | list }}
+          - >-
+            Constraints missing: {{ constraint_results | default([]) |
+            rejectattr('exists') | map(attribute='name') | list }}
+      when: not all_checks_passed
+
+    # ===== STEP 11: Write Health Status to BWS._state =====
+    - name: Update BWS inventory with health status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.neo4j.health
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg timestamp "$TIMESTAMP" \
+          --arg status "{{ health_status }}" \
+          --argjson all_passed {{ all_checks_passed | lower }} \
+          --argjson cluster_healthy {{ cluster_healthy | lower }} \
+          --arg cluster_mode "{{ cluster_mode }}" \
+          --argjson databases_healthy {{ all_databases_healthy | default(true) | lower }} \
+          --argjson users_exist {{ all_users_exist | default(true) | lower }} \
+          --argjson roles_exist {{ all_roles_exist | default(true) | lower }} \
+          --argjson indexes_healthy {{ all_indexes_healthy | default(true) | lower }} \
+          --argjson constraints_exist {{ all_constraints_exist | default(true) | lower }} \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.neo4j == null then ._state.apps.neo4j = {} else . end |
+          ._state.apps.neo4j.health = {
+            "last_verified": $timestamp,
+            "status": $status,
+            "all_checks_passed": $all_passed,
+            "checks": {
+              "cluster": (if $cluster_healthy then "healthy" else "unhealthy" end),
+              "cluster_mode": $cluster_mode,
+              "databases": (if $databases_healthy then "healthy" else "unhealthy" end),
+              "users": (if $users_exist then "healthy" else "unhealthy" end),
+              "roles": (if $roles_exist then "healthy" else "unhealthy" end),
+              "indexes": (if $indexes_healthy then "healthy" else "unhealthy" end),
+              "constraints": (if $constraints_exist then "healthy" else "unhealthy" end)
+            }
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: write_health_to_bws | bool
+
+    # ===== STEP 12: Final Assertions =====
+    - name: Fail if unhealthy and fail_on_unhealthy is true
+      ansible.builtin.fail:
+        msg: >-
+          Neo4j configuration verification failed.
+          Status: {{ health_status | upper }}
+          See summary above for details.
+      when:
+        - fail_on_unhealthy | bool
+        - not all_checks_passed
+
+    - name: Verification complete
+      ansible.builtin.debug:
+        msg: >-
+          Neo4j configuration verification complete -
+          {{ 'all checks passed' if all_checks_passed else 'some checks failed (see summary)' }}

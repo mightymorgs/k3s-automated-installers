@@ -1,0 +1,107 @@
+---
+name: Uninstall App
+# Purpose: Remove a single app from the K3s cluster and clean up its BWS state
+# Runs on: Self-hosted runner on the target VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_hostname:
+        description: VM hostname (must match runner label)
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-gcp-latest)
+        required: true
+        type: string
+      app_id:
+        description: App to uninstall (e.g., sonarr, grafana, authentik)
+        required: true
+        type: string
+      delete_pvc:
+        description: Also delete PersistentVolumeClaims (data loss!)
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  uninstall:
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Validate uninstall playbook exists
+        id: validate
+        run: |
+          APP="${{ inputs.app_id }}"
+          PLAYBOOK="vm-builder/vm-builder-templates/apps/${APP}/uninstall/01-remove.yml"
+
+          if [ ! -f "$PLAYBOOK" ]; then
+            echo "ERROR: No uninstall playbook found at $PLAYBOOK"
+            echo "Available apps with uninstall playbooks:"
+            find vm-builder/vm-builder-templates/apps -maxdepth 2 -name uninstall -type d 2>/dev/null | \
+              sed 's|vm-builder/vm-builder-templates/apps/||;s|/uninstall||'
+            exit 1
+          fi
+
+          echo "playbook=$PLAYBOOK" >> "$GITHUB_OUTPUT"
+          echo "Found uninstall playbook: $PLAYBOOK"
+
+      - name: Run uninstall playbook for ${{ inputs.app_id }}
+        run: |
+          APP="${{ inputs.app_id }}"
+          PLAYBOOK="${{ steps.validate.outputs.playbook }}"
+
+          echo "=========================================="
+          echo "Uninstalling $APP"
+          echo "=========================================="
+
+          ansible-playbook "$PLAYBOOK" \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e inventory_secret_name="${{ inputs.inventory_key }}" \
+            -e delete_pvc=${{ inputs.delete_pvc }}
+
+          echo ""
+          echo "=========================================="
+          echo "$APP uninstall complete"
+          echo "=========================================="
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Clear app from BWS inventory
+        run: |
+          APP="${{ inputs.app_id }}"
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "" ]; then
+            echo "No inventory found at $INVENTORY_KEY — skipping BWS cleanup"
+            exit 0
+          fi
+
+          CURRENT=$(get_val "$SECRET_ID")
+
+          # Remove app from _state.apps and from _state.apps.installed list
+          UPDATED=$(echo "$CURRENT" | jq --arg app "$APP" '
+            del(._state.apps[$app]) |
+            if ._state.apps.installed then
+              ._state.apps.installed |= map(select(. != $app))
+            else . end |
+            if .apps.configured then
+              .apps.configured |= map(select(. != $app))
+            else . end
+          ')
+
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "$APP removed from BWS inventory state"

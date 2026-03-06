@@ -1,0 +1,234 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/verification/03-verify-external-access"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/verification/03-verify-external-access.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       traefik: ">=2.0.0"
+#       cloudflared: ">=2024.0.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - traefik: "latest"
+#         cloudflared: "latest"
+#         k3s: "1.33.5+k3s1"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-10"
+#         notes: "Tests all media-stack HTTPS endpoints via Cloudflare Tunnel"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "traefik_running", "cloudflared_deployed", "ingressroutes_fixed"]
+#   provides: ["external_access_verified"]
+#   tags: ["k3s", "traefik", "cloudflare", "verification", "external", "https"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Verify external HTTPS access via Cloudflare Tunnel to all media-stack applications
+- name: Verify External HTTPS Access via Cloudflare Tunnel
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  vars:
+    media_namespace: media-stack
+    test_endpoints:
+      - name: Sonarr
+        url: https://sonarr.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: Sonarr
+      - name: Radarr
+        url: https://radarr.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: Radarr
+      - name: Prowlarr
+        url: https://prowl.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: Prowlarr
+      - name: SABnzbd
+        url: https://nzb.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: SABnzbd
+      - name: qBittorrent
+        url: https://qbit.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: qBittorrent
+      - name: Overseerr
+        url: https://req.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: Overseerr
+      - name: Tautulli
+        url: https://stats.{{ domain | default('example.local') }}
+        expected_status: 200
+        expected_content: Tautulli
+  tasks:
+    - name: Display verification information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Verifying External HTTPS Access
+          - ==========================================
+          - 'Method: Cloudflare Tunnel → Traefik → Services'
+          - 'Namespace: {{ media_namespace }}'
+          - Testing {{ test_endpoints | length }} endpoints
+          - ==========================================
+
+    # ========== PHASE 1: Fetch kubeconfig ==========
+    - name: Fetch kubeconfig from remote host
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_raw
+    - name: Save kubeconfig locally
+      ansible.builtin.copy:
+        content: "{{ kubeconfig_raw.content | b64decode | regex_replace('127.0.0.1', ansible_host) }}"
+        dest: /tmp/media-stack-kubeconfig.yaml
+        mode: '0600'
+      delegate_to: localhost
+
+    # ========== PHASE 2: Verify cloudflared is running ==========
+    - name: Get cloudflared pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: '{{ media_namespace }}'
+        label_selectors: [app=cloudflared]
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: cloudflared_pods
+    - name: Check cloudflared pod status
+      ansible.builtin.assert:
+        that:
+          - cloudflared_pods.resources | length > 0
+          - cloudflared_pods.resources[0].status.phase == "Running"
+        fail_msg: Cloudflared pods are not running!
+        success_msg: Cloudflared is running ({{ cloudflared_pods.resources | length }}
+          pods)
+
+    # ========== PHASE 3: Verify IngressRoutes exist ==========
+    - name: Get all IngressRoutes
+      kubernetes.core.k8s_info:
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        namespace: '{{ media_namespace }}'
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: all_ingressroutes
+    - name: Verify IngressRoutes are valid
+      ansible.builtin.assert:
+        that:
+          - all_ingressroutes.resources | length > 0
+          - item.spec.routes is defined
+          - item.spec.routes | length > 0
+          - item.spec.routes[0] != {}
+        fail_msg: IngressRoute {{ item.metadata.name }} is invalid!
+      loop: '{{ all_ingressroutes.resources }}'
+      loop_control:
+        label: '{{ item.metadata.name }}'
+    - name: Display IngressRoute summary
+      ansible.builtin.debug:
+        msg: Found {{ all_ingressroutes.resources | length }} valid IngressRoutes
+
+    # ========== PHASE 4: Test external HTTPS access ==========
+    - name: Test external HTTPS endpoints
+      ansible.builtin.uri:
+        url: '{{ item.url }}'
+        method: GET
+        status_code: '{{ item.expected_status }}'
+        validate_certs: true
+        follow_redirects: true
+        timeout: 30
+      loop: '{{ test_endpoints }}'
+      loop_control:
+        label: '{{ item.name }}: {{ item.url }}'
+      register: endpoint_tests
+      failed_when: false
+      delegate_to: localhost
+
+    # ========== PHASE 5: Analyze results ==========
+    - name: Count successful tests
+      ansible.builtin.set_fact:
+        successful_count: >-
+          {{ endpoint_tests.results | selectattr('status', 'defined') |
+          selectattr('status', 'equalto', 200) | list | length }}
+    - name: Display test results
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - External Access Test Results
+          - ==========================================
+          - ''
+          - >-
+            Sonarr (https://sonarr.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[0].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - >-
+            Radarr (https://radarr.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[1].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - >-
+            Prowlarr (https://prowl.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[2].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - >-
+            SABnzbd (https://nzb.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[3].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - >-
+            qBittorrent (https://qbit.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[4].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - >-
+            Overseerr (https://req.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[5].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - >-
+            Tautulli (https://stats.{{ domain | default('example.local') }}):
+            {% if endpoint_tests.results[6].status == 200 %}✓ PASS{% else %}✗ FAIL{%
+            endif %}
+          - ''
+          - >-
+            Summary: {{ successful_count }}/{{ test_endpoints | length }} endpoints
+            accessible
+          - ==========================================
+
+    # ========== PHASE 6: Final verification ==========
+    - name: Final verification summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Verification Complete!
+          - ==========================================
+          - ''
+          - 'Infrastructure Status:'
+          - '  Cloudflared: Running ({{ cloudflared_pods.resources | length }} replicas)'
+          - '  IngressRoutes: {{ all_ingressroutes.resources | length }} configured'
+          - '  External HTTPS: {{ successful_count }}/{{ test_endpoints | length
+            }} endpoints accessible'
+          - ''
+          - >-
+            {%
+              if successful_count | int == test_endpoints | length
+            %}All systems operational! ✓{%
+              else
+            %}Some endpoints require attention{%
+              endif
+            %}
+          - ==========================================

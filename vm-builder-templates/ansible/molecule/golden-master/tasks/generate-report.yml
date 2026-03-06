@@ -1,0 +1,185 @@
+---
+# generate-report.yml — Golden master validation report generator
+#
+# Input variables:
+#   validation_results — list of result dicts from all validation files
+#
+# Result formats vary by source:
+#   validate-install.yml: {app, category, rules: [{id, severity, status}]}
+#   validate-verify.yml:  {app, rule, category, severity, status, file}
+#   validate-config/templates/pushsecret/credentials.yml:
+#                         {app, rule, category, severity, files_checked, failures, passed}
+#   validate-negative.yml (merged): {test, name, app, skipped, passed, msg, category: negative}
+#
+# This report normalizes all formats and produces a grouped summary.
+
+# ============================================================
+# 1. NORMALIZE RESULTS INTO FLAT LIST
+# ============================================================
+
+# Install results have a nested 'rules' list that needs flattening.
+# All other results are already flat dicts.
+# NOTE: Jinja2 {% set %} blocks in set_fact produce strings, not lists.
+# We must pipe through | from_yaml to get actual list objects.
+
+- name: "REPORT | Flatten install results"
+  ansible.builtin.set_fact:
+    _flat_install: >-
+      {% set results = [] %}
+      {% for item in validation_results | default([]) %}
+      {%   if item.rules is defined %}
+      {%     for rule in item.rules %}
+      {%       set _ = results.append({
+                 'app': item.app,
+                 'category': item.category | default('install'),
+                 'rule': rule.id,
+                 'severity': rule.severity,
+                 'status': rule.status | trim
+               }) %}
+      {%     endfor %}
+      {%   endif %}
+      {% endfor %}
+      {{ results | to_json }}
+
+- name: "REPORT | Collect non-install results"
+  ansible.builtin.set_fact:
+    _flat_other: >-
+      {% set results = [] %}
+      {% for item in validation_results | default([]) %}
+      {%   if item.rules is not defined and item.category != 'negative' %}
+      {%     set item_status = item.status | default('') | trim %}
+      {%     set status = 'pass' if (item.passed | default(false) or item_status == 'pass') else ('skip' if item_status == 'skip' else 'fail') %}
+      {%     set _ = results.append({
+                 'app': item.app,
+                 'category': item.category | default('unknown'),
+                 'rule': item.rule | default('unknown'),
+                 'severity': item.severity | default('warning'),
+                 'status': status
+               }) %}
+      {%   endif %}
+      {% endfor %}
+      {{ results | to_json }}
+
+- name: "REPORT | Collect negative test results"
+  ansible.builtin.set_fact:
+    _flat_negative: >-
+      {% set results = [] %}
+      {% for item in validation_results | default([]) %}
+      {%   if item.category | default('') == 'negative' %}
+      {%     set status = 'skip' if (item.skipped | default(false)) else ('pass' if (item.passed | default(false)) else 'FAIL') %}
+      {%     set _ = results.append({
+                 'app': item.app,
+                 'category': 'negative',
+                 'rule': item.name | default(item.test | default('unknown')),
+                 'severity': 'critical',
+                 'status': status
+               }) %}
+      {%   endif %}
+      {% endfor %}
+      {{ results | to_json }}
+
+- name: "REPORT | Merge all results"
+  ansible.builtin.set_fact:
+    all_results: "{{ (_flat_install | from_json) + (_flat_other | from_json) + (_flat_negative | from_json) }}"
+
+# ============================================================
+# 2. COMPUTE STATISTICS
+# ============================================================
+
+- name: "REPORT | Compute app list"
+  ansible.builtin.set_fact:
+    _apps_list: "{{ all_results | map(attribute='app') | unique | sort | list }}"
+
+- name: "REPORT | Count totals"
+  ansible.builtin.set_fact:
+    _total_checks: "{{ all_results | length }}"
+    _total_pass: "{{ all_results | selectattr('status', 'equalto', 'pass') | list | length }}"
+    _total_fail: >-
+      {{ all_results | selectattr('status', 'in', ['fail', 'FAIL']) | list | length }}
+    _total_skip: >-
+      {{ all_results | selectattr('status', 'in', ['skip', 'skipped']) | list | length }}
+
+- name: "REPORT | Count by severity"
+  ansible.builtin.set_fact:
+    _critical_fails: >-
+      {{ all_results
+         | selectattr('severity', 'equalto', 'critical')
+         | selectattr('status', 'in', ['fail', 'FAIL'])
+         | list | length }}
+    _warning_fails: >-
+      {{ all_results
+         | selectattr('severity', 'equalto', 'warning')
+         | selectattr('status', 'in', ['fail', 'FAIL'])
+         | list | length }}
+
+# ============================================================
+# 3. BUILD PER-APP FAILURE LIST
+# ============================================================
+
+- name: "REPORT | Build per-app failure details"
+  ansible.builtin.set_fact:
+    _per_app_failures: >-
+      {% set app_failures = {} %}
+      {% for result in all_results %}
+      {%   if result.status in ['fail', 'FAIL'] %}
+      {%     set app = result.app %}
+      {%     if app not in app_failures %}
+      {%       set _ = app_failures.update({app: []}) %}
+      {%     endif %}
+      {%     set _ = app_failures[app].append(result.severity | upper ~ ' [' ~ result.rule ~ '] (' ~ result.category ~ ')') %}
+      {%   endif %}
+      {% endfor %}
+      {{ app_failures }}
+
+# ============================================================
+# 4. DISPLAY REPORT
+# ============================================================
+
+- name: "REPORT | Display header"
+  ansible.builtin.debug:
+    msg:
+      - "========================================================================"
+      - "  GOLDEN MASTER VALIDATION REPORT"
+      - "========================================================================"
+      - ""
+      - "Apps scanned:     {{ _apps_list | length }}"
+      - "Total checks:     {{ _total_checks }}"
+      - "Passed:           {{ _total_pass }}"
+      - "Failed:           {{ _total_fail }}"
+      - "Skipped:          {{ _total_skip }}"
+      - ""
+      - "Critical fails:   {{ _critical_fails }}"
+      - "Warning fails:    {{ _warning_fails }}"
+      - "========================================================================"
+
+- name: "REPORT | Display per-app failures"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.key }}:
+      {% for violation in item.value %}
+        - {{ violation }}
+      {% endfor %}
+  loop: "{{ (_per_app_failures | from_yaml) | dict2items | sort(attribute='key') }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: (_per_app_failures | from_yaml) | length > 0
+
+- name: "REPORT | All apps clean"
+  ansible.builtin.debug:
+    msg: "All apps passed all applicable rules."
+  when: (_per_app_failures | from_yaml) | length == 0
+
+# ============================================================
+# 5. DISPLAY PER-APP SUMMARY TABLE
+# ============================================================
+
+- name: "REPORT | Per-app summary"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item }} —
+      pass: {{ all_results | selectattr('app', 'equalto', item) | selectattr('status', 'equalto', 'pass') | list | length }},
+      fail: {{ all_results | selectattr('app', 'equalto', item) | selectattr('status', 'in', ['fail', 'FAIL']) | list | length }},
+      skip: {{ all_results | selectattr('app', 'equalto', item) | selectattr('status', 'in', ['skip', 'skipped']) | list | length }}
+  loop: "{{ _apps_list }}"
+  loop_control:
+    label: "{{ item }}"

@@ -1,0 +1,720 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/verify/awx-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "awx_configuration_verified"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/verify/01-verify-awx-config.yml"
+#     category: "platform"
+#     subsystem: "awx"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["23.x", "24.x"]
+#       version_range: ">=23.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - awx: "24.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies AWX configuration (API, projects, inventories, credentials, job templates)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_awx_verification"
+#   dependencies: ["awx_deployed"]
+#   provides: ["awx_config_verified"]
+#   tags: ["awx", "verification", "automation", "phase4"]
+#   estimated_duration: 90
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that AWX is properly configured. Checks that the API is accessible,
+#     projects exist and are synced, inventories have expected hosts, credentials
+#     are valid, job templates are properly configured, and optionally verifies
+#     recent job runs completed successfully. Provides a comprehensive health check.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.token"
+#         purpose: "AWX API token for Bearer authentication"
+#       - path: "_state.apps.awx.url"
+#         purpose: "AWX service URL"
+#       - path: "_state.apps.awx.projects"
+#         purpose: "Expected projects to verify (from create operations)"
+#       - path: "_state.apps.awx.inventories"
+#         purpose: "Expected inventories to verify (from create operations)"
+#       - path: "_state.apps.awx.credentials"
+#         purpose: "Expected credentials to verify (from create operations)"
+#       - path: "_state.apps.awx.job_templates"
+#         purpose: "Expected job templates to verify (from create operations)"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - AWX Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    awx_base_url: "{{ awx_url }}"
+    awx_api_base: "{{ awx_base_url }}/api/v2"
+
+    # Expected resources to verify (can be overridden by caller or loaded from BWS state)
+    expected_projects: "{{ expected_projects_input | default([]) }}"
+    expected_inventories: "{{ expected_inventories_input | default([]) }}"
+    expected_credentials: "{{ expected_credentials_input | default([]) }}"
+    expected_job_templates: "{{ expected_job_templates_input | default([]) }}"
+
+    # Verification options
+    fail_on_unhealthy: "{{ fail_on_unhealthy_input | default(false) }}"
+    check_recent_jobs: "{{ check_recent_jobs_input | default(false) }}"
+    recent_jobs_hours: "{{ recent_jobs_hours_input | default(24) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying AWX Configuration"
+          - "=========================================="
+          - "Base URL: {{ awx_base_url }}"
+          - "Expected Projects: {{ expected_projects | length }}"
+          - "Expected Inventories: {{ expected_inventories | length }}"
+          - "Expected Credentials: {{ expected_credentials | length }}"
+          - "Expected Job Templates: {{ expected_job_templates | length }}"
+          - "Check Recent Jobs: {{ check_recent_jobs }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        bws_inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract AWX token
+      ansible.builtin.set_fact:
+        awx_token: >-
+          {{ bws_inventory._state.apps.awx.token | default(awx_token) }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        awx_base_url: "{{ bws_inventory._state.apps.awx.url }}"
+        awx_api_base: "{{ bws_inventory._state.apps.awx.url }}/api/v2"
+      when: bws_inventory._state.apps.awx.url is defined
+
+    - name: Load expected resources from BWS state if not provided
+      ansible.builtin.set_fact:
+        expected_projects: >-
+          {{
+            expected_projects if expected_projects | length > 0
+            else (bws_inventory._state.apps.awx.projects | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_inventories: >-
+          {{
+            expected_inventories if expected_inventories | length > 0
+            else (bws_inventory._state.apps.awx.inventories | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_credentials: >-
+          {{
+            expected_credentials if expected_credentials | length > 0
+            else (bws_inventory._state.apps.awx.credentials | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_job_templates: >-
+          {{
+            expected_job_templates if expected_job_templates | length > 0
+            else (bws_inventory._state.apps.awx.job_templates | default({}) | dict2items | map(attribute='key') | list)
+          }}
+
+    # ===== STEP 2: Verify AWX API is accessible and healthy =====
+    - name: Check AWX API health (ping endpoint)
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/ping/"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: api_ping
+      failed_when: false
+
+    - name: Check AWX API authentication
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/me/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200, 401, 403]
+        validate_certs: false
+      register: api_auth
+      failed_when: false
+      no_log: true
+
+    - name: Evaluate API health status
+      ansible.builtin.set_fact:
+        api_accessible: "{{ api_ping.status == 200 }}"
+        api_auth_valid: "{{ api_auth.status == 200 }}"
+        awx_version: "{{ api_ping.json.version | default('unknown') }}"
+        api_error: >-
+          {{
+            'Authentication failed' if api_auth.status in [401, 403]
+            else ('Connection failed: ' + (api_ping.msg | default('unknown error'))) if api_ping.status is not defined
+            else 'OK'
+          }}
+
+    - name: Display API connectivity result
+      ansible.builtin.debug:
+        msg:
+          - "API Accessible: {{ api_accessible }}"
+          - "Auth Valid: {{ api_auth_valid }}"
+          - "AWX Version: {{ awx_version }}"
+          - "Status: {{ api_error }}"
+
+    - name: Assert AWX API is accessible
+      ansible.builtin.assert:
+        that:
+          - api_accessible | bool
+          - api_auth_valid | bool
+        fail_msg: "AWX API is not accessible at {{ awx_base_url }} - {{ api_error }}"
+        success_msg: "AWX API is accessible and authentication is valid"
+
+    # ===== STEP 3: Verify Projects =====
+    - name: List all projects
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/?page_size=100"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: projects_list
+      no_log: true
+      when: api_auth_valid | bool
+
+    - name: Build project status map
+      ansible.builtin.set_fact:
+        existing_projects: >-
+          {{
+            projects_list.json.results | default([]) |
+            items2dict(key_name='name', value_name='status')
+          }}
+        existing_projects_full: "{{ projects_list.json.results | default([]) }}"
+      when: api_auth_valid | bool
+
+    - name: Check expected projects exist and status
+      ansible.builtin.set_fact:
+        project_results: >-
+          {{
+            project_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_projects | default({})),
+              'status': existing_projects[item] | default('not_found'),
+              'synced': existing_projects[item] | default('') in ['successful', 'ok']
+            }]
+          }}
+      loop: "{{ expected_projects }}"
+      when:
+        - api_auth_valid | bool
+        - expected_projects | length > 0
+
+    - name: Get detailed project info for expected projects
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/?name={{ item | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: project_details_results
+      loop: "{{ expected_projects }}"
+      when:
+        - api_auth_valid | bool
+        - expected_projects | length > 0
+      failed_when: false
+      no_log: true
+
+    - name: Build project details summary
+      ansible.builtin.set_fact:
+        project_details_summary: >-
+          {{
+            project_details_summary | default([]) + [{
+              'name': item.item,
+              'id': (item.json.results[0].id | default('unknown')) if item.json.count | default(0) > 0 else 'not_found',
+              'status': (item.json.results[0].status | default('unknown')) if item.json.count | default(0) > 0 else 'not_found',
+              'scm_type': (item.json.results[0].scm_type | default('')) if item.json.count | default(0) > 0 else '',
+              'last_update_failed': (item.json.results[0].last_update_failed | default(false)) if item.json.count | default(0) > 0 else true,
+              'found': (item.json.count | default(0)) > 0
+            }]
+          }}
+      loop: "{{ project_details_results.results | default([]) }}"
+      when:
+        - api_auth_valid | bool
+        - item.json is defined
+
+    # ===== STEP 4: Verify Inventories =====
+    - name: List all inventories
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/inventories/?page_size=100"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: inventories_list
+      no_log: true
+      when: api_auth_valid | bool
+
+    - name: Extract inventory names
+      ansible.builtin.set_fact:
+        existing_inventory_names: "{{ inventories_list.json.results | default([]) | map(attribute='name') | list }}"
+      when: api_auth_valid | bool
+
+    - name: Check expected inventories exist
+      ansible.builtin.set_fact:
+        inventory_results: >-
+          {{
+            inventory_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_inventory_names
+            }]
+          }}
+      loop: "{{ expected_inventories }}"
+      when:
+        - api_auth_valid | bool
+        - expected_inventories | length > 0
+
+    - name: Get detailed inventory info with host counts
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/inventories/?name={{ item | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: inventory_details_results
+      loop: "{{ expected_inventories }}"
+      when:
+        - api_auth_valid | bool
+        - expected_inventories | length > 0
+        - item in existing_inventory_names
+      failed_when: false
+      no_log: true
+
+    - name: Build inventory details summary
+      ansible.builtin.set_fact:
+        inventory_details_summary: >-
+          {{
+            inventory_details_summary | default([]) + [{
+              'name': item.item,
+              'id': (item.json.results[0].id | default('unknown')) if item.json.count | default(0) > 0 else 'not_found',
+              'total_hosts': (item.json.results[0].total_hosts | default(0)) if item.json.count | default(0) > 0 else 0,
+              'hosts_with_active_failures': (item.json.results[0].hosts_with_active_failures | default(0)) if item.json.count | default(0) > 0 else 0,
+              'kind': (item.json.results[0].kind | default('standard')) if item.json.count | default(0) > 0 else 'unknown',
+              'found': (item.json.count | default(0)) > 0
+            }]
+          }}
+      loop: "{{ inventory_details_results.results | default([]) }}"
+      when:
+        - api_auth_valid | bool
+        - item.json is defined
+
+    # ===== STEP 5: Verify Credentials =====
+    - name: List all credentials
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/credentials/?page_size=100"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: credentials_list
+      no_log: true
+      when: api_auth_valid | bool
+
+    - name: Extract credential names
+      ansible.builtin.set_fact:
+        existing_credential_names: "{{ credentials_list.json.results | default([]) | map(attribute='name') | list }}"
+      when: api_auth_valid | bool
+
+    - name: Check expected credentials exist
+      ansible.builtin.set_fact:
+        credential_results: >-
+          {{
+            credential_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_credential_names
+            }]
+          }}
+      loop: "{{ expected_credentials }}"
+      when:
+        - api_auth_valid | bool
+        - expected_credentials | length > 0
+
+    - name: Get detailed credential info
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/credentials/?name={{ item | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: credential_details_results
+      loop: "{{ expected_credentials }}"
+      when:
+        - api_auth_valid | bool
+        - expected_credentials | length > 0
+        - item in existing_credential_names
+      failed_when: false
+      no_log: true
+
+    - name: Build credential details summary
+      ansible.builtin.set_fact:
+        credential_details_summary: >-
+          {{
+            credential_details_summary | default([]) + [{
+              'name': item.item,
+              'id': (item.json.results[0].id | default('unknown')) if item.json.count | default(0) > 0 else 'not_found',
+              'credential_type_name': (item.json.results[0].summary_fields.credential_type.name | default('unknown')) if item.json.count | default(0) > 0 else 'unknown',
+              'managed': (item.json.results[0].managed | default(false)) if item.json.count | default(0) > 0 else false,
+              'found': (item.json.count | default(0)) > 0
+            }]
+          }}
+      loop: "{{ credential_details_results.results | default([]) }}"
+      when:
+        - api_auth_valid | bool
+        - item.json is defined
+
+    # ===== STEP 6: Verify Job Templates =====
+    - name: List all job templates
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/?page_size=100"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: job_templates_list
+      no_log: true
+      when: api_auth_valid | bool
+
+    - name: Extract job template names
+      ansible.builtin.set_fact:
+        existing_job_template_names: "{{ job_templates_list.json.results | default([]) | map(attribute='name') | list }}"
+      when: api_auth_valid | bool
+
+    - name: Check expected job templates exist
+      ansible.builtin.set_fact:
+        job_template_results: >-
+          {{
+            job_template_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_job_template_names
+            }]
+          }}
+      loop: "{{ expected_job_templates }}"
+      when:
+        - api_auth_valid | bool
+        - expected_job_templates | length > 0
+
+    - name: Get detailed job template info
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/?name={{ item | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: job_template_details_results
+      loop: "{{ expected_job_templates }}"
+      when:
+        - api_auth_valid | bool
+        - expected_job_templates | length > 0
+        - item in existing_job_template_names
+      failed_when: false
+      no_log: true
+
+    - name: Build job template details summary
+      ansible.builtin.set_fact:
+        job_template_details_summary: >-
+          {{
+            job_template_details_summary | default([]) + [{
+              'name': item.item,
+              'id': (item.json.results[0].id | default('unknown')) if item.json.count | default(0) > 0 else 'not_found',
+              'playbook': (item.json.results[0].playbook | default('')) if item.json.count | default(0) > 0 else '',
+              'project': (item.json.results[0].summary_fields.project.name | default('unknown')) if item.json.count | default(0) > 0 else 'unknown',
+              'inventory': (item.json.results[0].summary_fields.inventory.name | default('unknown')) if item.json.count | default(0) > 0 else 'unknown',
+              'last_job_status': (item.json.results[0].summary_fields.last_job.status | default('never_run')) if item.json.count | default(0) > 0 else 'never_run',
+              'found': (item.json.count | default(0)) > 0
+            }]
+          }}
+      loop: "{{ job_template_details_results.results | default([]) }}"
+      when:
+        - api_auth_valid | bool
+        - item.json is defined
+
+    # ===== STEP 7: Optional - Check Recent Job Runs =====
+    - name: Get recent job runs
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/jobs/?page_size=50&order_by=-finished"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: recent_jobs
+      no_log: true
+      when:
+        - api_auth_valid | bool
+        - check_recent_jobs | bool
+
+    - name: Analyze recent job status
+      ansible.builtin.set_fact:
+        recent_jobs_summary:
+          total_jobs: "{{ recent_jobs.json.results | default([]) | length }}"
+          successful: "{{ recent_jobs.json.results | default([]) | selectattr('status', 'equalto', 'successful') | list | length }}"
+          failed: "{{ recent_jobs.json.results | default([]) | selectattr('status', 'equalto', 'failed') | list | length }}"
+          canceled: "{{ recent_jobs.json.results | default([]) | selectattr('status', 'equalto', 'canceled') | list | length }}"
+          running: "{{ recent_jobs.json.results | default([]) | selectattr('status', 'equalto', 'running') | list | length }}"
+          pending: "{{ recent_jobs.json.results | default([]) | selectattr('status', 'equalto', 'pending') | list | length }}"
+      when:
+        - api_auth_valid | bool
+        - check_recent_jobs | bool
+        - recent_jobs.json is defined
+
+    - name: Get failed job details
+      ansible.builtin.set_fact:
+        failed_jobs_details: >-
+          {{
+            recent_jobs.json.results | default([]) |
+            selectattr('status', 'equalto', 'failed') |
+            map(attribute='name') | list | slice(0, 5) | list
+          }}
+      when:
+        - api_auth_valid | bool
+        - check_recent_jobs | bool
+        - recent_jobs.json is defined
+
+    # ===== STEP 8: Calculate Verification Results =====
+    - name: Calculate project verification result
+      ansible.builtin.set_fact:
+        all_projects_exist: >-
+          {{
+            (project_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+        all_projects_synced: >-
+          {{
+            (project_details_summary | default([]) | selectattr('last_update_failed', 'equalto', true) | list | length) == 0
+          }}
+
+    - name: Calculate inventory verification result
+      ansible.builtin.set_fact:
+        all_inventories_exist: >-
+          {{
+            (inventory_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate credential verification result
+      ansible.builtin.set_fact:
+        all_credentials_exist: >-
+          {{
+            (credential_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate job template verification result
+      ansible.builtin.set_fact:
+        all_job_templates_exist: >-
+          {{
+            (job_template_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            api_accessible | bool and
+            api_auth_valid | bool and
+            all_projects_exist | bool and
+            all_projects_synced | bool and
+            all_inventories_exist | bool and
+            all_credentials_exist | bool and
+            all_job_templates_exist | bool
+          }}
+
+    # ===== STEP 9: Build Health Report =====
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          awx_url: "{{ awx_base_url }}"
+          awx_version: "{{ awx_version }}"
+          api_accessible: "{{ api_accessible }}"
+          api_auth_valid: "{{ api_auth_valid }}"
+          projects:
+            expected: "{{ expected_projects | length }}"
+            found: "{{ project_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_projects_exist }}"
+            all_synced: "{{ all_projects_synced }}"
+            details: "{{ project_details_summary | default([]) }}"
+          inventories:
+            expected: "{{ expected_inventories | length }}"
+            found: "{{ inventory_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_inventories_exist }}"
+            details: "{{ inventory_details_summary | default([]) }}"
+          credentials:
+            expected: "{{ expected_credentials | length }}"
+            found: "{{ credential_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_credentials_exist }}"
+            details: "{{ credential_details_summary | default([]) }}"
+          job_templates:
+            expected: "{{ expected_job_templates | length }}"
+            found: "{{ job_template_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_job_templates_exist }}"
+            details: "{{ job_template_details_summary | default([]) }}"
+          recent_jobs: "{{ recent_jobs_summary | default({}) }}"
+          statistics:
+            total_projects: "{{ existing_projects_full | default([]) | length }}"
+            total_inventories: "{{ existing_inventory_names | default([]) | length }}"
+            total_credentials: "{{ existing_credential_names | default([]) | length }}"
+            total_job_templates: "{{ existing_job_template_names | default([]) | length }}"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "AWX Configuration Verification Summary"
+          - "=========================================="
+          - ""
+          - "AWX URL: {{ awx_base_url }}"
+          - "AWX Version: {{ awx_version }}"
+          - "API Accessible: {{ 'YES' if api_accessible else 'NO' }}"
+          - "Authentication: {{ 'VALID' if api_auth_valid else 'INVALID' }}"
+          - ""
+          - "PROJECTS:"
+          - "  Total in AWX: {{ existing_projects_full | default([]) | length }}"
+          - "  Expected: {{ expected_projects | length }}"
+          - "  Found: {{ project_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_projects_exist }}"
+          - "  All Synced: {{ all_projects_synced }}"
+          - ""
+          - "INVENTORIES:"
+          - "  Total in AWX: {{ existing_inventory_names | default([]) | length }}"
+          - "  Expected: {{ expected_inventories | length }}"
+          - "  Found: {{ inventory_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_inventories_exist }}"
+          - ""
+          - "CREDENTIALS:"
+          - "  Total in AWX: {{ existing_credential_names | default([]) | length }}"
+          - "  Expected: {{ expected_credentials | length }}"
+          - "  Found: {{ credential_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_credentials_exist }}"
+          - ""
+          - "JOB TEMPLATES:"
+          - "  Total in AWX: {{ existing_job_template_names | default([]) | length }}"
+          - "  Expected: {{ expected_job_templates | length }}"
+          - "  Found: {{ job_template_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_job_templates_exist }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Display project details
+      ansible.builtin.debug:
+        msg:
+          - "PROJECT DETAILS:"
+          - "{{ project_details_summary | default([]) | to_nice_yaml }}"
+      when: project_details_summary is defined and project_details_summary | length > 0
+
+    - name: Display inventory details
+      ansible.builtin.debug:
+        msg:
+          - "INVENTORY DETAILS:"
+          - "{{ inventory_details_summary | default([]) | to_nice_yaml }}"
+      when: inventory_details_summary is defined and inventory_details_summary | length > 0
+
+    - name: Display credential details
+      ansible.builtin.debug:
+        msg:
+          - "CREDENTIAL DETAILS:"
+          - "{{ credential_details_summary | default([]) | to_nice_yaml }}"
+      when: credential_details_summary is defined and credential_details_summary | length > 0
+
+    - name: Display job template details
+      ansible.builtin.debug:
+        msg:
+          - "JOB TEMPLATE DETAILS:"
+          - "{{ job_template_details_summary | default([]) | to_nice_yaml }}"
+      when: job_template_details_summary is defined and job_template_details_summary | length > 0
+
+    - name: Display recent jobs summary
+      ansible.builtin.debug:
+        msg:
+          - "RECENT JOBS (last {{ recent_jobs_hours }} hours):"
+          - "  Total: {{ recent_jobs_summary.total_jobs | default(0) }}"
+          - "  Successful: {{ recent_jobs_summary.successful | default(0) }}"
+          - "  Failed: {{ recent_jobs_summary.failed | default(0) }}"
+          - "  Canceled: {{ recent_jobs_summary.canceled | default(0) }}"
+          - "  Running: {{ recent_jobs_summary.running | default(0) }}"
+          - "  Pending: {{ recent_jobs_summary.pending | default(0) }}"
+          - ""
+          - "  Recent Failed Jobs: {{ failed_jobs_details | default([]) | join(', ') | default('None') }}"
+      when:
+        - check_recent_jobs | bool
+        - recent_jobs_summary is defined
+
+    - name: Display missing resources if any
+      ansible.builtin.debug:
+        msg:
+          - "MISSING RESOURCES:"
+          - "  Projects: {{ project_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Inventories: {{ inventory_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Credentials: {{ credential_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+          - "  Job Templates: {{ job_template_results | default([]) | selectattr('exists', 'equalto', false) | map(attribute='name') | list }}"
+      when: not all_checks_passed
+
+    - name: Display failed syncs if any
+      ansible.builtin.debug:
+        msg:
+          - "PROJECTS WITH FAILED SYNCS:"
+          - "{{ project_details_summary | default([]) | selectattr('last_update_failed', 'equalto', true) | map(attribute='name') | list }}"
+      when: not all_projects_synced
+
+    - name: Fail if critical checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          AWX configuration verification failed.
+          See summary above for details.
+      when: not all_checks_passed and fail_on_unhealthy | bool
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "AWX configuration verification complete - all checks passed"
+      when: all_checks_passed

@@ -1,0 +1,134 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sabnzbd/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sabnzbd/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "sabnzbd"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["sabnzbd_deployed"]
+#   provides: ["sabnzbd_api_configured"]
+#   tags: ["sabnzbd", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure SABnzbd access control for Tailscale Ingress.
+#     Sets inet_exposure=4 (full access) and adds the Tailscale
+#     hostname to host_whitelist so requests via the operator
+#     proxy are not blocked.
+#   requires_apps: ["sabnzbd"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "tailscale.tailnet_key"
+#         purpose: "Pointer to tailnet name for host_whitelist"
+#     writes:
+#       - path: "_state.apps.sabnzbd.configured"
+#         example: true
+
+- name: Configure SABnzbd access control
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    sabnzbd_namespace: "media-stack"
+    app_namespace: "{{ sabnzbd_namespace }}"
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+
+  tasks:
+    # ========== CHECK IF SABNZBD IS DEPLOYED ==========
+    - name: Check if SABnzbd pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=sabnzbd --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: sabnzbd_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if SABnzbd not deployed
+      ansible.builtin.debug:
+        msg: "SABnzbd not deployed - skipping configuration"
+      when: sabnzbd_pod_check.rc != 0 or sabnzbd_pod_check.stdout | length == 0
+
+    - name: End play if SABnzbd not available
+      ansible.builtin.meta: end_play
+      when: sabnzbd_pod_check.rc != 0 or sabnzbd_pod_check.stdout | length == 0
+
+    # ========== RESOLVE TAILNET NAME ==========
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    - name: Resolve tailnet from pointer key
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ inventory.tailscale.tailnet_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: tailnet_raw
+      changed_when: false
+
+    - name: Set tailnet value
+      ansible.builtin.set_fact:
+        tailnet: "{{ tailnet_raw.stdout | trim }}"
+
+    # ========== CONFIGURE ACCESS CONTROL ==========
+    - name: Set inet_exposure to full access (Tailscale is the auth layer)
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ sabnzbd_pod_name }} -- \
+          sed -i 's/^inet_exposure = .*/inet_exposure = 4/' /config/sabnzbd.ini
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: inet_result
+      changed_when: true
+
+    - name: Add Tailscale hostname to host_whitelist
+      ansible.builtin.shell: |
+        kubectl exec -n {{ app_namespace }} {{ sabnzbd_pod_name }} -- \
+          sed -i 's/^host_whitelist = .*/host_whitelist = {{ sabnzbd_pod_name }}, sabnzbd.{{ tailnet }},/' /config/sabnzbd.ini
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: whitelist_result
+      changed_when: true
+
+    # ========== RESTART TO APPLY ==========
+    - name: Restart SABnzbd to apply config changes
+      ansible.builtin.command:
+        cmd: kubectl rollout restart statefulset sabnzbd -n {{ app_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: true
+
+    - name: Wait for SABnzbd to be ready
+      ansible.builtin.command:
+        cmd: kubectl -n {{ app_namespace }} wait --for=condition=ready pod/{{ sabnzbd_pod_name }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "SABnzbd Configuration Complete"
+          - "=========================================="
+          - "inet_exposure: 4 (full access)"
+          - "host_whitelist: {{ sabnzbd_pod_name }}, sabnzbd.{{ tailnet }}"
+          - "=========================================="

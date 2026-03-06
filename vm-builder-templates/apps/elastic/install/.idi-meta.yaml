@@ -1,0 +1,18 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-apply-kustomize.yml:
+    summary: Deploy Elasticsearch via Kustomize
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ templates_dir }}/configmap.yaml.j2'
+    - '{{ templates_dir }}/statefulset.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+    - '{{ templates_dir }}/elasticsearch-service.yaml.j2'
+    - '{{ templates_dir }}/kibana-deployment.yaml.j2'
+    - '{{ templates_dir }}/kibana-service.yaml.j2'
+  02-verify.yml:
+    summary: Verify Elasticsearch deployment is healthy
+    source: inferred
+    confidence: medium

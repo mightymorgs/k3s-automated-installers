@@ -1,0 +1,25 @@
+# Phase 5 Testbed VM Config
+# Deploy with: vm-builder vm create --config vm-builder/configs/testbed-phase5.yaml
+
+vm_name: homelab-k3s-master-test-testbed-libvirt-latest
+size: large
+platform: libvirt
+
+# Apps: media stack + required platform deps (vault, external-secrets auto-included by workflow)
+apps:
+  selected_apps:
+    - sonarr
+    - radarr
+    - prowlarr
+    - sabnzbd
+
+# Tailscale ingress for Phase 5 testing
+ingress_mode: tailscale
+
+# Storage: NAS SMB mount for media apps
+storage_location: office
+storage_mounts:
+  - share_id: media-smb
+    mount_type: smb
+    source: "//192.168.0.103/NAS"
+    mount_point: /mnt/nas

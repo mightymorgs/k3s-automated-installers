@@ -1,0 +1,190 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sonarr/06-wire-qbittorrent"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sonarr/config/06-wire-qbittorrent.yml"
+#     category: "apps"
+#     subsystem: "sonarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["sonarr_deployed", "qbittorrent_deployed"]
+#   provides: ["sonarr_qbittorrent_wired"]
+#   tags: ["sonarr", "qbittorrent", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Register qBittorrent as torrent download client in Sonarr and create tv-sonarr category
+#   requires_apps: ["sonarr", "qbittorrent"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.sonarr.api_key"
+
+- name: Wire qBittorrent into Sonarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    qbittorrent_namespace: "media-stack"
+    sonarr_namespace: "media-stack"
+    app_namespace: "{{ sonarr_namespace }}"
+    # sonarr_url: from BWS _state via Phase 4 extra-vars
+    # qbittorrent_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF QBITTORRENT NOT INSTALLED ==========
+    - name: Skip if qbittorrent is not installed on this VM
+      when: qbittorrent_url is not defined
+      block:
+        - name: "qbittorrent not installed — skipping sonarr <-> qbittorrent wiring"
+          ansible.builtin.debug:
+            msg: "qbittorrent is not installed on this VM (no qbittorrent_url in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if sonarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "sonarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sonarr_api_key is not defined or sonarr_api_key | length == 0
+
+    # ========== VERIFY SONARR API ==========
+    - name: Verify Sonarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Sonarr API not accessible
+      ansible.builtin.fail:
+        msg: "Sonarr API not accessible at {{ sonarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== VERIFY QBITTORRENT API ==========
+    # qBittorrent WebUI auth bypass is configured for pod/Tailscale CIDRs
+    # (01-configure-auth.yml), so we can access without login from Tailscale.
+    - name: Verify qBittorrent API is accessible
+      ansible.builtin.uri:
+        url: "{{ qbittorrent_url }}/api/v2/app/version"
+        method: GET
+        return_content: true
+      register: qbt_version
+      retries: 5
+      delay: 10
+      until: qbt_version.status is defined and qbt_version.status == 200
+      failed_when: false
+
+    - name: Fail if qBittorrent API not accessible
+      ansible.builtin.fail:
+        msg: "qBittorrent API not accessible at {{ qbittorrent_url }} (status: {{ qbt_version.status | default('no response') }}). App is installed but API unreachable."
+      when: qbt_version.status is not defined or qbt_version.status != 200
+
+    # ========== CREATE TV-SONARR CATEGORY IN QBITTORRENT ==========
+    - name: Get existing qBittorrent categories
+      ansible.builtin.uri:
+        url: "{{ qbittorrent_url }}/api/v2/torrents/categories"
+        method: GET
+        return_content: true
+      register: qbt_categories
+
+    - name: Check if tv-sonarr category exists
+      ansible.builtin.set_fact:
+        tv_sonarr_cat_exists: "{{ 'tv-sonarr' in (qbt_categories.json | default({})) }}"
+
+    - name: Create tv-sonarr category in qBittorrent
+      ansible.builtin.uri:
+        url: "{{ qbittorrent_url }}/api/v2/torrents/createCategory"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          category: "tv-sonarr"
+          savePath: "/downloads/tv-sonarr"
+        status_code: [200]
+      register: create_tv_sonarr_cat
+      when: not tv_sonarr_cat_exists
+
+    # ========== REGISTER QBITTORRENT AS DOWNLOAD CLIENT IN SONARR ==========
+    - name: Get existing download clients
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/downloadclient"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        status_code: [200]
+      register: existing_download_clients
+
+    - name: Check if qBittorrent download client exists
+      ansible.builtin.set_fact:
+        qbt_client_exists: "{{ (existing_download_clients.json | selectattr('name', 'equalto', 'qBittorrent') | list | length) > 0 }}"
+
+    - name: Add qBittorrent as download client (Torrent)
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          enable: true
+          protocol: "torrent"
+          priority: 1
+          name: "qBittorrent"
+          implementation: "QBittorrent"
+          configContract: "QBittorrentSettings"
+          fields:
+            - name: "host"
+              value: "{{ qbittorrent_service_name }}.{{ qbittorrent_namespace }}.svc.cluster.local"
+            - name: "port"
+              value: "{{ qbittorrent_service_port }}"
+            - name: "useSsl"
+              value: false
+            - name: "urlBase"
+              value: ""
+            - name: "username"
+              value: ""
+            - name: "password"
+              value: ""
+            - name: "tvCategory"
+              value: "tv-sonarr"
+            - name: "tvImportedCategory"
+              value: ""
+            - name: "recentTvPriority"
+              value: 0
+            - name: "olderTvPriority"
+              value: 0
+            - name: "initialState"
+              value: 0
+            - name: "sequentialOrder"
+              value: false
+            - name: "firstAndLast"
+              value: false
+        status_code: [200, 201]
+        return_content: true
+      register: add_qbt_result
+      when: not qbt_client_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Sonarr <-> qBittorrent Wiring Complete"
+          - "=========================================="
+          - "qBittorrent version: {{ qbt_version.content | default('unknown') }}"
+          - "qBittorrent category: tv-sonarr ({{ 'created' if not tv_sonarr_cat_exists else 'exists' }})"
+          - "Download client: qBittorrent ({{ 'added' if (not qbt_client_exists and add_qbt_result is defined and add_qbt_result.status | default(0) in [200, 201]) else ('exists' if qbt_client_exists else 'FAILED') }})"
+          - "=========================================="

@@ -1,0 +1,100 @@
+---
+# Teleport StatefulSet (J2 template)
+# Defaults match k8s-base/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('teleport') }}
+  namespace: {{ app_namespace | default('teleport') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('teleport') }}
+    app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+    app.kubernetes.io/part-of: golden-master
+spec:
+  serviceName: {{ app_name | default('teleport') }}
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ app_name | default('teleport') }}
+      app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ app_name | default('teleport') }}
+        app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      serviceAccountName: {{ app_name | default('teleport') }}
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: {{ app_name | default('teleport') }}
+          image: {{ image | default('public.ecr.aws/gravitational/teleport-distroless:16.4.12') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          args:
+            - --config={{ config_file | default('/etc/teleport/teleport.yaml') }}
+          ports:
+            - name: ssh-proxy
+              containerPort: 3023
+              protocol: TCP
+            - name: tunnel
+              containerPort: 3024
+              protocol: TCP
+            - name: auth
+              containerPort: 3025
+              protocol: TCP
+            - name: kube
+              containerPort: 3027
+              protocol: TCP
+            - name: web
+              containerPort: {{ web_port | default(3080) }}
+              protocol: TCP
+          resources:
+            requests:
+              memory: {{ memory_request | default('256Mi') }}
+              cpu: {{ cpu_request | default('250m') }}
+            limits:
+              memory: {{ memory_limit | default('512Mi') }}
+              cpu: {{ cpu_limit | default('1000m') }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/teleport
+            - name: config
+              mountPath: /etc/teleport
+          livenessProbe:
+            httpGet:
+              path: /webapi/ping
+              port: {{ web_port | default(3080) }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ liveness_initial_delay | default(60) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /webapi/ping
+              port: {{ web_port | default(3080) }}
+              scheme: HTTPS
+            initialDelaySeconds: {{ readiness_initial_delay | default(30) }}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 5
+      volumes:
+        - name: config
+          configMap:
+            name: {{ app_name | default('teleport') }}-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: {{ app_name | default('teleport') }}
+          app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ data_storage_size | default('10Gi') }}

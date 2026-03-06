@@ -1,0 +1,47 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  clustersecretstore-create.yml:
+    summary: Create a cluster-scoped ClusterSecretStore for External Secrets Operator.
+      ClusterSecretStores can be referenced from any namespace in the cluster. Supports
+      Vault (with Kubernetes auth, token auth, AppRole) and BWS providers. This operation
+      is idempotent - existing stores are updated in place.
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: vault
+        field: url
+      - app: vault
+        field: ca_cert
+      writes_to:
+      - app: external_secrets
+        field: clustersecretstores
+  externalsecret-create.yml:
+    summary: Create an ExternalSecret to sync secrets from an external provider (Vault,
+      BWS, etc.) into a Kubernetes Secret. Supports individual key mapping, dataFrom
+      for bulk sync, and templating for custom Secret formats. This operation is idempotent.
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: external_secrets
+        field: secretstores
+      writes_to:
+      - app: '{app}'
+        field: secrets
+  secretstore-create.yml:
+    summary: Create a namespace-scoped SecretStore for External Secrets Operator.
+      Supports Vault (with Kubernetes auth, token auth, AppRole) and BWS providers.
+      This operation is idempotent - existing SecretStores are updated in place.
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: vault
+        field: url
+      - app: vault
+        field: ca_cert
+      writes_to:
+      - app: external_secrets
+        field: secretstores

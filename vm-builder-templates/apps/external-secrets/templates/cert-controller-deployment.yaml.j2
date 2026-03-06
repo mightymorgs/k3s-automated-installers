@@ -1,0 +1,87 @@
+{#
+  External Secrets Operator — Cert-Controller Deployment
+
+  Generated from helm template external-secrets v0.9.13, parameterized.
+  The cert-controller generates and rotates TLS certificates for the
+  webhook, populates the webhook Secret, and patches the caBundle into
+  the ValidatingWebhookConfiguration and CRDs.
+
+  Variables:
+    - eso_version: ESO container image tag (default: "v0.9.13")
+    - app_namespace: Kubernetes namespace (default: "external-secrets")
+    - eso_certctrl_cpu_requests: CPU request (default: "10m")
+    - eso_certctrl_cpu_limits: CPU limit (default: "50m")
+    - eso_certctrl_memory_requests: Memory request (default: "32Mi")
+    - eso_certctrl_memory_limits: Memory limit (default: "64Mi")
+#}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-secrets-cert-controller
+  namespace: {{ app_namespace | default('external-secrets') }}
+  labels:
+    app.kubernetes.io/name: external-secrets-cert-controller
+    app.kubernetes.io/instance: external-secrets
+    app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+    app.kubernetes.io/component: cert-controller
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets-cert-controller
+      app.kubernetes.io/instance: external-secrets
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: external-secrets-cert-controller
+        app.kubernetes.io/instance: external-secrets
+        app.kubernetes.io/version: {{ eso_version | default('v0.9.13') | quote }}
+        app.kubernetes.io/component: cert-controller
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      serviceAccountName: external-secrets-cert-controller
+      automountServiceAccountToken: true
+      hostNetwork: false
+      containers:
+      - name: cert-controller
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        image: ghcr.io/external-secrets/external-secrets:{{ eso_version | default('v0.9.13') }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - certcontroller
+        - --crd-requeue-interval=5m
+        - --service-name=external-secrets-webhook
+        - --service-namespace={{ app_namespace | default('external-secrets') }}
+        - --secret-name=external-secrets-webhook
+        - --secret-namespace={{ app_namespace | default('external-secrets') }}
+        - --metrics-addr=:8080
+        - --healthz-addr=:8081
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+          name: metrics
+        readinessProbe:
+          httpGet:
+            port: 8081
+            path: /readyz
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: {{ eso_certctrl_cpu_requests | default('10m') | quote }}
+            memory: {{ eso_certctrl_memory_requests | default('32Mi') | quote }}
+          limits:
+            cpu: {{ eso_certctrl_cpu_limits | default('50m') | quote }}
+            memory: {{ eso_certctrl_memory_limits | default('64Mi') | quote }}

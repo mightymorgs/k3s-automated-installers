@@ -1,0 +1,23 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  configmap.yaml:
+    summary: 'K8s ConfigMap: configmap.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  service.yaml:
+    summary: 'K8s Service: service.yaml'
+    source: inferred
+    confidence: medium
+  statefulset.yaml:
+    summary: 'K8s StatefulSet: statefulset.yaml'
+    source: inferred
+    confidence: medium

@@ -1,0 +1,126 @@
+---
+# playbook_metadata:
+#   id: "atomic/hypervisor/qemu/04-install-tools"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/hypervisor/qemu/04-install-tools.yml"
+#     category: "hypervisor"
+#     subsystem: "qemu"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "terraform"
+#       folder_version: null
+#       supported_versions: ["1.5.x", "1.6.x", "1.7.x", "1.8.x", "1.9.x"]
+#       version_range: ">=1.5.0"
+#
+#     requires:
+#       libvirt_installed: true
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - terraform: "1.9.x"
+#         terragrunt: "0.68.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-22"
+#         notes: "Tested with Terraform Cloud backend for state management"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["libvirt_installed"]
+#   provides: ["terraform_installed", "terragrunt_installed"]
+#   tags: ["terraform", "terragrunt", "iac", "hypervisor", "tools"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Install Terraform and Terragrunt on hypervisor for VM provisioning.
+#     Required for executing Terragrunt commands on hypervisor (Phase 2 deployment).
+
+- name: Install Terraform and Terragrunt
+  hosts: hypervisor
+  become: true
+
+  tasks:
+    - name: Check if Terraform is installed
+      ansible.builtin.command:
+        cmd: which terraform
+      register: terraform_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Terraform
+      when: terraform_check.rc != 0
+      block:
+        - name: Add HashiCorp GPG key
+          ansible.builtin.apt_key:
+            url: https://apt.releases.hashicorp.com/gpg
+            keyring: /etc/apt/keyrings/hashicorp.gpg
+            state: present
+
+        - name: Add HashiCorp repository
+          ansible.builtin.apt_repository:
+            repo: >-
+              deb [signed-by=/etc/apt/keyrings/hashicorp.gpg]
+              https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main
+            state: present
+            filename: hashicorp
+
+        - name: Install Terraform
+          ansible.builtin.apt:
+            name: terraform
+            state: present
+            update_cache: true
+
+    - name: Check if Terragrunt is installed
+      ansible.builtin.command:
+        cmd: which terragrunt
+      register: terragrunt_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Terragrunt
+      when: terragrunt_check.rc != 0
+      block:
+        - name: Download Terragrunt binary
+          ansible.builtin.get_url:
+            url: https://github.com/gruntwork-io/terragrunt/releases/download/v0.68.12/terragrunt_linux_amd64
+            dest: /tmp/terragrunt
+            mode: '0755'
+
+        - name: Install Terragrunt to /usr/local/bin
+          ansible.builtin.copy:
+            src: /tmp/terragrunt
+            dest: /usr/local/bin/terragrunt
+            mode: '0755'
+            remote_src: true
+
+        - name: Remove temporary Terragrunt file
+          ansible.builtin.file:
+            path: /tmp/terragrunt
+            state: absent
+
+    - name: Verify Terraform installation
+      ansible.builtin.command:
+        cmd: terraform version
+      register: terraform_version
+      changed_when: false
+
+    - name: Verify Terragrunt installation
+      ansible.builtin.command:
+        cmd: terragrunt --version
+      register: terragrunt_version
+      changed_when: false
+
+    - name: Display tool versions
+      ansible.builtin.debug:
+        msg: |
+          Installed tools:
+          - Terraform: {{ terraform_version.stdout }}
+          - Terragrunt: {{ terragrunt_version.stdout }}

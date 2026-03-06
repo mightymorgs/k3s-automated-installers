@@ -1,0 +1,21 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-cleanup-tunnel-and-dns.yml:
+    summary: 'Clean up all Cloudflare resources for a VM: delete DNS CNAME records,
+      delete the Cloudflare Tunnel, and clear BWS state. Used during VM destroy.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records?type=CNAME&name={{
+      item }}
+    - https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records/{{ item.json.result[0].id
+      }}
+    - https://api.cloudflare.com/client/v4/accounts/{{ cf_account_id }}/cfd_tunnel/{{
+      tunnel_id }}/connections
+    - https://api.cloudflare.com/client/v4/accounts/{{ cf_account_id }}/cfd_tunnel/{{
+      tunnel_id }}
+  01-remove.yml:
+    summary: 'Manifest: 01-remove.yml'
+    source: inferred
+    confidence: medium

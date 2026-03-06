@@ -1,0 +1,151 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["vault_deployed"]
+#   provides: ["vault_ui_configured"]
+#   tags: ["vault", "api", "configuration", "zero-touch"]
+#   estimated_duration: 90
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Vault UI accessibility for Tailscale Ingress mode.
+#     Sets VAULT_UI, VAULT_API_ADDR, and VAULT_CLUSTER_ADDR environment
+#     variables on the Vault StatefulSet so the UI and API work correctly
+#     behind a Tailscale proxy. Vault still requires token-based login
+#     (auth cannot be disabled for a secrets engine). This playbook
+#     ensures the UI is ACCESSIBLE, not auth-bypassed.
+#   requires_apps: ["vault"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.vault.ui_configured"
+#         example: true
+
+- name: Configure Vault UI access for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    vault_namespace: "vault"
+    vault_port: 8200
+    # vault_url: from BWS _state via Phase 4 extra-vars
+    vault_api_url: "{{ vault_url }}"
+
+  tasks:
+    # ========== 1. CHECK IF VAULT IS DEPLOYED ==========
+    - name: Check if Vault pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ vault_namespace }} -l app.kubernetes.io/name=vault --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: vault_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Vault not deployed
+      ansible.builtin.debug:
+        msg: "Vault pod not found in namespace {{ vault_namespace }} - skipping UI configuration"
+      when: vault_pod_check.rc != 0 or vault_pod_check.stdout | length == 0
+
+    - name: End play if Vault not available
+      ansible.builtin.meta: end_play
+      when: vault_pod_check.rc != 0 or vault_pod_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Vault pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app.kubernetes.io/name=vault \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app=vault \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    - name: Validate vault_url is provided for VAULT_API_ADDR
+      ansible.builtin.assert:
+        that:
+          - vault_url is defined
+          - vault_url | length > 0
+        fail_msg: >-
+          vault_url must be provided via BWS extra-vars (e.g. http://vault.morgs.info:30820).
+          This is the external URL clients use to reach Vault. Cannot set VAULT_API_ADDR without it.
+
+    # ========== 2. ENABLE VAULT UI ==========
+    # Set VAULT_UI=true so the web UI is served at the root path.
+    - name: Enable Vault UI via environment variable
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env statefulset/vault -n {{ vault_namespace }}
+          VAULT_UI=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: ui_env_result
+      changed_when: "'updated' in ui_env_result.stdout"
+
+    # ========== 3. CONFIGURE API AND CLUSTER ADDRESSES ==========
+    # VAULT_API_ADDR tells Vault the external address clients use to reach it.
+    # This must include the Tailscale hostname so redirect URLs and CSRF
+    # validation work correctly behind the Tailscale proxy.
+    # VAULT_CLUSTER_ADDR is the address Vault nodes use for internal
+    # cluster communication (raft replication, request forwarding).
+    - name: Set VAULT_API_ADDR and VAULT_CLUSTER_ADDR for Tailscale access
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env statefulset/vault -n {{ vault_namespace }}
+          VAULT_API_ADDR={{ vault_url }}
+          VAULT_CLUSTER_ADDR=http://{{ app_pod.stdout }}.vault-internal.{{ vault_namespace }}.svc.cluster.local:{{ vault_port + 1 }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: addr_env_result
+      changed_when: "'updated' in addr_env_result.stdout"
+
+    # ========== 4. WAIT FOR ROLLOUT ==========
+    # StatefulSet rolling update restarts vault-0, which triggers a seal.
+    # The rollout completes when the new pod is Running (Vault starts sealed).
+    - name: Wait for Vault StatefulSet rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status statefulset/vault
+          -n {{ vault_namespace }}
+          --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: rollout_result
+      changed_when: false
+
+    # ========== 5. ENSURE VAULT IS UNSEALED AFTER ROLLOUT ==========
+    # StatefulSet env changes trigger a rolling restart, which re-seals Vault.
+    # Unseal it so subsequent config playbooks find Vault ready.
+    - name: Ensure Vault is unsealed after rollout
+      ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+
+    # ========== 6. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault UI Configuration Complete"
+          - "=========================================="
+          - "UI Enabled: true (VAULT_UI=true)"
+          - "API Address: {{ vault_url }}"
+          - "Cluster Address: http://{{ app_pod.stdout }}.vault-internal.{{ vault_namespace }}.svc.cluster.local:{{ vault_port + 1 }}"
+          - "Auth: Token-based (cannot be disabled for Vault)"
+          - "Auth Layer: Tailscale (network access) + Vault token (app login)"
+          - "Unsealed: {{ vault_is_unsealed | default(false) }}"
+          - "=========================================="

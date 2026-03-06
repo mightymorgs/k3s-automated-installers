@@ -1,0 +1,239 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/install/02-verify.yml"
+#     category: "apps"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["latest"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - longhorn: "latest"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-28"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260128_longhorn_install"
+#   dependencies: []
+#   provides: ["longhorn_verified", "longhorn_healthy"]
+#   tags: ["longhorn", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify Longhorn deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.longhorn.verified"
+#         example: true
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "longhorn"
+#     service_name: "longhorn-frontend"
+#     service_port: 8000
+#     namespace: "longhorn-system"
+#
+#     # Ingress mode from inventory
+#     mode_from_inventory: "ingress.mode"
+#
+#     # Cloudflare Tunnel mode
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#
+#       # Origin certificate (Cloudflare -> Traefik HTTPS)
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#
+#     # Tailscale MagicDNS mode
+#     tailscale:
+#       in_cluster: true
+#
+#       # Tailscale certificate
+#       cert:
+#         method: "tailscale-cert"
+#
+#     # Path routing
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#
+#     # ForwardAuth middleware configuration
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#
+#     # Bypass SSO for these paths
+#     bypass_paths: []
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Longhorn"
+#     icon: "hard-drive"
+#     category: "Storage"
+#     description: "Cloud native distributed storage for Kubernetes"
+#     docs_url: "https://longhorn.io/docs/"
+#     port: 8000
+#     nodeport: 30800
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     longhorn_version:
+#       label: "Longhorn Version"
+#       description: "Longhorn container image tag (applies to manager, engine, instance-manager, share-manager)"
+#       type: "string"
+#       default: "v1.6.0"
+#     namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace for Longhorn"
+#       type: "string"
+#       default: "longhorn-system"
+#     storage_class_name:
+#       label: "Default StorageClass Name"
+#       description: "Name of the default Longhorn StorageClass"
+#       type: "string"
+#       default: "longhorn"
+#     replicas:
+#       label: "Volume Replicas"
+#       description: "Default number of volume replicas"
+#       type: "integer"
+#       default: "3"
+#     is_default:
+#       label: "Default StorageClass"
+#       description: "Set as cluster default StorageClass"
+#       type: "boolean"
+#       default: "true"
+#     data_locality:
+#       label: "Data Locality"
+#       description: "Data locality policy (best-effort or strict-local)"
+#       type: "string"
+#       default: "best-effort"
+#     reclaim_policy:
+#       label: "Reclaim Policy"
+#       description: "PV reclaim policy (Delete or Retain)"
+#       type: "string"
+#       default: "Delete"
+
+- name: Verify Longhorn Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: "longhorn"
+    app_namespace: "longhorn-system"
+    container_port: 8000
+    health_path: "/v1"
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. VERIFY PODS RUNNING ==========
+    - name: Check pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app=longhorn-manager
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.rc != 0 or pod_phase.stdout != 'Running'
+      retries: 6
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_phase.rc == 0 and pod_phase.stdout == 'Running'
+
+    # ========== 2. GET READY POD NAME ==========
+    - name: Get ready pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app=longhorn-manager
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 3. HEALTH CHECK (block/rescue) ==========
+    - name: Health check block
+      block:
+        - name: Test health endpoint (auto-detect curl/wget)
+          ansible.builtin.command: >-
+            kubectl exec -n {{ app_namespace }} {{ app_pod.stdout }} --
+            /bin/sh -c "command -v curl >/dev/null
+            && curl -sf --max-time {{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}
+            || wget -q -O - --timeout={{ health_probe_timeout_seconds }} http://127.0.0.1:{{ container_port }}{{ health_path }}"
+          register: health_check
+          changed_when: false
+          failed_when: health_check.rc != 0
+          retries: 3
+          delay: "{{ retry_interval_seconds }}"
+          until: health_check.rc == 0
+
+      rescue:
+        - name: Capture failure diagnostics
+          ansible.builtin.set_fact:
+            health_failure:
+              app: "{{ app_name }}"
+              namespace: "{{ app_namespace }}"
+              pod: "{{ app_pod.stdout | default('unknown') }}"
+              endpoint: "http://127.0.0.1:{{ container_port }}{{ health_path }}"
+              rc: "{{ health_check.rc | default('N/A') }}"
+              stderr: "{{ health_check.stderr | default('') | truncate(500) }}"
+              stdout: "{{ health_check.stdout | default('') | truncate(500) }}"
+
+        - name: Fail with diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Health check failed for {{ app_name }}.
+              Diagnostics: {{ health_failure | to_nice_json }}
+
+    # ========== 4. VERIFY SERVICES ==========
+    - name: Check Longhorn frontend service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc longhorn-frontend
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 5. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Longhorn Verification Summary"
+          - "=========================================="
+          - "Pod Phase:      {{ pod_phase.stdout | default('UNKNOWN') }} — {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "Ready Pod:      {{ app_pod.stdout | default('NONE') }} — {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Health Check:   {{ health_path }} — {{ 'OK' if health_check.rc == 0 else 'FAILED' }}"
+          - "Service:        {{ service_check.stdout | default('NONE') }} — {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

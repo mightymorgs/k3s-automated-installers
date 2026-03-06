@@ -1,0 +1,111 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["grafana_deployed"]
+#   provides: ["grafana_api_configured"]
+#   tags: ["grafana", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable anonymous access for Grafana in Tailscale mode.
+#     Patches the Grafana deployment with GF_AUTH_ANONYMOUS_ENABLED=true
+#     so users on the tailnet can access dashboards without logging in.
+#     Tailscale provides the authentication layer.
+#   requires_apps: ["grafana"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.grafana.configured"
+#         example: true
+
+- name: Configure Grafana anonymous access for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== CHECK IF GRAFANA IS DEPLOYED ==========
+    - name: Check if Grafana pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=grafana --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: grafana_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Grafana not deployed
+      ansible.builtin.debug:
+        msg: "Grafana not deployed - skipping API configuration"
+      when: grafana_pod_check.rc != 0 or grafana_pod_check.stdout | length == 0
+
+    - name: End play if Grafana not available
+      ansible.builtin.meta: end_play
+      when: grafana_pod_check.rc != 0 or grafana_pod_check.stdout | length == 0
+
+    # ========== PATCH DEPLOYMENT WITH ANONYMOUS ACCESS ENV VARS ==========
+    - name: Enable anonymous access via environment variables
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env deployment/grafana -n {{ app_namespace }}
+          GF_AUTH_ANONYMOUS_ENABLED=true
+          GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: env_patch_result
+      changed_when: "'updated' in env_patch_result.stdout"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Grafana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/grafana -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== VERIFY GRAFANA IS ACCESSIBLE ==========
+    - name: Verify Grafana health endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Grafana not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Grafana not accessible after rollout (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana API Configuration Complete"
+          - "=========================================="
+          - "Anonymous Access: Enabled"
+          - "Anonymous Org Role: Viewer"
+          - "Auth Layer: Tailscale (built-in login bypassed)"
+          - "Health Check: {{ grafana_url }}/api/health ({{ health_check.status }})"
+          - "=========================================="

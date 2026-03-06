@@ -1,0 +1,178 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/verification/05-verify-https-endpoints"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/verification/05-verify-https-endpoints.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       cloudflared: ">=2024.0.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "Tests 8 HTTPS endpoints with retries and generates verification report"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "cloudflare_tunnel_deployed"]
+#   provides: ["https_endpoints_verified"]
+#   tags: ["k3s", "verification", "https", "endpoints"]
+#   estimated_duration: 120
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify all HTTPS endpoints are accessible via Cloudflare tunnel
+- name: Verify HTTPS endpoints
+  hosts: localhost
+  gather_facts: false
+  become: false
+  vars:
+    endpoints:
+      - url: https://sonarr.{{ domain | default('example.local') }}
+        name: Sonarr
+        expected_status: 200
+      - url: https://radarr.{{ domain | default('example.local') }}
+        name: Radarr
+        expected_status: 200
+      - url: https://prowl.{{ domain | default('example.local') }}
+        name: Prowlarr
+        expected_status: 200
+      - url: https://nzb.{{ domain | default('example.local') }}
+        name: NZBGet
+        expected_status: 200
+      - url: https://qbit.{{ domain | default('example.local') }}
+        name: qBittorrent
+        expected_status: 200
+      - url: https://req.{{ domain | default('example.local') }}
+        name: Requestrr
+        expected_status: 200
+      - url: https://pstat.{{ domain | default('example.local') }}
+        name: Plex Stats
+        expected_status: 200
+      - url: https://auth.{{ domain | default('example.local') }}
+        name: Authentik
+        expected_status: 200
+    verification_timeout: 30
+    max_retries: 3
+    retry_delay: 10
+  tasks:
+    - name: Display verification information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - HTTPS Endpoints Verification
+          - ==========================================
+          - Testing {{ endpoints | length }} endpoints
+          - 'Timeout: {{ verification_timeout }}s per endpoint'
+          - 'Retries: {{ max_retries }}'
+          - ==========================================
+    - name: Initialize verification results
+      ansible.builtin.set_fact:
+        verification_results: []
+        passed_count: 0
+        failed_count: 0
+    - name: Verify each HTTPS endpoint
+      ansible.builtin.uri:
+        url: '{{ item.url }}'
+        method: GET
+        status_code: '{{ item.expected_status }}'
+        validate_certs: true
+        timeout: '{{ verification_timeout }}'
+        follow_redirects: safe
+        return_content: false
+      register: endpoint_check
+      failed_when: false
+      retries: '{{ max_retries }}'
+      delay: '{{ retry_delay }}'
+      until: endpoint_check.status == item.expected_status or endpoint_check.attempts
+        >= max_retries
+      loop: '{{ endpoints }}'
+      loop_control:
+        label: '{{ item.name }}'
+    - name: Process verification results
+      ansible.builtin.set_fact:
+        verification_results: '{{ verification_results + [result_item] }}'
+        passed_count: "{{ passed_count | int + (1 if result_item.status == 'PASS' else 0) }}"
+        failed_count: "{{ failed_count | int + (1 if result_item.status == 'FAIL' else 0) }}"
+      vars:
+        current_endpoint: '{{ endpoints[index] }}'
+        current_result: '{{ endpoint_check.results[index] }}'
+        result_item:
+          name: '{{ current_endpoint.name }}'
+          url: '{{ current_endpoint.url }}'
+          status: "{{ 'PASS' if current_result.status == current_endpoint.expected_status else 'FAIL' }}"
+          http_status: "{{ current_result.status | default('ERROR') }}"
+          response_time: '{{ current_result.elapsed | default(0) }}'
+          error: "{{ current_result.msg | default('') if current_result.failed else '' }}"
+      loop: '{{ range(0, endpoints | length) | list }}'
+      loop_control:
+        index_var: index
+        label: '{{ endpoints[index].name }}'
+    - name: Build results summary lines
+      ansible.builtin.set_fact:
+        results_lines: >-
+          {{ verification_results | map(attribute='status')
+          | zip(verification_results | map(attribute='name'),
+          verification_results | map(attribute='url'))
+          | map('join', ' - ') | list }}
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - HTTPS Endpoints Verification Summary
+          - ==========================================
+          - 'Total Endpoints: {{ endpoints | length }}'
+          - 'Passed: {{ passed_count }}'
+          - 'Failed: {{ failed_count }}'
+          - ''
+          - 'Results:'
+          - '{{ results_lines }}'
+          - ==========================================
+    - name: Save verification results to file
+      ansible.builtin.copy:
+        content: |
+          # HTTPS Endpoints Verification Results
+          Generated: {{ ansible_date_time.iso8601 }}
+
+          ## Summary
+          - Total Endpoints: {{ endpoints | length }}
+          - Passed: {{ passed_count }}
+          - Failed: {{ failed_count }}
+          - Success Rate: {{ '%.1f' | format((passed_count | float / endpoints | length * 100)) }}%
+
+          ## Detailed Results
+          {% for result in verification_results %}
+          ### {{ result.name }}
+          - URL: {{ result.url }}
+          - Status: {{ result.status }}
+          - HTTP Status: {{ result.http_status }}
+          - Response Time: {{ '%.2f' | format(result.response_time) }}s
+          {% if result.error %}- Error: {{ result.error }}{% endif %}
+          {% endfor %}
+        dest: /tmp/https-endpoints-verification.md
+        mode: '0644'
+      delegate_to: localhost
+    - name: Fail if any endpoints are unreachable
+      ansible.builtin.fail:
+        msg: '{{ failed_count }} endpoint(s) failed verification. See /tmp/https-endpoints-verification.md
+          for details.'
+      when: failed_count | int > 0

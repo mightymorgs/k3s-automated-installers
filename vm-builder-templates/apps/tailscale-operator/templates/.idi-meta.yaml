@@ -1,0 +1,19 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  deployment.yaml.j2:
+    summary: 'Jinja2 template: deployment.yaml.j2'
+    source: inferred
+    confidence: medium
+  namespace.yaml.j2:
+    summary: 'Jinja2 template: namespace.yaml.j2'
+    source: inferred
+    confidence: medium
+  operator-rbac.yaml.j2:
+    summary: 'Jinja2 template: operator-rbac.yaml.j2'
+    source: inferred
+    confidence: medium
+  operator-secret.yaml.j2:
+    summary: 'Jinja2 template: operator-secret.yaml.j2'
+    source: inferred
+    confidence: medium

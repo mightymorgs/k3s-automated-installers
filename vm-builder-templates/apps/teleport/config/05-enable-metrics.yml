@@ -1,0 +1,165 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/05-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/config/05-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "teleport"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["teleport_deployed"]
+#   provides: ["teleport_metrics_enabled"]
+#   tags: ["teleport", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Prometheus metrics scraping for Teleport. Patches the
+#     teleport-config ConfigMap to add diag_addr: "0.0.0.0:3434" which
+#     enables the diagnostics listener (health + metrics). Then adds
+#     pod-level Prometheus scrape annotations on port 3434 so Prometheus
+#     auto-discovers and scrapes the /metrics endpoint. Requires a
+#     StatefulSet restart for the ConfigMap change to take effect.
+#   requires_apps: ["teleport", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for Teleport
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    teleport_namespace: "teleport"
+  tasks:
+    # ========== CHECK IF TELEPORT IS DEPLOYED ==========
+    - name: Check if Teleport pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ teleport_namespace }} -l app=teleport --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: teleport_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Teleport not deployed
+      ansible.builtin.debug:
+        msg: "Teleport not deployed - skipping metrics configuration"
+      when: teleport_pod_check.rc != 0 or teleport_pod_check.stdout | length == 0
+
+    - name: End play if Teleport not available
+      ansible.builtin.meta: end_play
+      when: teleport_pod_check.rc != 0 or teleport_pod_check.stdout | length == 0
+
+    # ========== CHECK IF DIAG_ADDR ALREADY CONFIGURED ==========
+    # Teleport exposes diagnostics (including /metrics) when diag_addr
+    # is set in the teleport.yaml config. Check the ConfigMap to see
+    # if it is already configured.
+    - name: Get current teleport config from ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap teleport-config -n {{ teleport_namespace }}
+          -o jsonpath='{.data.teleport\.yaml}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_config
+      changed_when: false
+      failed_when: false
+
+    - name: Check if diag_addr already set
+      ansible.builtin.set_fact:
+        diag_already_set: "{{ 'diag_addr' in (current_config.stdout | default('')) }}"
+
+    # ========== PATCH CONFIGMAP TO ADD DIAG_ADDR ==========
+    # Teleport reads diag_addr from its config file. We patch the
+    # ConfigMap to inject the setting. The value 0.0.0.0:3434 binds
+    # the diagnostics listener to all interfaces on port 3434.
+    - name: Patch teleport-config ConfigMap to enable diagnostics
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap teleport-config -n {{ teleport_namespace }}
+          -o jsonpath='{.data.teleport\.yaml}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: raw_config
+      changed_when: false
+      when: not diag_already_set
+
+    - name: Apply diag_addr to teleport config
+      ansible.builtin.shell: |
+        CONFIG=$(kubectl get configmap teleport-config -n {{ teleport_namespace }} -o jsonpath='{.data.teleport\.yaml}')
+        # Append diag_addr to the top-level config
+        PATCHED=$(echo "$CONFIG" | sed '/^teleport:/a\  diag_addr: "0.0.0.0:3434"')
+        # If teleport: section not found, just append at top level
+        if ! echo "$PATCHED" | grep -q 'diag_addr'; then
+          PATCHED=$(printf '%s\ndiag_addr: "0.0.0.0:3434"\n' "$CONFIG")
+        fi
+        kubectl create configmap teleport-config \
+          -n {{ teleport_namespace }} \
+          --from-literal="teleport.yaml=$PATCHED" \
+          --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: configmap_patch
+      changed_when: "'configured' in configmap_patch.stdout or 'created' in configmap_patch.stdout"
+      when: not diag_already_set
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset teleport -n {{ teleport_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    - name: Add Prometheus scrape annotations to Teleport
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset teleport -n {{ teleport_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"3434","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    # ========== RESTART STATEFULSET ==========
+    # ConfigMap changes require a pod restart. The annotation patch
+    # triggers a rolling restart. If only the ConfigMap changed
+    # (annotations were already present), force a restart.
+    - name: Restart Teleport StatefulSet to pick up ConfigMap changes
+      ansible.builtin.command:
+        cmd: kubectl rollout restart statefulset/teleport -n {{ teleport_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: true
+      when: not diag_already_set and current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Teleport rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/teleport -n {{ teleport_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Teleport Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: statefulset/teleport"
+          - "Namespace: {{ teleport_namespace }}"
+          - "diag_addr: 0.0.0.0:3434 {{ '(configured)' if not diag_already_set else '(already set)' }}"
+          - "Scrape Port: 3434"
+          - "Metrics Path: /metrics"
+          - "Annotations: {{ 'added' if current_scrape.stdout != 'true' else 'already configured' }}"
+          - "=========================================="

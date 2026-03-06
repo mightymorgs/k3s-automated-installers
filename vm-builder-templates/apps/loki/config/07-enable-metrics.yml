@@ -1,0 +1,106 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/loki/07-enable-metrics"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/loki/config/07-enable-metrics.yml"
+#     category: "apps"
+#     subsystem: "loki"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_prometheus_metrics"
+#   dependencies: ["loki_deployed"]
+#   provides: ["loki_metrics_enabled"]
+#   tags: ["loki", "prometheus", "metrics", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Prometheus scrape annotations to the Loki statefulset.
+#     Loki natively exposes metrics on port 3100 at /metrics.
+#     This playbook adds pod-level annotations so Prometheus
+#     auto-discovers and scrapes the metrics endpoint via its
+#     kubernetes-pods scrape config.
+#   requires_apps: ["loki", "prometheus"]
+
+- name: Enable Prometheus metrics scraping for Loki
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    loki_namespace: "observability"
+    app_namespace: "{{ loki_namespace }}"
+  tasks:
+    # ========== CHECK IF LOKI IS DEPLOYED ==========
+    - name: Check if Loki pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=loki --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: loki_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Loki not deployed
+      ansible.builtin.debug:
+        msg: "Loki not deployed - skipping metrics configuration"
+      when: loki_pod_check.rc != 0 or loki_pod_check.stdout | length == 0
+
+    - name: End play if Loki not available
+      ansible.builtin.meta: end_play
+      when: loki_pod_check.rc != 0 or loki_pod_check.stdout | length == 0
+
+    # ========== CHECK IF ANNOTATIONS ALREADY PRESENT ==========
+    - name: Check if prometheus annotations already present
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset loki -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.metadata.annotations.prometheus\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: current_scrape
+      changed_when: false
+      failed_when: false
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to loki
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset loki -n {{ app_namespace }} --type merge -p
+          '{"spec":{"template":{"metadata":{"annotations":{"prometheus.io/scrape":"true","prometheus.io/port":"3100","prometheus.io/path":"/metrics"}}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: current_scrape.stdout != "true"
+
+    - name: Annotations already present
+      ansible.builtin.debug:
+        msg: "Prometheus scrape annotations already present on loki - skipping"
+      when: current_scrape.stdout == "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for loki rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/loki -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+      when: current_scrape.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Loki Prometheus Metrics Enabled"
+          - "=========================================="
+          - "Target: statefulset/loki"
+          - "Namespace: {{ app_namespace }}"
+          - "Scrape Port: 3100"
+          - "Metrics Path: /metrics"
+          - "Status: {{ 'Annotations added' if current_scrape.stdout != 'true' else 'Already configured' }}"
+          - "=========================================="

@@ -1,0 +1,17 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-apply-kustomize.yml:
+    summary: Deploy ArgoCD via Kustomize
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ argocd_manifest_url }}'
+    references_services:
+    - argocd-manifest
+  02-verify.yml:
+    summary: Verify ArgoCD deployment is healthy
+    source: inferred
+    confidence: medium
+depends_on_apps:
+- argocd-manifest

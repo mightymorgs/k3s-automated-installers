@@ -1,0 +1,89 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/media-shared/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/media-shared/install/02-verify.yml"
+#     category: "storage"
+#     subsystem: "media-shared"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "media-shared"
+#       supported_versions: ["longhorn", "nfs", "smb"]
+#       version_range: "any"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - backend: "longhorn"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-03-05"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260305_golden_master_fixes"
+#   dependencies: ["media_shared_storage_deployed"]
+#   provides: ["media_shared_verified"]
+#   tags: ["media-shared", "storage", "verify"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify media shared storage PVC is bound and accessible
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.media_shared.verified"
+#         example: true
+
+- name: Verify Media Shared Storage
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: media-shared
+    app_namespace: "media-stack"
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. CHECK PVC IS BOUND ==========
+    - name: Check PVC is bound
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pvc media-shared-pvc
+        -o jsonpath='{.status.phase}'
+      register: pvc_phase
+      changed_when: false
+      failed_when: pvc_phase.stdout != 'Bound'
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pvc_phase.rc == 0 and pvc_phase.stdout == 'Bound'
+
+    # ========== 2. CHECK PVC CAPACITY ==========
+    - name: Get PVC capacity
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pvc media-shared-pvc
+        -o jsonpath='{.status.capacity.storage}'
+      register: pvc_capacity
+      changed_when: false
+
+    # ========== 3. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Media Shared Storage Verification Summary"
+          - "=========================================="
+          - "PVC Phase:    {{ pvc_phase.stdout }} -- OK"
+          - "Capacity:     {{ pvc_capacity.stdout | default('unknown') }}"
+          - "=========================================="

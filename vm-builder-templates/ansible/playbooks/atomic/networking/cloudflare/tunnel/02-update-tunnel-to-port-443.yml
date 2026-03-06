@@ -1,0 +1,213 @@
+---
+# playbook_metadata:
+#   id: "atomic/networking/cloudflare/tunnel/02-update-tunnel-to-port-443"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/networking/cloudflare/tunnel/02-update-tunnel-to-port-443.yml"
+#     category: "networking"
+#     subsystem: "cloudflare"
+#     role: "tunnel"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflare-tunnel"
+#       folder_version: null
+#       supported_versions: ["api-v4"]
+#       version_range: ">=2024.0.0"
+#
+#     requires:
+#       bws: ">=0.5.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - cloudflare_api: "v4"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-13"
+#         notes: "Updates tunnel ingress config via API to route to Traefik port 443"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["cloudflare_tunnel_created"]
+#   provides: ["cloudflare_tunnel_port_443"]
+#   tags: ["cloudflare", "tunnel", "api", "update", "networking"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Update Cloudflare Tunnel to route to Traefik port 443 (websecure)
+- name: Update Cloudflare Tunnel to Port 443
+  hosts: localhost
+  gather_facts: false
+  vars:
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+    cloudflare_secret_key: cloudflare-api-credentials
+    tunnel_name: media-stack-production-media-stack
+    backend_service: "{{ traefik_backend_url }}"
+    hostnames:
+      - sonarr
+      - radarr
+      - nzb
+      - qbit
+      - prowl
+      - req
+      - pstat
+      - auth
+  tasks:
+    # ========== FAIL-FAST: REQUIRED BWS VARS ==========
+    - name: Fail if ingress_domain not provided by BWS
+      ansible.builtin.fail:
+        msg: "ingress_domain must be provided via BWS extra-vars — no fake defaults"
+      when: ingress_domain is not defined or ingress_domain | length == 0
+
+    - name: Fail if traefik_backend_url not provided by BWS
+      ansible.builtin.fail:
+        msg: "traefik_backend_url must be provided via BWS extra-vars — no fake defaults"
+      when: traefik_backend_url is not defined or traefik_backend_url | length == 0
+
+    - name: Display update information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Updating Cloudflare Tunnel Configuration
+          - ==========================================
+          - 'Tunnel: {{ tunnel_name }}'
+          - 'Old backend: http://traefik:80'
+          - 'New backend: {{ backend_service }}'
+          - 'Reason: Traefik websecure entrypoint is on port 443'
+          - ==========================================
+
+    # ========== PHASE 1: Retrieve Cloudflare credentials from Bitwarden ==========
+    - name: Verify BWS access token is set
+      ansible.builtin.assert:
+        that: [bws_access_token is defined, bws_access_token | length > 0]
+        fail_msg: BWS_ACCESS_TOKEN environment variable is not set
+    - name: Resolve Bitwarden secret UUID for Cloudflare API
+      ansible.builtin.command: >
+        bws secret list --output json
+      environment:
+        BWS_ACCESS_TOKEN: '{{ bws_access_token }}'
+      register: bws_secret_list
+      changed_when: false
+      delegate_to: localhost
+      no_log: true
+    - name: Extract UUID for Cloudflare API secret
+      ansible.builtin.set_fact:
+        cloudflare_secret_uuid: >-
+          {{ (bws_secret_list.stdout | from_json)
+               | selectattr('key', 'equalto', cloudflare_secret_key)
+               | map(attribute='id')
+               | first | default('') }}
+      no_log: true
+    - name: Retrieve Cloudflare API credentials from Bitwarden
+      ansible.builtin.command: >
+        bws secret get {{ cloudflare_secret_uuid }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: '{{ bws_access_token }}'
+      register: cloudflare_secret_raw
+      changed_when: false
+      failed_when: cloudflare_secret_uuid == ''
+      delegate_to: localhost
+      no_log: true
+    - name: Parse Cloudflare credentials
+      ansible.builtin.set_fact:
+        cloudflare_creds: >-
+          {{ (cloudflare_secret_raw.stdout | from_json).value | from_json }}
+      no_log: true
+    - name: Verify required Cloudflare fields present
+      ansible.builtin.assert:
+        that:
+          - cloudflare_creds.api_token is defined
+          - cloudflare_creds.account_id is defined
+        fail_msg: Cloudflare API credentials incomplete in Bitwarden
+
+    # ========== PHASE 2: Get existing tunnel ID ==========
+    - name: List existing tunnels
+      ansible.builtin.uri:
+        url: >-
+          https: >-
+            //api.cloudflare.com/client/v4/accounts/{{ cloudflare_creds.account_id }}/cfd_tunnel?name={{
+          tunnel_name }}
+        method: GET
+        headers:
+          Authorization: Bearer {{ cloudflare_creds.api_token }}
+        status_code: 200
+      register: tunnel_list
+    - name: Extract tunnel ID
+      ansible.builtin.set_fact:
+        tunnel_id: '{{ tunnel_list.json.result[0].id }}'
+      when: tunnel_list.json.result | length > 0
+    - name: Verify tunnel exists
+      ansible.builtin.assert:
+        that: [tunnel_id is defined]
+        fail_msg: Tunnel '{{ tunnel_name }}' not found!
+    - name: Display tunnel info
+      ansible.builtin.debug:
+        msg: 'Found tunnel: {{ tunnel_name }} (ID: {{ tunnel_id }})'
+
+    # ========== PHASE 3: Update tunnel configuration ==========
+    - name: Update tunnel ingress rules to port 443
+      ansible.builtin.uri:
+        url: >-
+          https://api.cloudflare.com/client/v4/accounts/{{
+            cloudflare_creds.account_id
+          }}/cfd_tunnel/{{ tunnel_id }}/configurations
+        method: PUT
+        headers:
+          Authorization: Bearer {{ cloudflare_creds.api_token }}
+          Content-Type: application/json
+        body_format: json
+        body:
+          config:
+            ingress:
+              - hostname: sonarr.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: radarr.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: nzb.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: qbit.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: prowl.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: req.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: pstat.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - hostname: auth.{{ ingress_domain }}
+                service: '{{ backend_service }}'
+              - service: http_status:404
+        status_code: 200
+      register: tunnel_config_update
+    - name: Display configuration update result
+      ansible.builtin.debug:
+        msg:
+          - Tunnel configuration updated!
+          - 'Result: {{ tunnel_config_update.json.success }}'
+
+    # ========== PHASE 4: Verify update ==========
+    - name: Wait for cloudflared to pick up new configuration
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: Waiting for cloudflared pods to update...
+    - name: Display update summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Cloudflare Tunnel Updated!
+          - ==========================================
+          - ''
+          - 'Tunnel: {{ tunnel_name }}'
+          - 'Backend: {{ backend_service }}'
+          - ''
+          - All {{ hostnames | length }} hostnames now route to port 443
+          - ''
+          - Cloudflared pods will automatically pick up the new config
+          - No pod restart required!
+          - ''
+          - 'Next step: Test external HTTPS access'
+          - ==========================================

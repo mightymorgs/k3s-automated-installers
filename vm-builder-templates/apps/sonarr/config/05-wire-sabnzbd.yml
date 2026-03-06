@@ -1,0 +1,183 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sonarr/05-wire-sabnzbd"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sonarr/config/05-wire-sabnzbd.yml"
+#     category: "apps"
+#     subsystem: "sonarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["sonarr_deployed", "sabnzbd_deployed"]
+#   provides: ["sonarr_sabnzbd_wired"]
+#   tags: ["sonarr", "sabnzbd", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Register SABnzbd as download client in Sonarr and create tv-sonarr category
+#   requires_apps: ["sonarr", "sabnzbd"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.sonarr.api_key"
+#       - path: "_state.apps.sabnzbd.api_key"
+
+- name: Wire SABnzbd into Sonarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    sabnzbd_namespace: "media-stack"
+    sonarr_namespace: "media-stack"
+    app_namespace: "{{ sonarr_namespace }}"
+    # sonarr_url: from BWS _state via Phase 4 extra-vars
+    # sabnzbd_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF SABNZBD NOT INSTALLED ==========
+    - name: Skip if sabnzbd is not installed on this VM
+      when: sabnzbd_api_key is not defined
+      block:
+        - name: "sabnzbd not installed — skipping sonarr <-> sabnzbd wiring"
+          ansible.builtin.debug:
+            msg: "sabnzbd is not installed on this VM (no sabnzbd_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if sonarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "sonarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sonarr_api_key is not defined or sonarr_api_key | length == 0
+
+    - name: Fail if sabnzbd_api_key not provided
+      ansible.builtin.fail:
+        msg: "sabnzbd_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sabnzbd_api_key is not defined or sabnzbd_api_key | length == 0
+
+    # ========== VERIFY SONARR API ==========
+    - name: Verify Sonarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Sonarr API not accessible
+      ansible.builtin.fail:
+        msg: "Sonarr API not accessible at {{ sonarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== VERIFY SABNZBD API ==========
+    - name: Verify SABnzbd API is accessible
+      ansible.builtin.uri:
+        url: "{{ sabnzbd_url }}/api?mode=version&output=json&apikey={{ sabnzbd_api_key }}"
+        method: GET
+        return_content: false
+      register: sabnzbd_api_status
+      retries: 3
+      delay: 5
+      until: sabnzbd_api_status.status is defined and sabnzbd_api_status.status == 200
+      failed_when: false
+
+    - name: Fail if SABnzbd API not accessible
+      ansible.builtin.fail:
+        msg: "SABnzbd API not accessible at {{ sabnzbd_url }} (status: {{ sabnzbd_api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: sabnzbd_api_status.status is not defined or sabnzbd_api_status.status != 200
+
+    # ========== CREATE TV-SONARR CATEGORY IN SABNZBD VIA API ==========
+    - name: Get existing SABnzbd categories
+      ansible.builtin.uri:
+        url: "{{ sabnzbd_url }}/api?mode=get_config&section=categories&apikey={{ sabnzbd_api_key }}&output=json"
+        method: GET
+        return_content: true
+      register: sabnzbd_cats
+
+    - name: Check if tv-sonarr category exists
+      ansible.builtin.set_fact:
+        tv_sonarr_exists: "{{ sabnzbd_cats.json.config.categories | default([]) | selectattr('name', 'equalto', 'tv-sonarr') | list | length > 0 }}"
+
+    - name: Create tv-sonarr category via SABnzbd API
+      ansible.builtin.uri:
+        url: "{{ sabnzbd_url }}/api?mode=set_config&section=categories&keyword=tv-sonarr&name=name&value=tv-sonarr&apikey={{ sabnzbd_api_key }}&output=json"
+        method: GET
+        return_content: true
+      register: add_tv_sonarr
+      when: not tv_sonarr_exists
+
+    # ========== REGISTER SABNZBD AS DOWNLOAD CLIENT ==========
+    - name: Get existing download clients
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/downloadclient"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        status_code: [200]
+      register: existing_download_clients
+
+    - name: Check if SABnzbd download client exists
+      ansible.builtin.set_fact:
+        sabnzbd_client_exists: "{{ (existing_download_clients.json | selectattr('name', 'equalto', 'SABnzbd') | list | length) > 0 }}"
+
+    - name: Add SABnzbd as download client (Usenet)
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          enable: true
+          protocol: "usenet"
+          priority: 1
+          name: "SABnzbd"
+          implementation: "Sabnzbd"
+          configContract: "SabnzbdSettings"
+          fields:
+            - name: "host"
+              value: "{{ sabnzbd_service_name }}.{{ sabnzbd_namespace }}.svc.cluster.local"
+            - name: "port"
+              value: "{{ sabnzbd_service_port }}"
+            - name: "useSsl"
+              value: false
+            - name: "urlBase"
+              value: ""
+            - name: "apiKey"
+              value: "{{ sabnzbd_api_key }}"
+            - name: "username"
+              value: ""
+            - name: "password"
+              value: ""
+            - name: "tvCategory"
+              value: "tv-sonarr"
+            - name: "recentTvPriority"
+              value: -100
+            - name: "olderTvPriority"
+              value: -100
+        status_code: [200, 201]
+        return_content: true
+      register: add_sabnzbd_result
+      when: not sabnzbd_client_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Sonarr <-> SABnzbd Wiring Complete"
+          - "=========================================="
+          - "SABnzbd category: tv-sonarr ({{ 'created' if not tv_sonarr_exists else 'exists' }})"
+          - "Download client: SABnzbd ({{ 'added' if (not sabnzbd_client_exists and add_sabnzbd_result is defined and add_sabnzbd_result.status | default(0) in [200, 201]) else ('exists' if sabnzbd_client_exists else 'FAILED') }})"
+          - "=========================================="

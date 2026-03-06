@@ -1,0 +1,44 @@
+---
+# Prometheus Service (J2 template)
+# ClusterIP for internal cluster access, NodePort for external access via Tailscale
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('prometheus') }}
+  namespace: {{ app_namespace | default('observability') }}
+  labels:
+    app: {{ app_name | default('prometheus') }}
+    app.kubernetes.io/name: {{ app_name | default('prometheus') }}
+    app.kubernetes.io/part-of: {{ app_part_of | default('observability') }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ container_port | default(9090) }}
+      targetPort: {{ container_port | default(9090) }}
+      protocol: TCP
+      name: http
+  selector:
+    app: {{ app_name | default('prometheus') }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('prometheus') }}-nodeport
+  namespace: {{ app_namespace | default('observability') }}
+  labels:
+    app: {{ app_name | default('prometheus') }}
+    app.kubernetes.io/name: {{ app_name | default('prometheus') }}
+    app.kubernetes.io/part-of: {{ app_part_of | default('observability') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  ports:
+    - port: {{ container_port | default(9090) }}
+      targetPort: {{ container_port | default(9090) }}
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30909) }}
+{% endif %}
+      protocol: TCP
+      name: http
+  selector:
+    app: {{ app_name | default('prometheus') }}

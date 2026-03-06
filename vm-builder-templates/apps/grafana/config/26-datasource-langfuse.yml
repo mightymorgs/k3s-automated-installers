@@ -1,0 +1,203 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/26-datasource-langfuse"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/26-datasource-langfuse.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "langfuse_deployed"]
+#   provides: ["grafana_langfuse_wired"]
+#   tags: ["grafana", "langfuse", "datasource", "plugin", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Install the Grafana Infinity datasource plugin and add Langfuse
+#     as a datasource for querying Langfuse metrics via its HTTP API.
+#     Requires a Grafana pod restart to load the plugin. Uses internal
+#     K8s DNS for Langfuse connectivity.
+#   requires_apps: ["grafana", "langfuse"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Add Langfuse Datasource to Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    langfuse_namespace: "ai-tools"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    langfuse_internal_url: "{{ langfuse_url }}"
+    infinity_plugin_id: "yesoreyeram-infinity-datasource"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== SKIP IF LANGFUSE NOT INSTALLED ==========
+    - name: Skip if langfuse is not installed on this VM
+      when: langfuse_url is not defined
+      block:
+        - name: "langfuse not installed — skipping Grafana Langfuse datasource"
+          ansible.builtin.debug:
+            msg: "langfuse is not installed on this VM (no langfuse_url in BWS state) — skipping"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== VERIFY GRAFANA API ==========
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== CHECK IF PLUGIN ALREADY INSTALLED ==========
+    - name: Check installed Grafana plugins
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/plugins"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: installed_plugins
+      changed_when: false
+
+    - name: Check if Infinity plugin is installed
+      ansible.builtin.set_fact:
+        infinity_plugin_installed: "{{ (installed_plugins.json | selectattr('id', 'equalto', infinity_plugin_id) | list | length) > 0 }}"
+
+    # ========== INSTALL INFINITY PLUGIN ==========
+    - name: Get Grafana pod name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ grafana_namespace }} -l app.kubernetes.io/name=grafana
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: grafana_pod
+      changed_when: false
+      when: not infinity_plugin_installed
+
+    - name: Install Infinity datasource plugin via grafana-cli
+      ansible.builtin.command:
+        cmd: >-
+          kubectl exec -n {{ grafana_namespace }} {{ grafana_pod.stdout }} --
+          grafana-cli plugins install {{ infinity_plugin_id }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: plugin_install
+      changed_when: "'Installed' in plugin_install.stdout"
+      when: not infinity_plugin_installed
+
+    # ========== RESTART GRAFANA TO LOAD PLUGIN ==========
+    - name: Restart Grafana deployment to load new plugin
+      ansible.builtin.command:
+        cmd: kubectl rollout restart deployment/grafana -n {{ grafana_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: restart_result
+      changed_when: "'restarted' in restart_result.stdout"
+      when: not infinity_plugin_installed
+
+    - name: Wait for Grafana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/grafana -n {{ grafana_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not infinity_plugin_installed
+
+    - name: Wait for Grafana API to become available after restart
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_post_restart
+      retries: 12
+      delay: 10
+      until: grafana_post_restart.status is defined and grafana_post_restart.status == 200
+      failed_when: false
+      when: not infinity_plugin_installed
+
+    # ========== CHECK IF DATASOURCE ALREADY EXISTS ==========
+    - name: Get existing datasources
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: existing_datasources
+      changed_when: false
+
+    - name: Check if Langfuse datasource already exists
+      ansible.builtin.set_fact:
+        langfuse_ds_exists: >-
+          {{ (existing_datasources.json | selectattr('name', 'equalto', 'Langfuse') | list | length) > 0 }}
+
+    # ========== ADD LANGFUSE DATASOURCE ==========
+    - name: Add Langfuse as datasource in Grafana via Infinity plugin
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Langfuse"
+          type: "{{ infinity_plugin_id }}"
+          url: "{{ langfuse_internal_url }}"
+          access: "proxy"
+          isDefault: false
+          jsonData:
+            auth_method: "none"
+            global_queries: []
+        status_code: [200, 409]
+      register: add_langfuse
+      changed_when: add_langfuse.status == 200
+      when: not langfuse_ds_exists
+
+    - name: Langfuse datasource already configured
+      ansible.builtin.debug:
+        msg: "Langfuse datasource already exists in Grafana - skipping"
+      when: langfuse_ds_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana <-> Langfuse Wiring Complete"
+          - "=========================================="
+          - "Plugin: {{ infinity_plugin_id }} ({{ 'installed' if not infinity_plugin_installed else 'already present' }})"
+          - "Datasource: Langfuse ({{ 'Added' if not langfuse_ds_exists else 'Already configured' }})"
+          - "Internal URL: {{ langfuse_internal_url }}"
+          - "Auth Method: none (cluster-internal)"
+          - "Access Mode: proxy (server-side)"
+          - "=========================================="

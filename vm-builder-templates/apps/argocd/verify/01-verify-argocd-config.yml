@@ -1,0 +1,737 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/verify/argocd-config"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "argocd_configuration_verified"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/verify/01-verify-argocd-config.yml"
+#     category: "platform"
+#     subsystem: "argocd"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "argocd"
+#       supported_versions: ["2.x"]
+#       version_range: ">=2.8.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - argocd: "2.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies ArgoCD configuration (API, projects, repos, apps, clusters)"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_argocd_verification"
+#   dependencies: ["argocd_deployed"]
+#   provides: ["argocd_config_verified"]
+#   tags: ["argocd", "verification", "gitops", "phase4"]
+#   estimated_duration: 90
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that ArgoCD is properly configured and healthy. Checks that the
+#     API server is accessible, projects exist with expected settings,
+#     repositories are connected and synced, clusters are registered and
+#     reachable, applications are synced and healthy, and ApplicationSets
+#     are generating expected apps. Provides a comprehensive health report.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.argocd.admin_token"
+#         purpose: "ArgoCD API bearer token for authentication"
+#       - path: "_state.apps.argocd.url"
+#         purpose: "ArgoCD API server base URL"
+#       - path: "_state.apps.argocd.projects"
+#         purpose: "Expected projects to verify"
+#       - path: "_state.apps.argocd.repositories"
+#         purpose: "Expected repositories to verify"
+#       - path: "_state.apps.argocd.clusters"
+#         purpose: "Expected clusters to verify"
+#       - path: "_state.apps.argocd.applications"
+#         purpose: "Expected applications to verify"
+#       - path: "_state.apps.argocd.applicationsets"
+#         purpose: "Expected ApplicationSets to verify"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - ArgoCD Configuration
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    argocd_base_url: "{{ argocd_url }}"
+    argocd_api_base: "{{ argocd_base_url }}/api/v1"
+
+    # Expected resources to verify (can be overridden by caller or BWS state)
+    expected_projects: "{{ expected_projects_input | default([]) }}"
+    expected_repositories: "{{ expected_repositories_input | default([]) }}"
+    expected_clusters: "{{ expected_clusters_input | default([]) }}"
+    expected_applications: "{{ expected_applications_input | default([]) }}"
+    expected_applicationsets: "{{ expected_applicationsets_input | default([]) }}"
+
+    # Verification options
+    fail_on_unhealthy: "{{ fail_on_unhealthy_input | default(false) }}"
+    check_sync_status: "{{ check_sync_status_input | default(true) }}"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying ArgoCD Configuration"
+          - "=========================================="
+          - "Base URL: {{ argocd_base_url }}"
+          - "Expected Projects: {{ expected_projects | length }}"
+          - "Expected Repositories: {{ expected_repositories | length }}"
+          - "Expected Clusters: {{ expected_clusters | length }}"
+          - "Expected Applications: {{ expected_applications | length }}"
+          - "Expected ApplicationSets: {{ expected_applicationsets | length }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract ArgoCD admin token
+      ansible.builtin.set_fact:
+        argocd_admin_token: >-
+          {{
+            inventory._state.apps.argocd.admin_token | default(argocd_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        argocd_base_url: "{{ inventory._state.apps.argocd.url }}"
+        argocd_api_base: "{{ inventory._state.apps.argocd.url }}/api/v1"
+      when: inventory._state.apps.argocd.url is defined
+
+    - name: Load expected resources from BWS state if not provided
+      ansible.builtin.set_fact:
+        expected_projects: >-
+          {{
+            expected_projects if expected_projects | length > 0
+            else (inventory._state.apps.argocd.projects | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_repositories: >-
+          {{
+            expected_repositories if expected_repositories | length > 0
+            else (inventory._state.apps.argocd.repositories | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_clusters: >-
+          {{
+            expected_clusters if expected_clusters | length > 0
+            else (inventory._state.apps.argocd.clusters | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_applications: >-
+          {{
+            expected_applications if expected_applications | length > 0
+            else (inventory._state.apps.argocd.applications | default({}) | dict2items | map(attribute='key') | list)
+          }}
+        expected_applicationsets: >-
+          {{
+            expected_applicationsets if expected_applicationsets | length > 0
+            else (inventory._state.apps.argocd.applicationsets | default({}) | dict2items | map(attribute='key') | list)
+          }}
+
+    # ===== STEP 2: Verify ArgoCD API Server is Healthy =====
+    - name: Check ArgoCD API server health (version endpoint)
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/version"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200, 401, 403]
+        validate_certs: false
+      register: api_version
+      failed_when: false
+      no_log: true
+
+    - name: Evaluate API health status
+      ansible.builtin.set_fact:
+        api_accessible: "{{ api_version.status == 200 }}"
+        api_auth_valid: "{{ api_version.status == 200 }}"
+        argocd_version: "{{ api_version.json.Version | default('unknown') }}"
+        api_error: >-
+          {{
+            'Authentication failed' if api_version.status in [401, 403]
+            else ('Connection failed: ' + (api_version.msg | default('unknown error')))
+              if api_version.status is not defined
+            else 'OK'
+          }}
+
+    - name: Display API connectivity result
+      ansible.builtin.debug:
+        msg:
+          - "API Accessible: {{ api_accessible }}"
+          - "Auth Valid: {{ api_auth_valid }}"
+          - "ArgoCD Version: {{ argocd_version }}"
+          - "Status: {{ api_error }}"
+
+    - name: Assert ArgoCD API is accessible
+      ansible.builtin.assert:
+        that:
+          - api_accessible | bool
+        fail_msg: "ArgoCD API is not accessible at {{ argocd_base_url }} - {{ api_error }}"
+        success_msg: "ArgoCD API is accessible and authentication is valid"
+
+    # ===== STEP 3: Verify Projects =====
+    - name: List all projects
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/projects"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: projects_list
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Extract project names
+      ansible.builtin.set_fact:
+        existing_project_names: >-
+          {{ projects_list.json.items | default([]) | map(attribute='metadata.name') | list }}
+      when: api_accessible | bool
+
+    - name: Check expected projects exist
+      ansible.builtin.set_fact:
+        project_results: >-
+          {{
+            project_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_project_names
+            }]
+          }}
+      loop: "{{ expected_projects }}"
+      when:
+        - api_accessible | bool
+        - expected_projects | length > 0
+
+    - name: Get project details for existing projects
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/projects/{{ item | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: project_details_results
+      loop: "{{ expected_projects }}"
+      when:
+        - api_accessible | bool
+        - expected_projects | length > 0
+        - item in existing_project_names
+      failed_when: false
+      no_log: true
+
+    - name: Build project details summary
+      ansible.builtin.set_fact:
+        project_details_summary: >-
+          {{
+            project_details_summary | default([]) + [{
+              'name': item.item,
+              'description': item.json.spec.description | default(''),
+              'source_repos': item.json.spec.sourceRepos | default([]) | length,
+              'destinations': item.json.spec.destinations | default([]) | length,
+              'found': item.status == 200
+            }]
+          }}
+      loop: "{{ project_details_results.results | default([]) }}"
+      when:
+        - api_accessible | bool
+        - item.json is defined
+
+    # ===== STEP 4: Verify Repositories =====
+    - name: List all repositories
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/repositories"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: repositories_list
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Extract repository URLs
+      ansible.builtin.set_fact:
+        existing_repository_urls: >-
+          {{ repositories_list.json.items | default([]) | map(attribute='repo') | list }}
+      when: api_accessible | bool
+
+    - name: Check expected repositories exist
+      ansible.builtin.set_fact:
+        repository_results: >-
+          {{
+            repository_results | default([]) + [{
+              'repo': item,
+              'exists': item in existing_repository_urls
+            }]
+          }}
+      loop: "{{ expected_repositories }}"
+      when:
+        - api_accessible | bool
+        - expected_repositories | length > 0
+
+    - name: Build repository connection summary
+      ansible.builtin.set_fact:
+        repository_details_summary: >-
+          {{
+            repository_details_summary | default([]) + [{
+              'repo': item.repo,
+              'type': item.type | default('git'),
+              'connection_state': item.connectionState.status | default('Unknown'),
+              'connected': (item.connectionState.status | default('')) == 'Successful'
+            }]
+          }}
+      loop: "{{ repositories_list.json.items | default([]) }}"
+      when: api_accessible | bool
+
+    # ===== STEP 5: Verify Clusters =====
+    - name: List all clusters
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/clusters"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: clusters_list
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Extract cluster names/servers
+      ansible.builtin.set_fact:
+        existing_cluster_names: >-
+          {{ clusters_list.json.items | default([]) | map(attribute='name') | list }}
+        existing_cluster_servers: >-
+          {{ clusters_list.json.items | default([]) | map(attribute='server') | list }}
+      when: api_accessible | bool
+
+    - name: Check expected clusters exist (by name or server URL)
+      ansible.builtin.set_fact:
+        cluster_results: >-
+          {{
+            cluster_results | default([]) + [{
+              'cluster': item,
+              'exists': item in existing_cluster_names or item in existing_cluster_servers
+            }]
+          }}
+      loop: "{{ expected_clusters }}"
+      when:
+        - api_accessible | bool
+        - expected_clusters | length > 0
+
+    - name: Build cluster health summary
+      ansible.builtin.set_fact:
+        cluster_details_summary: >-
+          {{
+            cluster_details_summary | default([]) + [{
+              'name': item.name,
+              'server': item.server,
+              'connection_state': item.connectionState.status | default('Unknown'),
+              'reachable': (item.connectionState.status | default('')) == 'Successful',
+              'server_version': item.serverVersion | default('unknown')
+            }]
+          }}
+      loop: "{{ clusters_list.json.items | default([]) }}"
+      when: api_accessible | bool
+
+    # ===== STEP 6: Verify Applications =====
+    - name: List all applications
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/applications"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: applications_list
+      no_log: true
+      when: api_accessible | bool
+
+    - name: Extract application names
+      ansible.builtin.set_fact:
+        existing_application_names: >-
+          {{ applications_list.json.items | default([]) | map(attribute='metadata.name') | list }}
+      when: api_accessible | bool
+
+    - name: Check expected applications exist
+      ansible.builtin.set_fact:
+        application_results: >-
+          {{
+            application_results | default([]) + [{
+              'name': item,
+              'exists': item in existing_application_names
+            }]
+          }}
+      loop: "{{ expected_applications }}"
+      when:
+        - api_accessible | bool
+        - expected_applications | length > 0
+
+    - name: Build application health summary
+      ansible.builtin.set_fact:
+        application_details_summary: >-
+          {{
+            application_details_summary | default([]) + [{
+              'name': item.metadata.name,
+              'project': item.spec.project | default('default'),
+              'sync_status': item.status.sync.status | default('Unknown'),
+              'health_status': item.status.health.status | default('Unknown'),
+              'synced': (item.status.sync.status | default('')) == 'Synced',
+              'healthy': (item.status.health.status | default('')) == 'Healthy',
+              'revision': item.status.sync.revision | default('unknown') | truncate(8, True, '')
+            }]
+          }}
+      loop: "{{ applications_list.json.items | default([]) }}"
+      when: api_accessible | bool
+
+    - name: Identify unhealthy or out-of-sync applications
+      ansible.builtin.set_fact:
+        unhealthy_apps: >-
+          {{
+            application_details_summary | default([]) |
+            selectattr('healthy', 'equalto', false) |
+            map(attribute='name') | list
+          }}
+        unsynced_apps: >-
+          {{
+            application_details_summary | default([]) |
+            selectattr('synced', 'equalto', false) |
+            map(attribute='name') | list
+          }}
+      when: api_accessible | bool
+
+    # ===== STEP 7: Verify ApplicationSets (if used) =====
+    - name: List all ApplicationSets
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/applicationsets"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: applicationsets_list
+      no_log: true
+      when: api_accessible | bool
+      failed_when: false
+
+    - name: Extract ApplicationSet names
+      ansible.builtin.set_fact:
+        existing_applicationset_names: >-
+          {{ applicationsets_list.json.items | default([]) | map(attribute='metadata.name') | list }}
+      when:
+        - api_accessible | bool
+        - applicationsets_list.status | default(0) == 200
+
+    - name: Check expected ApplicationSets exist
+      ansible.builtin.set_fact:
+        applicationset_results: >-
+          {{
+            applicationset_results | default([]) + [{
+              'name': item,
+              'exists': item in (existing_applicationset_names | default([]))
+            }]
+          }}
+      loop: "{{ expected_applicationsets }}"
+      when:
+        - api_accessible | bool
+        - expected_applicationsets | length > 0
+        - applicationsets_list.status | default(0) == 200
+
+    - name: Build ApplicationSet summary
+      ansible.builtin.set_fact:
+        applicationset_details_summary: >-
+          {{
+            applicationset_details_summary | default([]) + [{
+              'name': item.metadata.name,
+              'generators_count': item.spec.generators | default([]) | length,
+              'template_app': item.spec.template.metadata.name | default('unknown')
+            }]
+          }}
+      loop: "{{ applicationsets_list.json.items | default([]) }}"
+      when:
+        - api_accessible | bool
+        - applicationsets_list.status | default(0) == 200
+
+    # ===== STEP 8: Calculate Verification Results =====
+    - name: Calculate project verification result
+      ansible.builtin.set_fact:
+        all_projects_exist: >-
+          {{
+            (project_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate repository verification result
+      ansible.builtin.set_fact:
+        all_repositories_exist: >-
+          {{
+            (repository_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+        all_repositories_connected: >-
+          {{
+            (repository_details_summary | default([]) | selectattr('connected', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate cluster verification result
+      ansible.builtin.set_fact:
+        all_clusters_exist: >-
+          {{
+            (cluster_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+        all_clusters_reachable: >-
+          {{
+            (cluster_details_summary | default([]) | selectattr('reachable', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate application verification result
+      ansible.builtin.set_fact:
+        all_applications_exist: >-
+          {{
+            (application_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+        all_applications_synced: >-
+          {{
+            (application_details_summary | default([]) | selectattr('synced', 'equalto', false) | list | length) == 0
+          }}
+        all_applications_healthy: >-
+          {{
+            (application_details_summary | default([]) | selectattr('healthy', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate ApplicationSet verification result
+      ansible.builtin.set_fact:
+        all_applicationsets_exist: >-
+          {{
+            (applicationset_results | default([]) | selectattr('exists', 'equalto', false) | list | length) == 0
+          }}
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            api_accessible | bool and
+            api_auth_valid | bool and
+            all_projects_exist | bool and
+            all_repositories_exist | bool and
+            all_clusters_exist | bool and
+            all_applications_exist | bool and
+            all_applicationsets_exist | bool and
+            (not check_sync_status or (all_applications_synced | bool and all_applications_healthy | bool))
+          }}
+
+    # ===== STEP 9: Generate Health Report =====
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          argocd_url: "{{ argocd_base_url }}"
+          argocd_version: "{{ argocd_version }}"
+          api_accessible: "{{ api_accessible }}"
+          api_auth_valid: "{{ api_auth_valid }}"
+          projects:
+            expected: "{{ expected_projects | length }}"
+            found: "{{ project_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_projects_exist }}"
+            total: "{{ existing_project_names | default([]) | length }}"
+            details: "{{ project_details_summary | default([]) }}"
+          repositories:
+            expected: "{{ expected_repositories | length }}"
+            found: "{{ repository_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_repositories_exist }}"
+            all_connected: "{{ all_repositories_connected }}"
+            total: "{{ existing_repository_urls | default([]) | length }}"
+            details: "{{ repository_details_summary | default([]) }}"
+          clusters:
+            expected: "{{ expected_clusters | length }}"
+            found: "{{ cluster_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_clusters_exist }}"
+            all_reachable: "{{ all_clusters_reachable }}"
+            total: "{{ existing_cluster_names | default([]) | length }}"
+            details: "{{ cluster_details_summary | default([]) }}"
+          applications:
+            expected: "{{ expected_applications | length }}"
+            found: "{{ application_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_applications_exist }}"
+            all_synced: "{{ all_applications_synced }}"
+            all_healthy: "{{ all_applications_healthy }}"
+            total: "{{ existing_application_names | default([]) | length }}"
+            unhealthy: "{{ unhealthy_apps | default([]) }}"
+            unsynced: "{{ unsynced_apps | default([]) }}"
+            details: "{{ application_details_summary | default([]) }}"
+          applicationsets:
+            expected: "{{ expected_applicationsets | length }}"
+            found: "{{ applicationset_results | default([]) | selectattr('exists') | list | length }}"
+            all_exist: "{{ all_applicationsets_exist }}"
+            total: "{{ existing_applicationset_names | default([]) | length }}"
+            details: "{{ applicationset_details_summary | default([]) }}"
+
+    # ===== STEP 10: Verification Summary =====
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD Configuration Verification Summary"
+          - "=========================================="
+          - ""
+          - "ArgoCD URL: {{ argocd_base_url }}"
+          - "ArgoCD Version: {{ argocd_version }}"
+          - "API Accessible: {{ 'YES' if api_accessible else 'NO' }}"
+          - "Authentication: {{ 'VALID' if api_auth_valid else 'INVALID' }}"
+          - ""
+          - "PROJECTS:"
+          - "  Total in ArgoCD: {{ existing_project_names | default([]) | length }}"
+          - "  Expected: {{ expected_projects | length }}"
+          - "  Found: {{ project_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_projects_exist }}"
+          - ""
+          - "REPOSITORIES:"
+          - "  Total in ArgoCD: {{ existing_repository_urls | default([]) | length }}"
+          - "  Expected: {{ expected_repositories | length }}"
+          - "  Found: {{ repository_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_repositories_exist }}"
+          - "  All Connected: {{ all_repositories_connected }}"
+          - ""
+          - "CLUSTERS:"
+          - "  Total in ArgoCD: {{ existing_cluster_names | default([]) | length }}"
+          - "  Expected: {{ expected_clusters | length }}"
+          - "  Found: {{ cluster_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_clusters_exist }}"
+          - "  All Reachable: {{ all_clusters_reachable }}"
+          - ""
+          - "APPLICATIONS:"
+          - "  Total in ArgoCD: {{ existing_application_names | default([]) | length }}"
+          - "  Expected: {{ expected_applications | length }}"
+          - "  Found: {{ application_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_applications_exist }}"
+          - "  All Synced: {{ all_applications_synced }}"
+          - "  All Healthy: {{ all_applications_healthy }}"
+          - ""
+          - "APPLICATIONSETS:"
+          - "  Total in ArgoCD: {{ existing_applicationset_names | default([]) | length }}"
+          - "  Expected: {{ expected_applicationsets | length }}"
+          - "  Found: {{ applicationset_results | default([]) | selectattr('exists') | list | length }}"
+          - "  All Exist: {{ all_applicationsets_exist }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Display application health details
+      ansible.builtin.debug:
+        msg:
+          - "APPLICATION HEALTH DETAILS:"
+          - "{{ application_details_summary | default([]) | to_nice_yaml }}"
+      when: application_details_summary is defined and application_details_summary | length > 0
+
+    - name: Display unhealthy applications if any
+      ansible.builtin.debug:
+        msg:
+          - "UNHEALTHY APPLICATIONS:"
+          - "{{ unhealthy_apps | default([]) }}"
+      when:
+        - unhealthy_apps is defined
+        - unhealthy_apps | length > 0
+
+    - name: Display out-of-sync applications if any
+      ansible.builtin.debug:
+        msg:
+          - "OUT-OF-SYNC APPLICATIONS:"
+          - "{{ unsynced_apps | default([]) }}"
+      when:
+        - unsynced_apps is defined
+        - unsynced_apps | length > 0
+
+    - name: Display disconnected repositories if any
+      ansible.builtin.debug:
+        msg:
+          - "DISCONNECTED REPOSITORIES:"
+          - >-
+            {{ repository_details_summary | default([]) |
+               selectattr('connected', 'equalto', false) |
+               map(attribute='repo') | list }}
+      when:
+        - repository_details_summary is defined
+        - not all_repositories_connected | bool
+
+    - name: Display unreachable clusters if any
+      ansible.builtin.debug:
+        msg:
+          - "UNREACHABLE CLUSTERS:"
+          - >-
+            {{ cluster_details_summary | default([]) |
+               selectattr('reachable', 'equalto', false) |
+               map(attribute='name') | list }}
+      when:
+        - cluster_details_summary is defined
+        - not all_clusters_reachable | bool
+
+    - name: Display missing resources if any
+      vars:
+        missing_projects: >-
+          {{ project_results | default([]) |
+             selectattr('exists', 'equalto', false) |
+             map(attribute='name') | list }}
+        missing_repos: >-
+          {{ repository_results | default([]) |
+             selectattr('exists', 'equalto', false) |
+             map(attribute='repo') | list }}
+        missing_clusters: >-
+          {{ cluster_results | default([]) |
+             selectattr('exists', 'equalto', false) |
+             map(attribute='cluster') | list }}
+        missing_apps: >-
+          {{ application_results | default([]) |
+             selectattr('exists', 'equalto', false) |
+             map(attribute='name') | list }}
+        missing_appsets: >-
+          {{ applicationset_results | default([]) |
+             selectattr('exists', 'equalto', false) |
+             map(attribute='name') | list }}
+      ansible.builtin.debug:
+        msg:
+          - "MISSING RESOURCES:"
+          - "  Projects: {{ missing_projects }}"
+          - "  Repositories: {{ missing_repos }}"
+          - "  Clusters: {{ missing_clusters }}"
+          - "  Applications: {{ missing_apps }}"
+          - "  ApplicationSets: {{ missing_appsets }}"
+      when: not all_checks_passed
+
+    - name: Fail if critical checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          ArgoCD configuration verification failed.
+          Unhealthy apps: {{ unhealthy_apps | default([]) }}
+          Unsynced apps: {{ unsynced_apps | default([]) }}
+          See summary above for details.
+      when: not all_checks_passed and fail_on_unhealthy | bool
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "ArgoCD configuration verification complete - all checks passed"
+      when: all_checks_passed

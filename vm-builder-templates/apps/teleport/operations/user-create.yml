@@ -1,0 +1,271 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/operations/user-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "teleport.users.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/operations/user-create.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "teleport"
+#       supported_versions: ["15.x", "16.x"]
+#       version_range: ">=15.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - teleport: "16.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Teleport API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_teleport_operations"
+#   dependencies: ["teleport_deployed", "teleport_admin_token_available", "teleport_role_created"]
+#   provides: ["teleport_user_created"]
+#   tags: ["teleport", "users", "identity", "access-control", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a local user in Teleport. Users are assigned roles that define their
+#     access permissions. This operation is idempotent - if the user exists, it
+#     will be skipped. For SSO users, use OIDC/SAML connector instead.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.teleport.admin_token"
+#         purpose: "Teleport API admin token for authentication"
+#       - path: "_state.apps.teleport.proxy_url"
+#         purpose: "Teleport proxy URL for API calls"
+#
+#     writes:
+#       - path: "_state.apps.teleport.users.{user_name}.created"
+#         example: true
+#       - path: "_state.apps.teleport.users.{user_name}.roles"
+#         example: ["access", "editor"]
+#       - path: "_state.apps.teleport.users.{user_name}.created_timestamp"
+#         example: "2026-01-27T12:20:00Z"
+
+- name: Teleport - Create User
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    teleport_base_url: "{{ teleport_proxy_url }}"
+    teleport_api_base: "{{ teleport_base_url }}/v1"
+    endpoint: "/users"
+
+    # User configuration defaults
+    user_version: "v2"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - user_name is defined and user_name | length > 0
+          - user_roles is defined and user_roles | length > 0
+        fail_msg: >-
+          Required inputs: user_name (string), user_roles (list of role names).
+          Optional: user_logins, user_kubernetes_groups, user_db_names, user_db_users
+        success_msg: "Required inputs validated: user_name={{ user_name }}, roles={{ user_roles }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and Teleport Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Teleport admin token
+      ansible.builtin.set_fact:
+        teleport_token: "{{ inventory._state.apps.teleport.admin_token }}"
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        teleport_base_url: "{{ inventory._state.apps.teleport.proxy_url }}"
+        teleport_api_base: "{{ inventory._state.apps.teleport.proxy_url }}/v1"
+      when: inventory._state.apps.teleport.proxy_url is defined
+
+    - name: Validate Teleport token is available
+      ansible.builtin.assert:
+        that:
+          - teleport_token | length > 0
+        fail_msg: "Teleport admin token not found in BWS _state. Ensure Teleport is configured."
+        success_msg: "Teleport admin token retrieved from BWS _state"
+
+    # ===== STEP 4: Check if User Already Exists (Idempotency) =====
+    - name: Check if user already exists
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ user_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_user
+      failed_when: false
+      no_log: false
+
+    - name: Determine if user exists
+      ansible.builtin.set_fact:
+        user_exists: "{{ existing_user.status == 200 }}"
+
+    - name: Skip creation if user exists
+      ansible.builtin.debug:
+        msg: "User '{{ user_name }}' already exists - skipping creation"
+      when: user_exists
+
+    # ===== STEP 5: Build User Payload =====
+    - name: Build user traits section
+      ansible.builtin.set_fact:
+        user_traits:
+          logins: "{{ user_logins | default([user_name]) }}"
+          kubernetes_groups: "{{ user_kubernetes_groups | default(omit) }}"
+          kubernetes_users: "{{ user_kubernetes_users | default(omit) }}"
+          db_names: "{{ user_db_names | default(omit) }}"
+          db_users: "{{ user_db_users | default(omit) }}"
+          aws_role_arns: "{{ user_aws_role_arns | default(omit) }}"
+      when: not user_exists
+
+    - name: Build user creation payload
+      ansible.builtin.set_fact:
+        user_payload:
+          kind: "user"
+          version: "{{ user_version }}"
+          metadata:
+            name: "{{ user_name }}"
+            description: "{{ user_description | default('Created via IDI automation') }}"
+            labels: "{{ user_labels | default({}) }}"
+            expires: "{{ user_expires | default(omit) }}"
+          spec:
+            roles: "{{ user_roles }}"
+            traits: "{{ user_traits | dict2items | rejectattr('value', 'undefined') | items2dict }}"
+      when: not user_exists
+      no_log: false
+
+    # ===== STEP 6: Create User =====
+    - name: Create user in Teleport
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ user_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not user_exists
+
+    - name: User creation completed
+      ansible.builtin.debug:
+        msg: "User '{{ user_name }}' created successfully with roles: {{ user_roles | join(', ') }}"
+      when: not user_exists and create_result is defined
+
+    # ===== STEP 7: Verify User Was Created =====
+    - name: Verify user exists after creation
+      ansible.builtin.uri:
+        url: "{{ teleport_api_base }}{{ endpoint }}/{{ user_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ teleport_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: verify_user
+      when: not user_exists
+      no_log: false
+
+    - name: Assert user verification succeeded
+      ansible.builtin.assert:
+        that:
+          - verify_user.status == 200
+        fail_msg: "Failed to verify user '{{ user_name }}' after creation"
+        success_msg: "User '{{ user_name }}' verified successfully"
+      when: not user_exists
+
+    # ===== STEP 8: Write User Status to BWS._state =====
+    - name: Update BWS inventory with user status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.teleport.users.{user_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ user_name }}" \
+          --argjson created true \
+          --arg timestamp "$TIMESTAMP" \
+          --argjson roles '{{ user_roles | to_json }}' \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.teleport == null then ._state.apps.teleport = {} else . end |
+          if ._state.apps.teleport.users == null then ._state.apps.teleport.users = {} else . end |
+          ._state.apps.teleport.users[$name] = {
+            "created": $created,
+            "roles": $roles,
+            "created_timestamp": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not user_exists
+
+    # ===== STEP 9: Output Result =====
+    - name: Display user creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if user_exists else 'created' }}"
+          user_name: "{{ user_name }}"
+          roles: "{{ user_roles }}"
+          message: >-
+            User '{{ user_name }}' {{ 'already exists' if user_exists else 'created successfully' }}.
+            {{ 'Status recorded in BWS _state.' if not user_exists else '' }}

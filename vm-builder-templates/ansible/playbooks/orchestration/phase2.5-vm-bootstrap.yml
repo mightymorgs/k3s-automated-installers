@@ -1,0 +1,74 @@
+---
+# playbook_metadata:
+#   id: "orchestration/phase2.5-vm-bootstrap"
+#   type: "orchestration"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "orchestration/phase2.5-vm-bootstrap.yml"
+#     category: "orchestration"
+#     subsystem: "vm-bootstrap"
+#     deployment_method: "ansible"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "ubuntu"
+#       folder_version: null
+#       supported_versions: ["22.04", "24.04"]
+#       version_range: ">=22.04"
+#
+#     requires:
+#       bws: ">=0.4.0"
+#       gh: ">=2.0.0"
+#       tailscale: ">=1.0.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - ubuntu: "24.04"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-22"
+#         notes: "Phase 2.5 golden master self-bootstrap via GitHub Actions runner"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["vm_provisioned", "github_runner_registered"]
+#   provides: ["bws_cli_installed", "gh_cli_installed", "tailscale_joined", "bootstrap_state_written"]
+#   tags: ["vm", "bootstrap", "golden-master", "phase2.5", "tailscale", "bws", "github"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Phase 2.5 VM self-bootstrap orchestration. Runs ON the VM via self-hosted GitHub Actions runner.
+#     Installs bootstrap tools (BWS CLI, GitHub CLI), joins Tailscale with auto-derived tags,
+#     and writes bootstrap state back to BWS.
+#
+# Phase 2.5: VM Self-Bootstrap Orchestration
+# Runs ON the VM via self-hosted GitHub Actions runner
+# Installs bootstrap tools, joins Tailscale, writes state to BWS
+
+# PHASE 1: Install Bootstrap Tools
+- name: Install BWS CLI
+  ansible.builtin.import_playbook: ../atomic/tools/bws/01-install-cli.yml
+  vars:
+    target_hosts: localhost
+
+- name: Install GitHub CLI
+  ansible.builtin.import_playbook: ../atomic/tools/github/01-install-gh-cli.yml
+  vars:
+    target_hosts: localhost
+
+# PHASE 2: Join Tailscale with Auto-Derived Tags
+- name: Join Tailscale via OAuth
+  ansible.builtin.import_playbook: ../atomic/networking/tailscale/host/01-join-via-oauth.yml
+  vars:
+    target_hosts: localhost
+    ansible_connection: local
+
+# PHASE 3: Write Bootstrap State to BWS
+- name: Write back bootstrap state to BWS
+  ansible.builtin.import_playbook: ../atomic/tools/secrets/06-write-back-bootstrap-state.yml
+  vars:
+    inventory_secret_name: "{{ inventory_secret_name | default('inventory/' ~ ansible_hostname) }}"

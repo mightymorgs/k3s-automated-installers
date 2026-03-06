@@ -1,0 +1,12 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  02-verify.yml:
+    summary: Verify Longhorn deployment is healthy
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from: []
+      writes_to:
+      - app: longhorn
+        field: verified

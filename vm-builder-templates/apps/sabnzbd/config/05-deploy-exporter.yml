@@ -1,0 +1,171 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sabnzbd/05-deploy-exporter"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sabnzbd/config/05-deploy-exporter.yml"
+#     category: "apps"
+#     subsystem: "sabnzbd"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["sabnzbd_deployed", "prometheus_deployed"]
+#   provides: ["sabnzbd_exporter_deployed"]
+#   tags: ["sabnzbd", "prometheus", "exporter", "monitoring", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Exportarr sidecar container to SABnzbd StatefulSet for Prometheus
+#     metrics scraping. Patches the StatefulSet to add the exportarr container
+#     on port 9710 and adds prometheus.io annotations for automatic discovery.
+#   requires_apps: ["sabnzbd", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.sabnzbd.api_key"
+#         purpose: "SABnzbd API key for Exportarr metrics collection"
+
+- name: Deploy Exportarr sidecar for SABnzbd
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    sabnzbd_namespace: "media-stack"
+    app_namespace: "{{ sabnzbd_namespace }}"
+    statefulset_name: sabnzbd
+    exporter_image: "ghcr.io/onedr0p/exportarr:v2.3.0"
+    exporter_port: 9710
+    app_internal_url: "http://localhost:8080"
+    exportarr_type: sabnzbd
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== VALIDATE PREREQUISITES ==========
+    - name: Fail if sabnzbd_api_key not provided
+      ansible.builtin.fail:
+        msg: "sabnzbd_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sabnzbd_api_key is not defined or sabnzbd_api_key | length == 0
+
+    - name: Check if SABnzbd StatefulSet exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset {{ statefulset_name }}
+          -n {{ app_namespace }} --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: sts_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if StatefulSet not deployed
+      ansible.builtin.debug:
+        msg: "SABnzbd StatefulSet not deployed - skipping exporter sidecar"
+      when: sts_check.rc != 0 or sts_check.stdout | length == 0
+
+    - name: End play if StatefulSet not available
+      ansible.builtin.meta: end_play
+      when: sts_check.rc != 0 or sts_check.stdout | length == 0
+
+    # ========== CHECK IF SIDECAR ALREADY EXISTS ==========
+    - name: Get current container names in StatefulSet
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset {{ statefulset_name }}
+          -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: container_names
+      changed_when: false
+
+    - name: Set sidecar existence fact
+      ansible.builtin.set_fact:
+        sidecar_exists: "{{ 'exportarr' in container_names.stdout.split() }}"
+
+    # ========== PATCH STATEFULSET WITH EXPORTER SIDECAR ==========
+    - name: Add Exportarr sidecar container to StatefulSet
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset {{ statefulset_name }}
+          -n {{ app_namespace }} --type json
+          -p '[{"op": "add", "path": "/spec/template/spec/containers/-", "value": {
+            "name": "exportarr",
+            "image": "{{ exporter_image }}",
+            "args": ["exportarr", "{{ exportarr_type }}"],
+            "ports": [{"containerPort": {{ exporter_port }}, "name": "metrics", "protocol": "TCP"}],
+            "env": [
+              {"name": "PORT", "value": "{{ exporter_port }}"},
+              {"name": "URL", "value": "{{ app_internal_url }}"},
+              {"name": "APIKEY", "value": "{{ sabnzbd_api_key }}"}
+            ],
+            "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "64Mi"}}
+          }}]'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: not sidecar_exists
+
+    # ========== ADD PROMETHEUS ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset {{ statefulset_name }}
+          -n {{ app_namespace }} --type merge
+          -p '{"spec": {"template": {"metadata": {"annotations": {
+            "prometheus.io/scrape": "true",
+            "prometheus.io/port": "{{ exporter_port }}",
+            "prometheus.io/path": "/metrics"
+          }}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: annotation_result
+      changed_when: "'patched' in annotation_result.stdout"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for StatefulSet rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status statefulset/{{ statefulset_name }}
+          -n {{ app_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not sidecar_exists
+
+    # ========== VERIFY SIDECAR IS RUNNING ==========
+    - name: Verify exportarr container is present after rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset {{ statefulset_name }}
+          -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: verify_containers
+      changed_when: false
+
+    - name: Set verification fact
+      ansible.builtin.set_fact:
+        sidecar_verified: "{{ 'exportarr' in verify_containers.stdout.split() }}"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display exporter deployment result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "SABnzbd Exportarr Sidecar Deployment"
+          - "=========================================="
+          - "StatefulSet: {{ app_namespace }}/{{ statefulset_name }}"
+          - "Exporter: {{ exporter_image }}"
+          - "Type: {{ exportarr_type }}"
+          - "Metrics Port: {{ exporter_port }}"
+          - "Internal URL: {{ app_internal_url }}"
+          - "Sidecar: {{ 'deployed' if not sidecar_exists else 'already exists' }}"
+          - "Verified: {{ sidecar_verified }}"
+          - "Prometheus Annotations: scrape=true, port={{ exporter_port }}"
+          - "=========================================="

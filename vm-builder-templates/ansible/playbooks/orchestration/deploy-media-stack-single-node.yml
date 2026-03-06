@@ -1,0 +1,238 @@
+---
+# =============================================================================
+# DEPRECATED: This orchestration playbook is no longer maintained.
+#
+# Use the GitHub Actions phase-based workflow instead:
+#   - phase2-provision-vm.yml      → VM provisioning via Terragrunt
+#   - phase2.5-vm-self-bootstrap.yml → Golden master self-configuration
+#   - phase3-dynamic.yml           → K3s + dynamic app installation
+#   - phase4-dynamic.yml           → App configuration (API keys, etc.)
+#
+# The self-hosted runner approach dynamically composes these phases,
+# eliminating the need for monolithic orchestration playbooks.
+#
+# This file is kept for reference only. Do not use in production.
+# =============================================================================
+#
+# playbook_metadata:
+#   id: "orchestration/deploy-media-stack-single-node"
+#   type: "orchestration"
+#   status: "deprecated"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "deploy-media-stack-single-node.yml"
+#     category: "orchestration"
+#     subsystem: "media-stack"
+#     version_folder: "n/a"
+#     deployment_method: "ansible"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "media-stack"
+#       folder_version: "n/a"
+#       supported_versions: ["single-node"]
+#       last_tested: "2025-11-11"
+#
+#     requires:
+#       k3s:
+#         minimum: "1.30.0"
+#         tested: ["1.33.5"]
+#       os:
+#         ubuntu: ">=22.04"
+#         tested: ["24.04"]
+#       ansible:
+#         minimum: "2.14"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         ansible: "2.16"
+#         result: "success"
+#         test_date: "2025-11-11"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: 20251111_media_stack_deploy
+#   dependencies: ["bws_access_token", "hypervisor_accessible"]
+#   provides: [
+#     "vm_provisioned",
+#     "k3s_installed",
+#     "longhorn_installed",
+#     "media_apps_deployed",
+#     "bws_inventory_updated",
+#     "vault_secrets_synced",
+#     "github_secrets_synced"
+#   ]
+#   tags: ["orchestration", "media-stack", "full-deployment", "k3s", "bws"]
+#   estimated_duration: 1800
+#   parallel_safe: false
+#   can_run_with: []
+#   idempotent: true
+#   description: Complete orchestration playbook to deploy media stack from scratch (Phase 0-6)
+- name: PHASE 0 - Resolve inventory via Bitwarden
+  hosts: localhost
+  gather_facts: false
+  vars:
+    default_host_vm_name: media-stack-k3s
+    inventory_secret_name: "{{ k3s_inventory_secret | default('inventory/' ~ default_host_vm_name) }}"
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+  tasks:
+    - name: Ensure Bitwarden access token available
+      ansible.builtin.assert:
+        that: [bws_access_token is defined, bws_access_token|length > 0]
+        fail_msg: BWS_ACCESS_TOKEN is required
+    - name: Resolve Bitwarden secret UUID via bws (serverless pattern)
+      ansible.builtin.command: >-
+        bws secret list --output json
+      register: bws_list
+      environment:
+        BWS_ACCESS_TOKEN: '{{ bws_access_token }}'
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: bws_access_token | length > 0
+    - name: Extract UUID for {{ inventory_secret_name }}
+      ansible.builtin.set_fact:
+        inventory_secret_uuid: >-
+          {{ (bws_list.stdout | default('[]') | from_json)
+               | selectattr('key','equalto', inventory_secret_name)
+               | map(attribute='id') | first | default('') }}
+      when: bws_list.rc is defined and bws_list.rc == 0
+    - name: Retrieve VM config from Bitwarden (bws)
+      ansible.builtin.command: >-
+        bws secret get {{ inventory_secret_uuid }} --output json
+      register: bws_get
+      environment:
+        BWS_ACCESS_TOKEN: '{{ bws_access_token }}'
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: inventory_secret_uuid | default('') | length > 0
+    - name: Parse VM config from bws secret
+      ansible.builtin.set_fact:
+        media_stack_config: '{{ (bws_get.stdout | from_json).value | from_json }}'
+      when: bws_get is defined and bws_get.stdout is defined and (bws_get.stdout
+        | length) > 0
+    - name: Fallback to error if not found
+      ansible.builtin.fail:
+        msg: Bitwarden secret {{ inventory_secret_name }} not found or empty
+      when: media_stack_config is not defined
+    - name: Derive deployment variables
+      ansible.builtin.set_fact:
+        vm_name: '{{ media_stack_config.identity.hostname }}'
+        vm_static_ip: '{{ media_stack_config.identity.ansible_host }}'
+        vm_mac_address: "{{ media_stack_config.identity.mac | default('') }}"
+        vm_vcpu: '{{ media_stack_config.hardware.vcpu | default(12) }}'
+        vm_memory_mb: '{{ media_stack_config.hardware.memory_mb | default(24576) }}'
+        vm_gateway: "{{ media_stack_config.network.gateway | default('192.168.0.1') }}"
+        vm_dns_servers: "{{ media_stack_config.network.dns | default(['1.1.1.1','8.8.8.8']) }}"
+        network_bridge_name: "{{ media_stack_config.network.bridge | default('br0') }}"
+        ssh_authorized_keys: '{{ media_stack_config.ssh.authorized_keys | default([]) }}'
+    - name: Add runtime host
+      ansible.builtin.add_host:
+        name: '{{ vm_name }}'
+        ansible_host: '{{ vm_static_ip }}'
+        ansible_user: "{{ media_stack_config.ssh.user | default('ubuntu') }}"
+        groups: [k3s_masters, vm_hosts]
+- name: PHASE 1 - Provision VM via Terraform
+  ansible.builtin.import_playbook: atomic/platform/ubuntu/common/qemu-host/vm-deploy/terraform/02-deploy-local.yml
+  vars:
+    vm_name: "{{ hostvars['localhost'].vm_name }}"
+    vm_static_ip: "{{ hostvars['localhost'].vm_static_ip }}"
+    vm_mac_address: "{{ hostvars['localhost'].vm_mac_address | default('') }}"
+    vm_vcpu: "{{ hostvars['localhost'].vm_vcpu }}"
+    vm_memory_mb: "{{ hostvars['localhost'].vm_memory_mb }}"
+    vm_gateway: "{{ hostvars['localhost'].vm_gateway }}"
+    vm_dns_servers: "{{ hostvars['localhost'].vm_dns_servers }}"
+    network_bridge_name: "{{ hostvars['localhost'].network_bridge_name }}"
+    ssh_authorized_keys: "{{ hostvars['localhost'].ssh_authorized_keys }}"
+    terraform_deployment_dir: >-
+      {{ playbook_dir | regex_replace('/playbooks/.*$', '') }}/../infra/terraform/deployments/media-stack-single-node
+- name: PHASE 2 - Wait for VM and install K3s
+  hosts: localhost_vm_host
+  gather_facts: false
+  tasks:
+    - name: Try waiting for SSH on static IP
+      block:
+        - name: Wait for SSH on VM (static IP)
+          ansible.builtin.wait_for:
+            host: "{{ hostvars['localhost'].vm_static_ip }}"
+            port: 22
+            timeout: 300
+            delay: 20
+      rescue:
+        - name: Attempt to discover VM IP via QEMU Guest Agent
+          ansible.builtin.shell: |
+            set -euo pipefail
+            virsh domifaddr {{ hostvars['localhost'].vm_name }} --source agent 2>/dev/null \
+              | awk '/ipv4/ {print $4}' | cut -d'/' -f1 | head -n1
+          register: vm_ip_guess
+          changed_when: false
+          failed_when: false
+        - name: Fallback to ARP/neighbour discovery on bridge
+          ansible.builtin.shell: |
+            set -euo pipefail
+            ip neigh show dev {{ hostvars['localhost'].network_bridge_name | default('br0') }} \
+              | awk '/REACHABLE|STALE/ {print $1}' | head -n1
+          register: vm_ip_arp
+          changed_when: false
+          failed_when: false
+        - name: Select discovered IP
+          ansible.builtin.set_fact:
+            vm_effective_ip: >-
+              {{ (vm_ip_guess.stdout | trim) if (vm_ip_guess.stdout | default('')
+              | trim | length > 0)
+                 else (vm_ip_arp.stdout | default('') | trim) }}
+        - name: Show discovered IP (if any)
+          ansible.builtin.debug:
+            msg: "Discovered VM IP via virsh/ARP: {{ vm_effective_ip | default('<none>') }}"
+        - name: Update dynamic host to use discovered IP
+          when: vm_effective_ip is defined and vm_effective_ip | length > 0
+          ansible.builtin.add_host:
+            name: "{{ hostvars['localhost'].vm_name }}"
+            ansible_host: '{{ vm_effective_ip }}'
+            ansible_user: "{{ hostvars['localhost'].media_stack_config.ssh.user | default('ubuntu') }}"
+            groups: [k3s_masters, vm_hosts]
+        - name: Wait for SSH on VM (discovered IP)
+          when: vm_effective_ip is defined and vm_effective_ip | length > 0
+          ansible.builtin.wait_for:
+            host: '{{ vm_effective_ip }}'
+            port: 22
+            timeout: 420
+            delay: 15
+- name: Install Docker on VM
+  ansible.builtin.import_playbook: atomic/platform/ubuntu/common/qemu-host/vm-deploy/03-install-docker-engine.yml
+  vars:
+    vm_static_ip: "{{ hostvars['localhost'].vm_static_ip }}"
+- name: Install K3s control plane
+  ansible.builtin.import_playbook: atomic/platform/k3s/1.33/server/01-install.yml
+  vars:
+    vm_static_ip: "{{ hostvars['localhost'].vm_static_ip }}"
+    k3s_bootstrap_token: "{{ hostvars['localhost'].media_stack_config.k3s.bootstrap_token }}"
+    k3s_cluster_token: "{{ hostvars['localhost'].media_stack_config.k3s.cluster_token }}"
+- name: Install Longhorn distributed storage
+  ansible.builtin.import_playbook: atomic/platform/k3s/1.33/storage/01-install-longhorn.yml
+  vars:
+    target_hosts: k3s_masters
+- name: PHASE 3 - Deploy Media Workloads
+  ansible.builtin.import_playbook: atomic/apps/media-stack/staging/kustomize/01-deploy-media-stack.yml
+  vars:
+    target_hosts: k3s_masters
+- name: PHASE 4 - Update inventory in Bitwarden
+  ansible.builtin.import_playbook: atomic/tools/secrets/update-bws-inventory.yml
+  vars:
+    host_vm_name: "{{ hostvars['localhost'].vm_name }}"
+    inventory_secret_name: "{{ hostvars['localhost'].inventory_secret_name }}"
+    target_hosts: k3s_masters
+- name: PHASE 5 - Write K3s details to Vault
+  ansible.builtin.import_playbook: atomic/tools/vault/01-write-k3s-secrets.yml
+  vars:
+    host_vm_name: "{{ hostvars['localhost'].vm_name }}"
+    target_hosts: k3s_masters
+- name: PHASE 6 - Sync references to GitHub Actions secrets
+  ansible.builtin.import_playbook: atomic/tools/github/07-sync-secrets.yml
+  vars:
+    target_repo_name: "{{ github_repo_name | default('media-stack') }}"
+    inventory_secret_name: "{{ hostvars['localhost'].inventory_secret_name }}"
+    host_vm_name: "{{ hostvars['localhost'].vm_name }}"

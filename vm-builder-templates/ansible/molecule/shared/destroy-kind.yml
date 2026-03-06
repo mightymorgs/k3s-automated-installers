@@ -1,0 +1,17 @@
+---
+- name: Destroy Kind cluster
+  hosts: localhost
+  gather_facts: false
+  vars:
+    kind_cluster_name: "molecule-test"
+  tasks:
+    - name: Delete Kind cluster
+      ansible.builtin.command: kind delete cluster --name {{ kind_cluster_name }}
+      register: kind_delete
+      changed_when: kind_delete.rc == 0
+      failed_when: false
+
+    - name: Remove temp kubeconfig
+      ansible.builtin.file:
+        path: /tmp/molecule-kubeconfig
+        state: absent

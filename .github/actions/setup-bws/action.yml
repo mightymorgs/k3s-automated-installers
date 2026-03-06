@@ -1,0 +1,46 @@
+name: Setup BWS
+description: Install BWS CLI and cache all secrets to /tmp/bws_secrets.json
+
+inputs:
+  bws_access_token:
+    description: BWS access token
+    required: true
+  bws_version:
+    description: BWS CLI version
+    required: false
+    default: '1.0.0'
+
+outputs:
+  cache_path:
+    description: Path to cached secrets JSON
+    value: /tmp/bws_secrets.json
+  secrets_count:
+    description: Number of cached secrets
+    value: ${{ steps.cache.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install BWS CLI
+      shell: bash
+      run: |
+        if command -v bws >/dev/null 2>&1; then
+          echo "BWS CLI already installed: $(bws --version)"
+        else
+          curl -fsSL "https://github.com/bitwarden/sdk-sm/releases/download/bws-v${{ inputs.bws_version }}/bws-x86_64-unknown-linux-gnu-${{ inputs.bws_version }}.zip" -o /tmp/bws.zip
+          unzip -q /tmp/bws.zip -d /tmp/
+          sudo install -m 0755 /tmp/bws /usr/local/bin/bws
+          rm -f /tmp/bws.zip /tmp/bws
+          echo "BWS CLI installed: $(bws --version)"
+        fi
+
+    - name: Cache BWS secret list
+      id: cache
+      shell: bash
+      env:
+        BWS_ACCESS_TOKEN: ${{ inputs.bws_access_token }}
+      run: |
+        bws secret list --output json > /tmp/bws_secrets.json
+        COUNT=$(jq length /tmp/bws_secrets.json)
+        echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+        echo "Cached $COUNT secrets from BWS"

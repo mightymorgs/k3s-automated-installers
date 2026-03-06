@@ -1,0 +1,43 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  awx-mcp-deployment.yaml:
+    summary: 'K8s Deployment: awx-mcp-deployment.yaml'
+    source: inferred
+    confidence: medium
+  awx-mcp-service.yaml:
+    summary: 'K8s Service: awx-mcp-service.yaml'
+    source: inferred
+    confidence: medium
+  k8s-rag-mcp-deployment.yaml:
+    summary: 'K8s Deployment: k8s-rag-mcp-deployment.yaml'
+    source: inferred
+    confidence: medium
+  k8s-rag-mcp-service.yaml:
+    summary: 'K8s Service: k8s-rag-mcp-service.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  teleport-mcp-deployment.yaml:
+    summary: 'K8s Deployment: teleport-mcp-deployment.yaml'
+    source: inferred
+    confidence: medium
+  teleport-mcp-service.yaml:
+    summary: 'K8s Service: teleport-mcp-service.yaml'
+    source: inferred
+    confidence: medium
+  vault-mcp-deployment.yaml:
+    summary: 'K8s Deployment: vault-mcp-deployment.yaml'
+    source: inferred
+    confidence: medium
+  vault-mcp-service.yaml:
+    summary: 'K8s Service: vault-mcp-service.yaml'
+    source: inferred
+    confidence: medium

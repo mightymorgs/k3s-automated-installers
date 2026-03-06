@@ -1,0 +1,15 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-grafana-config.yml:
+    summary: Verify that Grafana is properly configured. Checks that expected datasources
+      exist and are healthy, required dashboards are present, and folders are created.
+      Provides a comprehensive health check for Grafana observability setup.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ grafana_api_base }}/health'
+    - '{{ grafana_api_base }}/datasources'
+    - '{{ grafana_api_base }}/datasources/name/{{ item | urlencode }}/health'
+    - '{{ grafana_api_base }}/folders'
+    - '{{ grafana_api_base }}/search?type=dash-db'

@@ -1,0 +1,7 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  values.yaml.j2:
+    summary: 'Jinja2 template: values.yaml.j2'
+    source: inferred
+    confidence: medium

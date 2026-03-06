@@ -1,0 +1,101 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure Radarr via API (root folders, naming)
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ radarr_url }}/api/v3/system/status'
+    - '{{ radarr_url }}/api/v3/rootfolder'
+    - '{{ radarr_url }}/api/v3/rootfolder'
+    - '{{ radarr_url }}/api/v3/config/host'
+    - '{{ radarr_url }}/api/v3/config/host'
+    - '{{ radarr_url }}/api/v3/config/naming'
+    - '{{ radarr_url }}/api/v3/config/naming'
+  05-wire-sabnzbd.yml:
+    summary: Register SABnzbd as download client in Radarr and create movies-radarr
+      category
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ radarr_url }}/api/v3/system/status'
+    - '{{ sabnzbd_url }}/api?mode=version&output=json&apikey={{ sabnzbd_api_key }}'
+    - '{{ sabnzbd_url }}/api?mode=get_config&section=categories&apikey={{ sabnzbd_api_key
+      }}&output=json'
+    - '{{ sabnzbd_url }}/api?mode=set_config&section=categories&keyword=movies-radarr&name=name&value=movies-radarr&apikey={{
+      sabnzbd_api_key }}&output=json'
+    - '{{ radarr_url }}/api/v3/downloadclient'
+    - '{{ radarr_url }}/api/v3/downloadclient'
+    requires_apps:
+    - sabnzbd
+    references_services:
+    - sabnzbd
+  06-wire-qbittorrent.yml:
+    summary: Register qBittorrent as torrent download client in Radarr and create
+      movies-radarr category
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ radarr_url }}/api/v3/system/status'
+    - '{{ qbittorrent_url }}/api/v2/app/version'
+    - '{{ qbittorrent_url }}/api/v2/torrents/categories'
+    - '{{ qbittorrent_url }}/api/v2/torrents/createCategory'
+    - '{{ radarr_url }}/api/v3/downloadclient'
+    - '{{ radarr_url }}/api/v3/downloadclient'
+    requires_apps:
+    - qbittorrent
+    references_services:
+    - qbittorrent
+  07-wire-jellyfin.yml:
+    summary: Register Jellyfin as notification connection in Radarr for library refresh
+      on movie import
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ radarr_url }}/api/v3/system/status'
+    - '{{ radarr_url }}/api/v3/notification'
+    - '{{ radarr_url }}/api/v3/notification'
+    requires_apps:
+    - jellyfin
+  08-wire-plex.yml:
+    summary: Register Plex as notification connection in Radarr for library refresh
+      on movie import
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ radarr_url }}/api/v3/system/status'
+    - '{{ radarr_url }}/api/v3/notification'
+    - '{{ radarr_url }}/api/v3/notification'
+    requires_apps:
+    - plex
+  09-deploy-exporter.yml:
+    summary: Deploy Exportarr sidecar container to Radarr StatefulSet for Prometheus
+      metrics scraping. Patches the StatefulSet to add the exportarr container on
+      port 9708 and adds prometheus.io annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+    references_services:
+    - app
+  10-import-plex-watchlist.yml:
+    summary: Import Plex Watchlist into Radarr as an automatic import list. When users
+      add movies to their Plex Watchlist, Radarr will automatically search for and
+      download them. Uses the PlexImport implementation with the Plex authentication
+      token.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ radarr_url }}/api/v3/system/status'
+    - '{{ radarr_url }}/api/v3/importlist'
+    - '{{ radarr_url }}/api/v3/importlist'
+    requires_apps:
+    - plex
+depends_on_apps:
+- app
+- jellyfin
+- plex
+- prometheus
+- qbittorrent
+- sabnzbd

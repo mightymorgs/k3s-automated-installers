@@ -1,0 +1,35 @@
+name: Tailscale Userspace Connect
+description: Start tailscaled in userspace mode and connect
+
+inputs:
+  auth_key:
+    description: Tailscale auth key
+    required: true
+  hostname:
+    description: Device hostname
+    required: true
+  accept_dns:
+    description: Accept DNS from Tailscale
+    required: false
+    default: 'false'
+
+outputs:
+  socket_path:
+    description: Path to tailscaled socket
+    value: /tmp/tailscaled.sock
+
+runs:
+  using: composite
+  steps:
+    - name: Start tailscaled and connect
+      shell: bash
+      run: |
+        set -euo pipefail
+        tailscaled --state=mem: --socket=/tmp/tailscaled.sock --tun=userspace-networking >/tmp/ts.log 2>&1 &
+        sleep 3
+        tailscale --socket=/tmp/tailscaled.sock up \
+          --authkey "${{ inputs.auth_key }}" \
+          --ssh \
+          --hostname "${{ inputs.hostname }}" \
+          --accept-dns=${{ inputs.accept_dns }}
+        tailscale --socket=/tmp/tailscaled.sock status

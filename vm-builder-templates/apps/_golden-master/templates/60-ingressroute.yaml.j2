@@ -1,0 +1,24 @@
+{#
+  IngressRoute for {{ app_name }} (Traefik CRD).
+  Prefix 60 → uses kubectl {{ kubectl_action }}.
+  Phase 5 responsibility — included here for completeness.
+#}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ app_name }}
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/managed-by: idi-ansible
+    app.kubernetes.io/part-of: golden-master
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`{{ app_name }}.{{ ingress_domain | default('example.com') }}`)
+      kind: Rule
+      services:
+        - name: {{ app_name }}
+          port: {{ service_port | default(container_port | default(8080)) }}

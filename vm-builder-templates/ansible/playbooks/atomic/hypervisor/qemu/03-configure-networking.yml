@@ -1,0 +1,231 @@
+---
+# playbook_metadata:
+#   id: "atomic/hypervisor/qemu/03-configure-networking"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/hypervisor/qemu/03-configure-networking.yml"
+#     category: "hypervisor"
+#     subsystem: "qemu"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "libvirt"
+#       folder_version: null
+#       supported_versions: ["9.x", "10.x"]
+#       version_range: ">=9.0.0"
+#
+#     requires:
+#       libvirt_installed: true
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - libvirt: "10.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-02-03"
+#         notes: "Dynamic interface discovery — works with eth0, eno1, enp*, br0"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260203_dynamic_networking"
+#   dependencies: ["libvirt_installed"]
+#   provides: ["libvirt_network_configured"]
+#   tags: ["libvirt", "networking", "bridge", "nat", "hypervisor"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure libvirt networking dynamically based on the hypervisor's
+#     actual interfaces. Supports NAT mode (safe default using libvirt's
+#     built-in virbr0) and bridge mode (attaches VMs to an existing bridge
+#     or creates one on the default upstream interface). Never blindly
+#     disables networks or assumes a specific interface name.
+
+- name: Configure libvirt networking
+  hosts: hypervisor
+  become: true
+  vars:
+    # Passed via -e from the workflow; defaults to NAT (safest option)
+    network_mode: "{{ network_mode | default('nat') }}"
+
+  tasks:
+    # ---- Discovery ----
+
+    - name: Discover default route interface
+      ansible.builtin.shell: |
+        set -o pipefail
+        ip route show default | awk '/default/{print $5; exit}'
+      args:
+        executable: /bin/bash
+      register: default_route_iface
+      changed_when: false
+
+    - name: Set upstream interface fact
+      ansible.builtin.set_fact:
+        upstream_iface: "{{ default_route_iface.stdout | trim }}"
+
+    - name: Fail if no default route found
+      ansible.builtin.fail:
+        msg: >-
+          No default route interface detected. Cannot configure networking
+          without knowing which interface carries internet traffic.
+      when: upstream_iface == ""
+
+    - name: Discover existing bridges
+      ansible.builtin.shell: |
+        set -o pipefail
+        ip -o link show type bridge 2>/dev/null \
+          | awk -F': ' '{print $2}' || true
+      args:
+        executable: /bin/bash
+      register: existing_bridges_raw
+      changed_when: false
+
+    - name: Set bridge facts
+      ansible.builtin.set_fact:
+        existing_bridges: "{{ existing_bridges_raw.stdout_lines | default([]) }}"
+        has_br0: "{{ 'br0' in (existing_bridges_raw.stdout_lines | default([])) }}"
+
+    - name: Check libvirt default network status
+      ansible.builtin.command: virsh net-info default
+      register: default_net_info
+      changed_when: false
+      failed_when: false
+
+    - name: Display discovered network topology
+      ansible.builtin.debug:
+        msg: |
+          ======= Network Discovery =======
+          Requested mode:    {{ network_mode }}
+          Upstream interface: {{ upstream_iface }}
+          Existing bridges:  {{ existing_bridges | join(', ') or 'none' }}
+          Libvirt default:   {{ 'exists' if default_net_info.rc == 0 else 'not defined' }}
+          ==================================
+
+    # ---- NAT Mode (safe default) ----
+    # Uses libvirt's built-in default NAT network (virbr0).
+    # VMs get 192.168.122.x addresses and NAT through the host.
+    # Works on any machine regardless of interface names.
+
+    - name: Ensure libvirt default NAT network exists
+      ansible.builtin.command: virsh net-define /usr/share/libvirt/networks/default.xml
+      when:
+        - network_mode == "nat"
+        - default_net_info.rc != 0
+      changed_when: true
+      failed_when: false
+
+    - name: Start libvirt default NAT network
+      ansible.builtin.command: virsh net-start default
+      when:
+        - network_mode == "nat"
+      changed_when: true
+      failed_when: false
+
+    - name: Enable autostart for default NAT network
+      ansible.builtin.command: virsh net-autostart default
+      when:
+        - network_mode == "nat"
+      changed_when: true
+      failed_when: false
+
+    - name: NAT mode summary
+      ansible.builtin.debug:
+        msg: |
+          NAT mode configured:
+          - VMs will use libvirt default network (virbr0 / 192.168.122.0/24)
+          - VMs NAT through {{ upstream_iface }} to reach the internet
+          - No changes to host networking — safe for any machine
+      when: network_mode == "nat"
+
+    # ---- Bridge Mode ----
+    # VMs connect directly to the LAN via a bridge interface.
+    # If br0 already exists (manually configured), we use it.
+    # Otherwise we skip bridge creation (too dangerous to auto-create
+    # a bridge on a remote machine — could drop the SSH connection).
+
+    - name: Stop and disable libvirt default NAT (bridge mode replaces it)
+      ansible.builtin.shell: |
+        virsh net-destroy default 2>/dev/null || true
+        virsh net-autostart default --disable 2>/dev/null || true
+      when:
+        - network_mode == "bridge"
+        - default_net_info.rc == 0
+      changed_when: true
+
+    - name: Check for usable bridge
+      ansible.builtin.set_fact:
+        bridge_iface: >-
+          {{ 'br0' if has_br0 else
+             (existing_bridges | first | default('')) }}
+
+    - name: Create libvirt bridge network definition
+      ansible.builtin.copy:
+        dest: /tmp/libvirt-bridge-net.xml
+        mode: "0644"
+        content: |
+          <network>
+            <name>br0</name>
+            <forward mode="bridge"/>
+            <bridge name="{{ bridge_iface }}"/>
+          </network>
+      when:
+        - network_mode == "bridge"
+        - bridge_iface | length > 0
+
+    - name: Define libvirt bridge network
+      ansible.builtin.shell: |
+        virsh net-destroy br0 2>/dev/null || true
+        virsh net-undefine br0 2>/dev/null || true
+        virsh net-define /tmp/libvirt-bridge-net.xml
+        virsh net-start br0
+        virsh net-autostart br0
+      when:
+        - network_mode == "bridge"
+        - bridge_iface | length > 0
+      changed_when: true
+
+    - name: Clean up temp network definition
+      ansible.builtin.file:
+        path: /tmp/libvirt-bridge-net.xml
+        state: absent
+
+    - name: Bridge mode summary (bridge found)
+      ansible.builtin.debug:
+        msg: |
+          Bridge mode configured:
+          - VMs will connect via bridge: {{ bridge_iface }}
+          - VMs get IPs directly on your LAN
+          - Upstream interface: {{ upstream_iface }}
+      when:
+        - network_mode == "bridge"
+        - bridge_iface | length > 0
+
+    - name: Bridge mode warning (no bridge found)
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Bridge mode requested but no bridge interface found.
+          Falling back to NAT mode to avoid disrupting connectivity.
+
+          To use bridge mode, create a bridge manually first:
+            1. sudo apt install bridge-utils
+            2. Edit /etc/netplan/*.yaml to create br0 with {{ upstream_iface }}
+            3. sudo netplan apply
+            4. Re-run this playbook with -e network_mode=bridge
+      when:
+        - network_mode == "bridge"
+        - bridge_iface | length == 0
+
+    - name: Fallback to NAT when bridge not available
+      ansible.builtin.shell: |
+        virsh net-define /usr/share/libvirt/networks/default.xml 2>/dev/null || true
+        virsh net-start default 2>/dev/null || true
+        virsh net-autostart default 2>/dev/null || true
+      when:
+        - network_mode == "bridge"
+        - bridge_iface | length == 0
+      changed_when: true

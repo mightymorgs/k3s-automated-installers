@@ -1,0 +1,162 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/traefik/05-wire-loki"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/config/05-wire-loki.yml"
+#     category: "apps"
+#     subsystem: "traefik"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["traefik_deployed", "loki_deployed"]
+#   provides: ["traefik_loki_wired", "traefik_access_logs_enabled"]
+#   tags: ["traefik", "loki", "integration", "wiring", "phase4", "observability"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Traefik structured JSON access logging and add Loki scrape labels
+#     so that Alloy (DaemonSet) can collect and forward access logs to Loki.
+#     Traefik logs to stdout by default; Alloy collects from /var/log/pods.
+#     This playbook adds --accesslog args for JSON format and labels the pods
+#     for Loki log discovery.
+#   requires_apps: ["traefik", "loki"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Wire Traefik Access Logs for Loki Collection
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    traefik_namespace: "traefik"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF TRAEFIK IS DEPLOYED ==========
+    - name: Check if Traefik deployment exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ traefik_namespace }}
+          -l app.kubernetes.io/name=traefik --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_deploy_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Traefik not deployed
+      ansible.builtin.meta: end_play
+      when: traefik_deploy_check.rc != 0 or traefik_deploy_check.stdout | length == 0
+
+    # ========== GET TRAEFIK DEPLOYMENT NAME ==========
+    - name: Get Traefik deployment name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ traefik_namespace }}
+          -l app.kubernetes.io/name=traefik
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_deploy_name
+      changed_when: false
+
+    - name: Set Traefik deployment name fact
+      ansible.builtin.set_fact:
+        traefik_deployment: "{{ traefik_deploy_name.stdout }}"
+
+    # ========== CHECK CURRENT ACCESS LOG ARGS ==========
+    - name: Get current Traefik container args
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[0].args}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_current_args
+      changed_when: false
+
+    - name: Check if access log already enabled
+      ansible.builtin.set_fact:
+        accesslog_already_enabled: "{{ '--accesslog=true' in (traefik_current_args.stdout | default('')) }}"
+
+    - name: Note access log already enabled
+      ansible.builtin.debug:
+        msg: "Traefik access logging already enabled - skipping args patch"
+      when: accesslog_already_enabled
+
+    # ========== PATCH TRAEFIK DEPLOYMENT WITH ACCESS LOG ARGS ==========
+    - name: Patch Traefik deployment with access log arguments
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          --type=json
+          -p=[
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--accesslog=true"},
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--accesslog.format=json"},
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--accesslog.fields.defaultmode=keep"},
+            {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--accesslog.fields.headers.defaultmode=drop"}
+          ]
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: traefik_args_patch
+      changed_when: "'patched' in traefik_args_patch.stdout and '(no change)' not in traefik_args_patch.stdout"
+      when: not accesslog_already_enabled
+
+    # ========== ADD LOKI SCRAPE LABELS ==========
+    - name: Check if Loki scrape label already set
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          -o jsonpath='{.spec.template.metadata.labels.loki\.io/scrape}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_label_check
+      changed_when: false
+      failed_when: false
+
+    - name: Add Loki scrape label to Traefik pod template
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch deployment {{ traefik_deployment }} -n {{ traefik_namespace }}
+          --type=merge
+          -p={"spec":{"template":{"metadata":{"labels":{"loki.io/scrape":"true"}}}}}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: label_patch
+      changed_when: "'patched' in label_patch.stdout and '(no change)' not in label_patch.stdout"
+      when: loki_label_check.stdout != "true"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Traefik rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status deployment/{{ traefik_deployment }}
+          -n {{ traefik_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      failed_when: false
+      when: not accesslog_already_enabled or loki_label_check.stdout != "true"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Traefik <-> Loki Wiring Complete"
+          - "=========================================="
+          - ""
+          - "Access Logging: {{ 'Already enabled' if accesslog_already_enabled else 'Enabled (JSON format)' }}"
+          - "Log Format: JSON"
+          - "Field Mode: keep (headers: drop)"
+          - "Loki Scrape Label: loki.io/scrape=true"
+          - ""
+          - "Traefik logs to stdout in JSON format."
+          - "Alloy DaemonSet collects from /var/log/pods automatically."
+          - "Logs available in Loki with label: namespace=traefik"
+          - "=========================================="

@@ -1,0 +1,204 @@
+---
+# playbook_metadata:
+#   id: "atomic/hypervisor/qemu/04b-install-bws-ansible"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/hypervisor/qemu/04b-install-bws-ansible.yml"
+#     category: "hypervisor"
+#     subsystem: "qemu"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "bws"
+#       folder_version: null
+#       supported_versions: ["1.0.x"]
+#       version_range: ">=1.0.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - bws: "1.0.0"
+#         ansible: "2.19.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-02-03"
+#         notes: "Tested on bare-metal hypervisor"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260203_phase0_tools"
+#   dependencies: []
+#   provides: ["bws_installed", "ansible_installed", "gh_cli_installed"]
+#   tags: ["bws", "ansible", "gh", "hypervisor", "tools"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Install BWS CLI, Ansible, and GitHub CLI on hypervisor host.
+#     These tools are needed for Phase 2 VM provisioning workflows
+#     and for the hypervisor to interact with BWS secrets directly.
+
+- name: Install BWS CLI, Ansible, and GitHub CLI
+  hosts: hypervisor
+  become: true
+
+  vars:
+    bws_version: "1.0.0"
+    gh_version: "2.63.2"
+    bws_base_url: "https://github.com/bitwarden/sdk-sm/releases/download"
+    gh_base_url: "https://github.com/cli/cli/releases/download"
+
+  tasks:
+    # --- BWS CLI ---
+    - name: Check if BWS is installed
+      ansible.builtin.command:
+        cmd: bws --version
+      register: bws_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install BWS CLI
+      when: bws_check.rc != 0
+      block:
+        - name: Detect architecture for BWS
+          ansible.builtin.set_fact:
+            bws_arch: "{{ 'aarch64' if ansible_architecture == 'aarch64' else 'x86_64' }}"
+
+        - name: Download BWS CLI
+          ansible.builtin.get_url:
+            url: >-
+              {{ bws_base_url }}/bws-v{{ bws_version }}/bws-{{
+              bws_arch }}-unknown-linux-gnu-{{ bws_version }}.zip
+            dest: /tmp/bws.zip
+            mode: '0644'
+
+        - name: Install unzip (if needed)
+          ansible.builtin.apt:
+            name: unzip
+            state: present
+            update_cache: true
+
+        - name: Extract BWS CLI
+          ansible.builtin.unarchive:
+            src: /tmp/bws.zip
+            dest: /tmp/
+            remote_src: true
+
+        - name: Install BWS to /usr/local/bin
+          ansible.builtin.copy:
+            src: /tmp/bws
+            dest: /usr/local/bin/bws
+            mode: '0755'
+            remote_src: true
+
+        - name: Clean up BWS temp files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/bws.zip
+            - /tmp/bws
+
+    # --- Ansible ---
+    - name: Check if Ansible is installed
+      ansible.builtin.command:
+        cmd: ansible --version
+      register: ansible_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Ansible
+      when: ansible_check.rc != 0
+      ansible.builtin.apt:
+        name:
+          - ansible
+          - python3-pip
+          - python3-venv
+        state: present
+        update_cache: true
+
+    # --- GitHub CLI ---
+    - name: Check if gh CLI is installed
+      ansible.builtin.command:
+        cmd: gh --version
+      register: gh_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install GitHub CLI
+      when: gh_check.rc != 0
+      block:
+        - name: Detect architecture for gh
+          ansible.builtin.set_fact:
+            gh_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+        - name: Download GitHub CLI
+          ansible.builtin.get_url:
+            url: >-
+              {{ gh_base_url }}/v{{ gh_version }}/gh_{{
+              gh_version }}_linux_{{ gh_arch }}.tar.gz
+            dest: /tmp/gh.tar.gz
+            mode: '0644'
+
+        - name: Extract GitHub CLI
+          ansible.builtin.unarchive:
+            src: /tmp/gh.tar.gz
+            dest: /tmp/
+            remote_src: true
+
+        - name: Install gh to /usr/local/bin
+          ansible.builtin.copy:
+            src: "/tmp/gh_{{ gh_version }}_linux_{{ gh_arch }}/bin/gh"
+            dest: /usr/local/bin/gh
+            mode: '0755'
+            remote_src: true
+
+        - name: Clean up gh temp files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/gh.tar.gz
+            - "/tmp/gh_{{ gh_version }}_linux_{{ gh_arch }}"
+
+    # --- Common dependencies ---
+    - name: Install common dependencies
+      ansible.builtin.apt:
+        name:
+          - jq
+          - curl
+          - git
+          - software-properties-common
+        state: present
+
+    # --- Verify ---
+    - name: Verify BWS installation
+      ansible.builtin.command:
+        cmd: bws --version
+      register: bws_version_out
+      changed_when: false
+
+    - name: Verify Ansible installation
+      ansible.builtin.command:
+        cmd: ansible --version
+      register: ansible_version_out
+      changed_when: false
+
+    - name: Verify gh installation
+      ansible.builtin.command:
+        cmd: gh --version
+      register: gh_version_out
+      changed_when: false
+
+    - name: Display tool versions
+      ansible.builtin.debug:
+        msg: |
+          Installed tools:
+          - BWS: {{ bws_version_out.stdout }}
+          - Ansible: {{ ansible_version_out.stdout_lines[0] }}
+          - gh: {{ gh_version_out.stdout_lines[0] }}

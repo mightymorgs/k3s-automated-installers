@@ -1,0 +1,85 @@
+name: Tailscale Create Auth Key
+description: Create a Tailscale auth key with specified tags
+
+inputs:
+  access_token:
+    description: Tailscale API access token
+    required: true
+  tags:
+    description: JSON array of tags (e.g. '["tag:ci", "tag:prod"]')
+    required: true
+  ephemeral:
+    description: Create ephemeral key
+    required: false
+    default: 'false'
+  reusable:
+    description: Create reusable key
+    required: false
+    default: 'false'
+  preauthorized:
+    description: Create pre-authorized key
+    required: false
+    default: 'true'
+  expiry_seconds:
+    description: Key expiry in seconds
+    required: false
+    default: '3600'
+
+outputs:
+  auth_key:
+    description: Tailscale auth key (masked)
+    value: ${{ steps.create.outputs.auth_key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create Tailscale auth key
+      id: create
+      shell: bash
+      run: |
+        set -euo pipefail
+        AT="${{ inputs.access_token }}"
+        TAGS='${{ inputs.tags }}'
+        EPHEMERAL="${{ inputs.ephemeral }}"
+        REUSABLE="${{ inputs.reusable }}"
+        PREAUTHORIZED="${{ inputs.preauthorized }}"
+        EXPIRY="${{ inputs.expiry_seconds }}"
+
+        AUTH_REQ=$(jq -cn \
+          --argjson tags "$TAGS" \
+          --argjson ephemeral "$EPHEMERAL" \
+          --argjson reusable "$REUSABLE" \
+          --argjson preauth "$PREAUTHORIZED" \
+          --argjson expiry "$EXPIRY" \
+          '{
+            capabilities: {
+              devices: {
+                create: {
+                  reusable: $reusable,
+                  ephemeral: $ephemeral,
+                  preauthorized: $preauth,
+                  tags: $tags
+                }
+              }
+            },
+            expirySeconds: $expiry
+          }')
+
+        RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+          -H "Authorization: Bearer $AT" \
+          -H 'Content-Type: application/json' \
+          -d "$AUTH_REQ" \
+          "https://api.tailscale.com/api/v2/tailnet/-/keys")
+
+        BODY=$(echo "$RESP" | sed '$d')
+        CODE=$(echo "$RESP" | tail -n1)
+
+        if [ "$CODE" != "200" ]; then
+          echo "Tailscale auth key create failed: HTTP $CODE" >&2
+          echo "$BODY" | jq -r '.' >&2 || echo "$BODY" >&2
+          exit 1
+        fi
+
+        KEY=$(echo "$BODY" | jq -r '.key')
+        echo "::add-mask::$KEY"
+        echo "auth_key=$KEY" >> "$GITHUB_OUTPUT"

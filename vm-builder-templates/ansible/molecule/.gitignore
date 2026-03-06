@@ -1,0 +1,8 @@
+# Real BWS data — never commit
+fixtures/bws-inventory.json
+fixtures/cross-app-state.json
+fixtures/per-app/
+
+# Molecule ephemeral state
+**/molecule/*/.molecule/
+**/__pycache__/

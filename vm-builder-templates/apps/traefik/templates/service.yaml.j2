@@ -1,0 +1,30 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('traefik') }}
+  namespace: {{ app_namespace | default('traefik') }}
+  labels:
+    app: {{ app_name | default('traefik') }}
+    app.kubernetes.io/name: {{ app_name | default('traefik') }}
+    app.kubernetes.io/instance: {{ app_name | default('traefik') }}
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('traefik') }}
+  ports:
+    - name: web
+      port: {{ web_port | default(8000) }}
+      targetPort: web
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ web_nodeport | default(30080) }}
+{% endif %}
+      protocol: TCP
+    - name: websecure
+      port: {{ websecure_port | default(8443) }}
+      targetPort: websecure
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ websecure_nodeport | default(30443) }}
+{% endif %}
+      protocol: TCP

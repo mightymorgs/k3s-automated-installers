@@ -1,0 +1,40 @@
+---
+# Teleport Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('teleport') }}
+  namespace: {{ app_namespace | default('teleport') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('teleport') }}
+    app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+spec:
+  type: {{ service_type | default('ClusterIP') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name | default('teleport') }}
+    app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+  ports:
+    - name: ssh-proxy
+      port: 3023
+      targetPort: ssh-proxy
+      protocol: TCP
+    - name: tunnel
+      port: 3024
+      targetPort: tunnel
+      protocol: TCP
+    - name: auth
+      port: 3025
+      targetPort: auth
+      protocol: TCP
+    - name: kube
+      port: 3027
+      targetPort: kube
+      protocol: TCP
+    - name: web
+      port: {{ web_port | default(3080) }}
+      targetPort: web
+{% if service_type | default('ClusterIP') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30444) }}
+{% endif %}
+      protocol: TCP

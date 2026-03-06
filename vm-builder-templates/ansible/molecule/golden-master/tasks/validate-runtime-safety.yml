@@ -1,0 +1,445 @@
+---
+# validate-runtime-safety.yml — Check for patterns that cause RUNTIME failures
+#
+# These checks go beyond static pattern matching. They detect the specific
+# anti-patterns that caused 9 Phase 3 failures in production:
+#
+#   1. Namespace.yaml in bulk-apply dirs with replace --force (cascade deletion)
+#   2. Verify playbook label selectors not matching actual deployment labels
+#   3. | length conditionals failing on NoneType (need is none guard)
+#   4. Secret decode tasks with wrong when: conditions (skipped when should run)
+#   5. Secrets applied with replace --force instead of kubectl apply
+#
+# Input variables (set by caller):
+#   app_path           — absolute path to the app directory (e.g. .../apps/grafana)
+#   validation_results — list accumulator for per-rule results
+#
+# All asserts use failed_when: false so validation continues for every rule.
+
+# ============================================================
+# 1. DISCOVER AND SLURP FILES
+# ============================================================
+
+- name: "{{ app_path | basename }} | RS | Find install playbooks"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/install"
+    patterns: "*.yml,*.yaml"
+    file_type: file
+  register: rs_install_files
+  failed_when: false
+
+- name: "{{ app_path | basename }} | RS | Skip if no install playbooks"
+  ansible.builtin.set_fact:
+    rs_install_content: ""
+    rs_has_playbooks: false
+  when: rs_install_files.files | default([]) | length == 0
+
+- name: "{{ app_path | basename }} | RS | Slurp install playbooks"
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  register: rs_install_slurped
+  loop: "{{ rs_install_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: rs_install_files.files | default([]) | length > 0
+
+- name: "{{ app_path | basename }} | RS | Combine install content"
+  ansible.builtin.set_fact:
+    rs_install_content: >-
+      {{ rs_install_slurped.results
+         | default([])
+         | selectattr('content', 'defined')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n---PLAYBOOK_SEPARATOR---\n') }}
+    rs_has_playbooks: true
+  when: rs_install_slurped.results is defined and rs_install_slurped.results | length > 0
+
+# Separate deploy vs verify content for targeted checks
+- name: "{{ app_path | basename }} | RS | Build deploy-only content"
+  ansible.builtin.set_fact:
+    rs_deploy_content: >-
+      {{ rs_install_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | selectattr('source', 'search', '01-deploy')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+    rs_verify_content: >-
+      {{ rs_install_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | selectattr('source', 'search', '02-verify')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+  when: rs_has_playbooks | default(false)
+
+# Slurp templates for cross-file label check
+- name: "{{ app_path | basename }} | RS | Find J2 templates"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/templates"
+    patterns: "*.j2,*.yaml.j2,*.yml.j2"
+    file_type: file
+  register: rs_template_files
+  failed_when: false
+
+- name: "{{ app_path | basename }} | RS | Find kustomize manifests"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/k8s-base"
+    patterns: "*.yml,*.yaml"
+    file_type: file
+  register: rs_kustomize_files
+  failed_when: false
+
+- name: "{{ app_path | basename }} | RS | Slurp templates"
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  register: rs_templates_slurped
+  loop: "{{ (rs_template_files.files | default([])) + (rs_kustomize_files.files | default([])) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: (rs_template_files.files | default([]) | length > 0) or (rs_kustomize_files.files | default([]) | length > 0)
+  failed_when: false
+
+- name: "{{ app_path | basename }} | RS | Combine template content"
+  ansible.builtin.set_fact:
+    rs_template_content: >-
+      {{ rs_templates_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+  when: rs_templates_slurped is defined
+
+- name: "{{ app_path | basename }} | RS | Default template content"
+  ansible.builtin.set_fact:
+    rs_template_content: ""
+  when: rs_templates_slurped is not defined
+
+# ============================================================
+# 2. DERIVE CONDITION FLAGS
+# ============================================================
+
+- name: "{{ app_path | basename }} | RS | Detect rule applicability flags"
+  ansible.builtin.set_fact:
+    rs_has_replace_force: >-
+      {{ 'replace --force' in rs_deploy_content | default('')
+         or 'kubectl_action' in rs_deploy_content | default('') }}
+    rs_has_length_check: >-
+      {{ '| length' in rs_install_content | default('') }}
+    rs_has_b64decode: >-
+      {{ 'b64decode' in rs_deploy_content | default('') }}
+    rs_has_secrets: >-
+      {{ 'secret' in rs_deploy_content | default('') | lower }}
+    rs_has_verify_playbook: >-
+      {{ rs_verify_content | default('') | trim | length > 0 }}
+  when: rs_has_playbooks | default(false)
+
+# ============================================================
+# 3. RULE CHECKS — CRITICAL
+# ============================================================
+
+# --- namespace-not-in-bulk-replace ---
+#
+# If a deploy playbook uses replace --force (or kubectl_action which may be
+# replace --force), verify that:
+#   a) It has a separate namespace-ensure task (safe pattern)
+#   b) Namespace references are NOT in the same block as replace --force
+#
+# The safe pattern is:
+#   - Separate task: kubectl create namespace X --dry-run=client -o yaml | kubectl apply -f -
+#   - Rendered templates with namespace.yaml use prefix < 40 (split-apply, always kubectl apply)
+#
+# The dangerous pattern is:
+#   - namespace.yaml in the same directory being applied with replace --force
+#   - This deletes the namespace, which cascade-deletes ALL resources in it
+
+- name: "{{ app_path | basename }} | RS | Rule: namespace-not-in-bulk-replace [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      # Must NOT have bulk directory apply with kubectl_action (which may be replace --force)
+      # The anti-pattern is: kubectl {{ kubectl_action }} -f {{ render_dir }}/
+      # This applies ALL files in the directory including namespace.yaml with replace --force
+      # The safe pattern is split-apply: loop over files, classify by kind, apply separately
+      - >-
+        rs_deploy_content is not regex('kubectl\s*\{\{.*kubectl_action.*\}\}\s*-f\s*\{\{.*render_dir.*\}\}/')
+    fail_msg: >-
+      CRITICAL [namespace-not-in-bulk-replace] {{ app_path | basename }}:
+      Uses bulk directory apply 'kubectl {{ '{{' }} kubectl_action {{ '}}' }} -f {{ '{{' }} render_dir {{ '}}' }}/'
+      which applies ALL rendered files (including namespace.yaml) with replace --force.
+      This causes namespace cascade deletion (all pods, secrets, PVCs destroyed).
+      Fix: use split-apply — classify each file by kind, apply protected kinds
+      (Namespace, Secret, PVC, PushSecret) with kubectl apply, workloads with kubectl_action.
+    success_msg: "PASS [namespace-not-in-bulk-replace]"
+    quiet: true
+  register: rs_rule_namespace_bulk
+  failed_when: false
+  when: rs_has_playbooks | default(false) and rs_has_replace_force | default(false) | bool
+
+# --- none-safe-length-check ---
+#
+# The | length filter raises a fatal Jinja2 error when applied to None.
+# This happens when a variable is undefined or a kubectl command returns empty.
+#
+# DANGEROUS:  when: result.stdout | length == 0
+# SAFE:       when: result.stdout is none or result.stdout | default("") | length == 0
+#
+# We check for the dangerous pattern: '| length' without a preceding
+# 'is none' or 'default(' guard on the same logical expression.
+
+- name: "{{ app_path | basename }} | RS | Rule: none-safe-length-check [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      # Either no bare '| length' checks exist, OR all of them have guards.
+      # We check for the anti-pattern: '| length' without 'is none' or 'default(' nearby.
+      # A simple heuristic: if the playbook has '| length', it must also have
+      # either 'is none' or 'default(' somewhere (indicating awareness of None safety).
+      - >-
+        '| length' not in rs_install_content
+        or 'is none' in rs_install_content
+        or "default('" in rs_install_content
+        or 'default("' in rs_install_content
+        or "default([]" in rs_install_content
+        or "| default('')" in rs_install_content
+    fail_msg: >-
+      CRITICAL [none-safe-length-check] {{ app_path | basename }}:
+      Found '| length' filter without None/undefined guard. The | length filter
+      raises a fatal Jinja2 error on None values. Fix: use
+      'VAR is none or VAR | default("") | length == 0' instead of
+      'VAR | length == 0'.
+    success_msg: "PASS [none-safe-length-check]"
+    quiet: true
+  register: rs_rule_none_safe_length
+  failed_when: false
+  when: rs_has_playbooks | default(false) and rs_has_length_check | default(false) | bool
+
+# --- secret-decode-when-exists ---
+#
+# When a playbook checks for an existing K8s secret and then decodes it,
+# the decode task must run WHEN the secret EXISTS (rc == 0), not when it
+# doesn't. A common bug is inverting the when: condition, causing the
+# decode to run on a nonexistent secret (empty stdout → empty credential).
+#
+# CORRECT:   when: existing_secret.rc == 0
+# DANGEROUS: when: existing_secret.rc != 0  (decode runs when secret missing!)
+
+- name: "{{ app_path | basename }} | RS | Rule: secret-decode-when-exists [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      # If b64decode is present, check that the when: condition is not negated.
+      # Look for patterns like: when: VAR.rc != 0 near b64decode (dangerous)
+      # or when: not VAR near b64decode (dangerous)
+      - >-
+        rs_deploy_content is not regex('b64decode[\s\S]{0,200}when:.*rc\s*!=\s*0')
+        and rs_deploy_content is not regex('when:.*rc\s*!=\s*0[\s\S]{0,200}b64decode')
+      # Also check for 'when: not existing_' pattern near b64decode
+      - >-
+        rs_deploy_content is not regex('b64decode[\s\S]{0,200}when:\s*not\s+existing_')
+        and rs_deploy_content is not regex('when:\s*not\s+existing_[\s\S]{0,200}b64decode')
+    fail_msg: >-
+      CRITICAL [secret-decode-when-exists] {{ app_path | basename }}:
+      Secret decode task (b64decode) has a negated when: condition. The decode
+      should run WHEN the secret exists (rc == 0), not when it doesn't.
+      An inverted condition causes the decode to process empty output, producing
+      empty credentials that corrupt the pipeline.
+    success_msg: "PASS [secret-decode-when-exists]"
+    quiet: true
+  register: rs_rule_secret_decode
+  failed_when: false
+  when: rs_has_playbooks | default(false) and rs_has_b64decode | default(false) | bool
+
+# --- secrets-always-apply ---
+#
+# K8s Secrets must NEVER be applied with replace --force because:
+#   1. replace --force deletes then recreates → transient window with no secret
+#   2. If the secret has a new generated value, PVC-stored data (DB passwords,
+#      config files) still has the old value → credential mismatch
+#   3. Other pods mounting the secret via secretKeyRef get restarted
+#
+# The golden master pattern is split-apply:
+#   - Prefix < 40 files (secrets, PVCs, namespace): always kubectl apply
+#   - Prefix >= 40 files (workloads): kubectl {{ kubectl_action }}
+
+- name: "{{ app_path | basename }} | RS | Rule: secrets-always-apply [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      # Must NOT have bulk directory apply with kubectl_action when secrets exist.
+      # The anti-pattern: kubectl {{ kubectl_action }} -f {{ render_dir }}/
+      # applies secrets with replace --force, rotating credentials and breaking PVC data.
+      # The safe pattern: split-apply with kind-based classification.
+      - >-
+        rs_deploy_content is not regex('kubectl\s*\{\{.*kubectl_action.*\}\}\s*-f\s*\{\{.*render_dir.*\}\}/')
+    fail_msg: >-
+      CRITICAL [secrets-always-apply] {{ app_path | basename }}:
+      Uses bulk directory apply which applies secrets with replace --force.
+      K8s Secrets must always use kubectl apply, never replace --force.
+      Fix: use split-apply — classify each file by kind, apply Secret/PVC/PushSecret
+      with kubectl apply, workloads with kubectl_action.
+    success_msg: "PASS [secrets-always-apply]"
+    quiet: true
+  register: rs_rule_secrets_apply
+  failed_when: false
+  when: >-
+    rs_has_playbooks | default(false)
+    and rs_has_secrets | default(false) | bool
+    and rs_has_replace_force | default(false) | bool
+
+# --- stale-register-reference ---
+#
+# After split-apply conversion, old register variable names like
+# manifests_apply must not be referenced anywhere in the playbook.
+# A stale reference causes 'variable is undefined' at runtime.
+
+- name: "{{ app_path | basename }} | RS | Rule: stale-register-reference [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - "'manifests_apply' not in rs_deploy_content | default('')"
+    fail_msg: >-
+      CRITICAL [stale-register-reference] {{ app_path | basename }}:
+      References 'manifests_apply' which does not exist after split-apply
+      conversion. The split-apply pattern creates 'protected_apply' and
+      'workload_apply' registers. Update all references.
+    success_msg: "PASS [stale-register-reference]"
+    quiet: true
+  register: rs_rule_stale_register
+  failed_when: false
+  when: rs_has_playbooks | default(false)
+
+# --- protected-kind-in-kubectl-action ---
+#
+# PushSecret and Secret files must never be in a kubectl {{ kubectl_action }}
+# command (even as individual files in a loop). They must always use kubectl apply.
+# This catches the case where files are listed individually but still use the
+# wrong action, which the bulk-apply check wouldn't catch.
+
+- name: "{{ app_path | basename }} | RS | Rule: protected-kind-in-kubectl-action [CRITICAL]"
+  ansible.builtin.assert:
+    that:
+      - >-
+        rs_deploy_content is not regex('kubectl_action.*pushsecret', ignorecase=True)
+      - >-
+        rs_deploy_content is not regex('kubectl\s*\{\{.*kubectl_action.*\}\}.*pushsecret', ignorecase=True)
+    fail_msg: >-
+      CRITICAL [protected-kind-in-kubectl-action] {{ app_path | basename }}:
+      PushSecret file is applied via kubectl_action (which may be replace --force).
+      PushSecrets are protected kinds and must always use kubectl apply.
+      Fix: apply pushsecret.yaml separately with 'kubectl apply -f'.
+    success_msg: "PASS [protected-kind-in-kubectl-action]"
+    quiet: true
+  register: rs_rule_protected_kind_action
+  failed_when: false
+  when: rs_has_playbooks | default(false) and rs_has_replace_force | default(false) | bool
+
+# ============================================================
+# 4. RULE CHECKS — WARNING
+# ============================================================
+
+# --- verify-label-exists-in-templates ---
+#
+# Cross-file check: extract the pod label selector from the verify playbook
+# (e.g., app.kubernetes.io/name=grafana) and verify that the same label
+# value exists in the app's J2 templates or kustomize manifests.
+#
+# A mismatched label means the verify playbook waits for pods that will
+# never match the selector, causing a timeout failure.
+
+- name: "{{ app_path | basename }} | RS | Extract verify label selectors"
+  ansible.builtin.set_fact:
+    rs_verify_has_label: >-
+      {{ 'app.kubernetes.io/name' in rs_verify_content | default('') }}
+    rs_template_has_label: >-
+      {{ 'app.kubernetes.io/name' in rs_template_content | default('') }}
+  when: rs_has_playbooks | default(false)
+
+- name: "{{ app_path | basename }} | RS | Rule: verify-label-exists-in-templates [WARNING]"
+  ansible.builtin.assert:
+    that:
+      # If the verify playbook uses app.kubernetes.io/name label selector,
+      # the templates must also define that label. If neither has the label,
+      # that's a separate issue (caught by the consistent-labels template rule).
+      - >-
+        not (rs_verify_has_label | default(false) | bool)
+        or (rs_template_has_label | default(false) | bool)
+    fail_msg: >-
+      WARNING [verify-label-exists-in-templates] {{ app_path | basename }}:
+      Verify playbook uses app.kubernetes.io/name label selector but no
+      matching label was found in templates/ or k8s-base/ manifests.
+      The verify playbook will wait for pods that never match, causing a
+      timeout failure. Fix: add the same app.kubernetes.io/name label to
+      the app's deployment/statefulset template.
+    success_msg: "PASS [verify-label-exists-in-templates]"
+    quiet: true
+  register: rs_rule_verify_label
+  failed_when: false
+  when: >-
+    rs_has_playbooks | default(false)
+    and rs_has_verify_playbook | default(false) | bool
+
+# ============================================================
+# 5. COLLECT RESULTS
+# ============================================================
+
+- name: "{{ app_path | basename }} | RS | Collect runtime safety results"
+  ansible.builtin.set_fact:
+    app_runtime_safety_results:
+      app: "{{ app_path | basename }}"
+      category: runtime_safety
+      rules:
+        - id: namespace-not-in-bulk-replace
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (rs_has_replace_force | default(false) | bool)
+               else ('pass' if (rs_rule_namespace_bulk.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: none-safe-length-check
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (rs_has_length_check | default(false) | bool)
+               else ('pass' if (rs_rule_none_safe_length.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: secret-decode-when-exists
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (rs_has_b64decode | default(false) | bool)
+               else ('pass' if (rs_rule_secret_decode.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: secrets-always-apply
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (rs_has_secrets | default(false) | bool and rs_has_replace_force | default(false) | bool)
+               else ('pass' if (rs_rule_secrets_apply.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: stale-register-reference
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (rs_has_playbooks | default(false))
+               else ('pass' if (rs_rule_stale_register.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: protected-kind-in-kubectl-action
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (rs_has_replace_force | default(false) | bool)
+               else ('pass' if (rs_rule_protected_kind_action.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: verify-label-exists-in-templates
+          severity: warning
+          status: >-
+            {{ 'skipped' if not (rs_has_verify_playbook | default(false) | bool)
+               else ('pass' if (rs_rule_verify_label.evaluated_to | default(true))
+                     else 'fail') }}
+
+- name: "{{ app_path | basename }} | RS | Append runtime safety results"
+  ansible.builtin.set_fact:
+    validation_results: "{{ validation_results | default([]) + [app_runtime_safety_results] }}"
+
+# ============================================================
+# 6. CLEANUP
+# ============================================================
+
+- name: "{{ app_path | basename }} | RS | Clear runtime safety variables"
+  ansible.builtin.set_fact:
+    rs_install_content: ""
+    rs_deploy_content: ""
+    rs_verify_content: ""
+    rs_template_content: ""
+    rs_has_playbooks: false

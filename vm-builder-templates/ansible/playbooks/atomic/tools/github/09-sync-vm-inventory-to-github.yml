@@ -1,0 +1,144 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/github/09-sync-vm-inventory-to-github"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/github/09-sync-vm-inventory-to-github.yml"
+#     category: "tools"
+#     subsystem: "github"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "gh-api"
+#       folder_version: null
+#       supported_versions: ["2020-01-01+"]
+#       version_range: ">=2020-01-01"
+#
+#     requires:
+#       bws: ">=0.4.0"
+#       python3: ">=3.8"
+#       pynacl: ">=1.4.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - gh-api: "2024-11-01"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-13"
+#         notes: "Fetches VM inventory from BWS, encrypts via NaCl, uploads to GitHub Actions secret VM_INVENTORY_JSON"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: []
+#   provides: ["github_vm_inventory_synced"]
+#   tags: ["github", "actions", "secrets", "inventory", "bws"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Sync VM inventory JSON from BWS to GitHub Actions secret VM_INVENTORY_JSON
+
+- name: Sync VM inventory from BWS to GitHub Actions secrets
+  hosts: localhost
+  gather_facts: false
+  vars:
+    inventory_secret_name: "{{ inventory_secret_name }}"
+    github_repo: "{{ github_repo }}"
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+    github_pat: "{{ lookup('env', 'GH_TOKEN') | default(lookup('env', 'GITHUB_TOKEN')) }}"
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+          - github_repo | length > 0
+          - bws_access_token | length > 0
+          - github_pat | length > 0
+        fail_msg: "Required: inventory_secret_name, github_repo, BWS_ACCESS_TOKEN, GH_TOKEN"
+      no_log: true
+
+    - name: Fetch BWS secret list
+      ansible.builtin.command: bws secret list --output json
+      environment:
+        BWS_ACCESS_TOKEN: '{{ bws_access_token }}'
+      register: bws_list
+      changed_when: false
+      no_log: true
+
+    - name: Extract inventory secret ID
+      ansible.builtin.set_fact:
+        bws_secret_id: >-
+          {{ (bws_list.stdout | from_json)
+             | selectattr('key', 'equalto', inventory_secret_name)
+             | map(attribute='id') | first | default('') }}
+
+    - name: Fetch inventory from BWS
+      ansible.builtin.command: bws secret get {{ bws_secret_id }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: '{{ bws_access_token }}'
+      register: bws_get
+      changed_when: false
+      no_log: true
+
+    - name: Extract inventory JSON
+      ansible.builtin.set_fact:
+        inventory_json: '{{ (bws_get.stdout | from_json).value }}'
+
+    - name: Get GitHub repo public key
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/{{ github_repo }}/actions/secrets/public-key
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: repo_pubkey
+      no_log: true
+
+    - name: Encrypt inventory using NaCl
+      ansible.builtin.shell: |
+        cat > /tmp/encrypt_input.json <<'EOF'
+        {{ inventory_json }}
+        EOF
+        python3 - "{{ repo_pubkey.json.key }}" <<'PY'
+        import base64, sys
+        from nacl import encoding, public
+
+        key_b64 = sys.argv[1]
+        with open('/tmp/encrypt_input.json', 'r') as f:
+            secret = f.read()
+
+        pk = public.PublicKey(key_b64.encode('utf-8'), encoding.Base64Encoder())
+        box = public.SealedBox(pk)
+        enc = box.encrypt(secret.encode('utf-8'))
+        print(base64.b64encode(enc).decode('utf-8'))
+        PY
+      register: encrypted_inventory
+      no_log: true
+      changed_when: false
+
+    - name: Upload VM_INVENTORY_JSON to GitHub
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/{{ github_repo }}/actions/secrets/VM_INVENTORY_JSON
+        method: PUT
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        body_format: json
+        body:
+          encrypted_value: '{{ encrypted_inventory.stdout }}'
+          key_id: '{{ repo_pubkey.json.key_id }}'
+        status_code: [201, 204]
+      no_log: true
+      changed_when: true
+
+    - name: Report success
+      ansible.builtin.debug:
+        msg:
+          - "✓ Synced VM inventory to GitHub secret: VM_INVENTORY_JSON"
+          - "Repository: {{ github_repo }}"
+          - "Source: {{ inventory_secret_name }}"

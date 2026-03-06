@@ -1,0 +1,387 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/operations/repository-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "argocd.repositories.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/operations/repository-create.yml"
+#     category: "platform"
+#     subsystem: "argocd"
+#     role: "operations"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "argocd"
+#       supported_versions: ["2.10.x", "2.11.x", "2.12.x", "2.13.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - argocd: "2.13.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from ArgoCD API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_argocd_operations"
+#   dependencies: ["argocd_deployed", "argocd_admin_token_available"]
+#   provides: ["argocd_repository_created"]
+#   tags: ["argocd", "repositories", "gitops", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Register a Git or Helm repository with ArgoCD. Supports SSH keys,
+#     HTTP(S) authentication, GitHub App authentication, and TLS client certs.
+#     This operation is idempotent - existing repositories can be updated.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.argocd.admin_token"
+#         purpose: "ArgoCD API token for authentication"
+#       - path: "_state.apps.argocd.url"
+#         purpose: "ArgoCD server URL"
+#       - path: "_state.secrets.github_ssh_key"
+#         purpose: "SSH private key for Git authentication (optional)"
+#
+#     writes:
+#       - path: "_state.apps.argocd.repositories.{repo_name}.url"
+#         example: "https://github.com/org/repo.git"
+#       - path: "_state.apps.argocd.repositories.{repo_name}.type"
+#         example: "git"
+#       - path: "_state.apps.argocd.repositories.{repo_name}.connection_state"
+#         example: "Successful"
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     required:
+#       - name: repo_url
+#         description: "Repository URL (Git or Helm)"
+#     optional:
+#       - name: repo_name
+#         description: "Repository name (derived from URL if not specified)"
+#       - name: repo_type
+#         description: "Repository type: git or helm (default: git)"
+#       - name: username
+#         description: "Username for HTTP(S) authentication"
+#       - name: password
+#         description: "Password for HTTP(S) authentication"
+#       - name: ssh_private_key
+#         description: "SSH private key for Git authentication"
+#       - name: insecure
+#         description: "Skip TLS certificate verification (default: false)"
+#       - name: project
+#         description: "Project scope for this repository"
+#       - name: upsert
+#         description: "Update existing repository (default: false)"
+
+- name: ArgoCD - Create Repository
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    argocd_namespace: "argocd"
+    argocd_base_url: "{{ argocd_url }}"
+    argocd_api_base: "{{ argocd_base_url }}/api/v1"
+    endpoint: "/repositories"
+
+    # Required fields
+    # repo_url: Repository URL (required)
+
+    # Optional fields with sensible defaults
+    repo_name: "{{ repo_name_input | default('') }}"
+    repo_type: "{{ repo_type_input | default('git') }}"
+    username: "{{ username_input | default(omit) }}"
+    password: "{{ password_input | default(omit) }}"
+    ssh_private_key: "{{ ssh_private_key_input | default(omit) }}"
+    insecure: "{{ insecure_input | default(false) }}"
+    enable_lfs: "{{ enable_lfs_input | default(false) }}"
+    enable_oci: "{{ enable_oci_input | default(false) }}"
+    project: "{{ project_input | default(omit) }}"
+    proxy: "{{ proxy_input | default(omit) }}"
+    tls_client_cert_data: "{{ tls_client_cert_data_input | default(omit) }}"
+    tls_client_cert_key: "{{ tls_client_cert_key_input | default(omit) }}"
+    github_app_id: "{{ github_app_id_input | default(omit) }}"
+    github_app_installation_id: "{{ github_app_installation_id_input | default(omit) }}"
+    github_app_private_key: "{{ github_app_private_key_input | default(omit) }}"
+    github_app_enterprise_base_url: "{{ github_app_enterprise_base_url_input | default(omit) }}"
+    upsert: "{{ upsert_input | default(false) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - repo_url is defined and repo_url | length > 0
+          - repo_type in ['git', 'helm']
+        fail_msg: "Required input missing or invalid: repo_url, repo_type must be 'git' or 'helm'"
+        success_msg: "All required inputs validated"
+
+    - name: Derive repository name from URL if not provided
+      ansible.builtin.set_fact:
+        effective_repo_name: >-
+          {{
+            repo_name if repo_name | length > 0
+            else (repo_url | regex_replace('^.*[:/]([^/]+)\\.git$', '\\1') | regex_replace('^.*[:/]([^/]+)$', '\\1'))
+          }}
+
+    - name: Display playbook information
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD - Create Repository"
+          - "=========================================="
+          - "Repository URL: {{ repo_url }}"
+          - "Repository Name: {{ effective_repo_name }}"
+          - "Repository Type: {{ repo_type }}"
+          - "Insecure: {{ insecure }}"
+          - "Upsert Mode: {{ upsert }}"
+          - "=========================================="
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract ArgoCD admin token
+      ansible.builtin.set_fact:
+        argocd_admin_token: >-
+          {{
+            inventory._state.apps.argocd.admin_token | default(argocd_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        argocd_base_url: "{{ inventory._state.apps.argocd.url }}"
+        argocd_api_base: "{{ inventory._state.apps.argocd.url }}/api/v1"
+      when: inventory._state.apps.argocd.url is defined
+
+    - name: Try to get SSH key from BWS state if not provided
+      ansible.builtin.set_fact:
+        ssh_private_key: "{{ inventory._state.secrets.github_ssh_key }}"
+      when:
+        - ssh_private_key is not defined or ssh_private_key == omit
+        - inventory._state.secrets.github_ssh_key is defined
+      no_log: true
+
+    # ===== STEP 3: Check for Existing Repository (Idempotency) =====
+    - name: Check if repository already exists
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/repositories/{{ repo_url | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_repo
+      no_log: false
+
+    - name: Set existing repository fact
+      ansible.builtin.set_fact:
+        repo_exists: "{{ existing_repo.status == 200 }}"
+        existing_repo_data: "{{ existing_repo.json if existing_repo.status == 200 else {} }}"
+
+    - name: Skip creation if repository exists and upsert is false
+      ansible.builtin.debug:
+        msg: "Repository '{{ repo_url }}' already exists - skipping (upsert={{ upsert }})"
+      when: repo_exists and not upsert | bool
+
+    # ===== STEP 4: Build Repository Payload =====
+    - name: Build base repository payload
+      ansible.builtin.set_fact:
+        repo_payload:
+          repo: "{{ repo_url }}"
+          type: "{{ repo_type }}"
+          name: "{{ effective_repo_name }}"
+          insecure: "{{ insecure }}"
+          enableLfs: "{{ enable_lfs }}"
+          enableOCI: "{{ enable_oci }}"
+      when: not repo_exists or upsert | bool
+      no_log: true
+
+    - name: Add SSH private key to payload
+      ansible.builtin.set_fact:
+        repo_payload: "{{ repo_payload | combine({'sshPrivateKey': ssh_private_key}) }}"
+      when:
+        - not repo_exists or upsert | bool
+        - ssh_private_key is defined and ssh_private_key != omit
+      no_log: true
+
+    - name: Add username/password to payload
+      ansible.builtin.set_fact:
+        repo_payload: "{{ repo_payload | combine({'username': username, 'password': password}) }}"
+      when:
+        - not repo_exists or upsert | bool
+        - username is defined and username != omit
+        - password is defined and password != omit
+      no_log: true
+
+    - name: Add project scope to payload
+      ansible.builtin.set_fact:
+        repo_payload: "{{ repo_payload | combine({'project': project}) }}"
+      when:
+        - not repo_exists or upsert | bool
+        - project is defined and project != omit
+
+    - name: Add proxy to payload
+      ansible.builtin.set_fact:
+        repo_payload: "{{ repo_payload | combine({'proxy': proxy}) }}"
+      when:
+        - not repo_exists or upsert | bool
+        - proxy is defined and proxy != omit
+
+    - name: Add TLS client cert to payload
+      ansible.builtin.set_fact:
+        repo_payload: "{{ repo_payload | combine({'tlsClientCertData': tls_client_cert_data, 'tlsClientCertKey': tls_client_cert_key}) }}"
+      when:
+        - not repo_exists or upsert | bool
+        - tls_client_cert_data is defined and tls_client_cert_data != omit
+        - tls_client_cert_key is defined and tls_client_cert_key != omit
+      no_log: true
+
+    - name: Add GitHub App authentication to payload
+      ansible.builtin.set_fact:
+        repo_payload: >-
+          {{
+            repo_payload | combine({
+              'githubAppId': github_app_id,
+              'githubAppInstallationId': github_app_installation_id,
+              'githubAppPrivateKey': github_app_private_key
+            })
+          }}
+      when:
+        - not repo_exists or upsert | bool
+        - github_app_id is defined and github_app_id != omit
+        - github_app_installation_id is defined and github_app_installation_id != omit
+        - github_app_private_key is defined and github_app_private_key != omit
+      no_log: true
+
+    - name: Add GitHub Enterprise base URL to payload
+      ansible.builtin.set_fact:
+        repo_payload: "{{ repo_payload | combine({'githubAppEnterpriseBaseUrl': github_app_enterprise_base_url}) }}"
+      when:
+        - not repo_exists or upsert | bool
+        - github_app_enterprise_base_url is defined and github_app_enterprise_base_url != omit
+
+    # ===== STEP 5: Create Repository =====
+    - name: Create repository in ArgoCD
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif %}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ repo_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not repo_exists or upsert | bool
+
+    - name: Set repository result
+      ansible.builtin.set_fact:
+        repo_action: "{{ 'skipped' if repo_exists and not upsert | bool else ('updated' if repo_exists else 'created') }}"
+        connection_state: >-
+          {{
+            create_result.json.connectionState.status | default('Unknown')
+            if create_result is defined and create_result.json is defined
+            else (existing_repo_data.connectionState.status | default('Unknown'))
+          }}
+
+    # ===== STEP 6: Verify Repository Connection =====
+    - name: Verify repository connection
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/repositories/{{ repo_url | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: repo_verify
+      when: repo_action != 'skipped'
+      no_log: false
+
+    - name: Check repository connection state
+      ansible.builtin.set_fact:
+        connection_state: "{{ repo_verify.json.connectionState.status | default('Unknown') }}"
+      when: repo_action != 'skipped' and repo_verify.json is defined
+
+    - name: Warn if repository connection failed
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Repository connection state is {{ connection_state }}.
+          Please verify:
+          - Repository URL is accessible
+          - Credentials are correct
+          - Network connectivity from ArgoCD
+      when: connection_state != 'Successful'
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Derive repository key name for BWS writeback
+      ansible.builtin.set_fact:
+        repo_key: "{{ effective_repo_name | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with repository info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge repository info into _state.apps.argocd.repositories
+        UPDATED=$(echo "$CURRENT" | jq --arg repo "{{ repo_key }}" \
+          --arg url "{{ repo_url }}" \
+          --arg type "{{ repo_type }}" \
+          --arg conn_state "{{ connection_state }}" \
+          '
+          if ._state.apps.argocd == null then ._state.apps.argocd = {} else . end |
+          if ._state.apps.argocd.repositories == null then ._state.apps.argocd.repositories = {} else . end |
+          if ._state.apps.argocd.repositories[$repo] == null then ._state.apps.argocd.repositories[$repo] = {} else . end |
+          ._state.apps.argocd.repositories[$repo].url = $url |
+          ._state.apps.argocd.repositories[$repo].type = $type |
+          ._state.apps.argocd.repositories[$repo].connection_state = $conn_state
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: repo_action != 'skipped'
+
+    # ===== STEP 8: Output Result =====
+    - name: Display repository creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ repo_action }}"
+          repository_url: "{{ repo_url }}"
+          repository_name: "{{ effective_repo_name }}"
+          repository_type: "{{ repo_type }}"
+          connection_state: "{{ connection_state }}"

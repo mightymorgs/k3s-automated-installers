@@ -1,0 +1,325 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/verify/vault-init"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "vault_operational"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/verify/01-verify-vault-init.yml"
+#     category: "platform"
+#     subsystem: "vault"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vault"
+#       supported_versions: ["1.15.x", "1.16.x", "1.17.x", "1.18.x"]
+#       version_range: ">=1.15.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - vault: "1.18.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated verification playbook"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_vault_verification"
+#   dependencies: ["vault_deployed"]
+#   provides: ["vault_verified"]
+#   tags: ["vault", "verification", "health-check", "phase3"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Comprehensive verification of Vault operational status. Validates that Vault
+#     is initialized, unsealed, auth methods are configured, and secrets engines
+#     are enabled. Returns detailed status report for each check.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.root_token"
+#         purpose: "Vault root token for API authentication"
+#       - path: "_state.apps.vault.initialized"
+#         purpose: "Check initialization status in BWS"
+#       - path: "_state.apps.vault.sealed"
+#         purpose: "Check seal status in BWS"
+#       - path: "_state.apps.vault.auth_methods"
+#         purpose: "Check configured auth methods"
+#       - path: "_state.apps.vault.secrets_engines"
+#         purpose: "Check enabled secrets engines"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - Vault Operational Status
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    vault_base_url: "{{ vault_addr }}"
+    vault_api_base: "{{ vault_base_url }}/v1"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Operational Verification"
+          - "=========================================="
+          - "Vault URL: {{ vault_base_url }}"
+          - "=========================================="
+
+    # ===== STEP 1: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+      failed_when: false
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+      when: bws_result.rc == 0
+
+    - name: Set BWS available flag
+      ansible.builtin.set_fact:
+        bws_available: "{{ bws_result.rc == 0 }}"
+
+    # ========== CHECK 1: VAULT HEALTH/INIT STATUS ==========
+    - name: Check Vault initialization status via API
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}/sys/init"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: init_check
+      failed_when: false
+
+    - name: Record initialization check result
+      ansible.builtin.set_fact:
+        check_initialized:
+          api_reachable: "{{ init_check.status | default(0) == 200 }}"
+          initialized: "{{ init_check.json.initialized | default(false) }}"
+          bws_state: "{{ inventory._state.apps.vault.initialized | default('not_set') if bws_available else 'bws_unavailable' }}"
+
+    # ========== CHECK 2: VAULT SEAL STATUS ==========
+    - name: Check Vault seal status via API
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}/sys/seal-status"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: seal_check
+      failed_when: false
+
+    - name: Record seal check result
+      ansible.builtin.set_fact:
+        check_unsealed:
+          api_reachable: "{{ seal_check.status | default(0) == 200 }}"
+          sealed: "{{ seal_check.json.sealed | default(true) }}"
+          threshold: "{{ seal_check.json.t | default(0) }}"
+          shares: "{{ seal_check.json.n | default(0) }}"
+          progress: "{{ seal_check.json.progress | default(0) }}"
+          bws_state: "{{ inventory._state.apps.vault.sealed | default('not_set') if bws_available else 'bws_unavailable' }}"
+
+    # ========== CHECK 3: VAULT HEALTH ENDPOINT ==========
+    - name: Check Vault health endpoint
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}/sys/health"
+        method: GET
+        status_code: [200, 429, 472, 473, 501, 503]
+        validate_certs: false
+      register: health_check
+      failed_when: false
+
+    - name: Record health check result
+      ansible.builtin.set_fact:
+        check_health:
+          status_code: "{{ health_check.status | default(0) }}"
+          initialized: "{{ health_check.json.initialized | default(false) }}"
+          sealed: "{{ health_check.json.sealed | default(true) }}"
+          standby: "{{ health_check.json.standby | default(false) }}"
+          version: "{{ health_check.json.version | default('unknown') }}"
+          cluster_name: "{{ health_check.json.cluster_name | default('unknown') }}"
+
+    # ========== CHECK 4: AUTH METHODS (if unsealed) ==========
+    - name: Extract Vault token from BWS
+      ansible.builtin.set_fact:
+        vault_token: "{{ inventory._state.apps.vault.root_token | default('') }}"
+      no_log: true
+      when: bws_available
+
+    - name: Check auth methods
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}/sys/auth"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: auth_check
+      failed_when: false
+      when: vault_token | default('') | length > 0 and not (check_unsealed.sealed | default(true))
+      no_log: false
+
+    - name: Record auth methods check result
+      ansible.builtin.set_fact:
+        check_auth_methods:
+          checked: "{{ auth_check is not skipped }}"
+          status: "{{ auth_check.status | default(0) }}"
+          methods: "{{ auth_check.json | default({}) | dict2items | map(attribute='key') | list if auth_check.status | default(0) == 200 else [] }}"
+          kubernetes_enabled: "{{ 'kubernetes/' in (auth_check.json | default({}) | dict2items | map(attribute='key') | list) if auth_check.status | default(0) == 200 else false }}"
+          bws_state: "{{ inventory._state.apps.vault.auth_methods | default({}) if bws_available else {} }}"
+
+    # ========== CHECK 5: SECRETS ENGINES (if unsealed) ==========
+    - name: Check secrets engines
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}/sys/mounts"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        status_code: [200, 403]
+        validate_certs: false
+      register: mounts_check
+      failed_when: false
+      when: vault_token | default('') | length > 0 and not (check_unsealed.sealed | default(true))
+      no_log: false
+
+    - name: Record secrets engines check result
+      ansible.builtin.set_fact:
+        check_secrets_engines:
+          checked: "{{ mounts_check is not skipped }}"
+          status: "{{ mounts_check.status | default(0) }}"
+          engines: "{{ mounts_check.json | default({}) | dict2items | map(attribute='key') | list if mounts_check.status | default(0) == 200 else [] }}"
+          kv_enabled: "{{ ('secret/' in (mounts_check.json | default({}) | dict2items | map(attribute='key') | list)) if mounts_check.status | default(0) == 200 else false }}"
+          bws_state: "{{ inventory._state.apps.vault.secrets_engines | default({}) if bws_available else {} }}"
+
+    # ========== CHECK 6: POLICIES (if unsealed) ==========
+    - name: Check policies
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}/sys/policies/acl?list=true"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        status_code: [200, 403, 404]
+        validate_certs: false
+      register: policies_check
+      failed_when: false
+      when: vault_token | default('') | length > 0 and not (check_unsealed.sealed | default(true))
+      no_log: false
+
+    - name: Record policies check result
+      ansible.builtin.set_fact:
+        check_policies:
+          checked: "{{ policies_check is not skipped }}"
+          status: "{{ policies_check.status | default(0) }}"
+          policies: "{{ policies_check.json.data.keys | default([]) if policies_check.status | default(0) == 200 else [] }}"
+          bws_state: "{{ inventory._state.apps.vault.policies | default({}) if bws_available else {} }}"
+
+    # ========== VERIFICATION SUMMARY ==========
+    - name: Collect all verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          vault_url: "{{ vault_base_url }}"
+          bws_available: "{{ bws_available }}"
+          checks:
+            initialized:
+              passed: "{{ check_initialized.api_reachable and check_initialized.initialized }}"
+              api_value: "{{ check_initialized.initialized }}"
+              bws_value: "{{ check_initialized.bws_state }}"
+            unsealed:
+              passed: "{{ check_unsealed.api_reachable and not check_unsealed.sealed }}"
+              sealed: "{{ check_unsealed.sealed }}"
+              threshold: "{{ check_unsealed.threshold }}"
+              shares: "{{ check_unsealed.shares }}"
+            health:
+              status_code: "{{ check_health.status_code }}"
+              version: "{{ check_health.version }}"
+              standby: "{{ check_health.standby }}"
+            auth_methods:
+              passed: "{{ check_auth_methods.kubernetes_enabled | default(false) }}"
+              enabled_methods: "{{ check_auth_methods.methods | default([]) }}"
+              kubernetes_enabled: "{{ check_auth_methods.kubernetes_enabled | default(false) }}"
+            secrets_engines:
+              passed: "{{ check_secrets_engines.kv_enabled | default(false) }}"
+              enabled_engines: "{{ check_secrets_engines.engines | default([]) }}"
+              kv_enabled: "{{ check_secrets_engines.kv_enabled | default(false) }}"
+            policies:
+              checked: "{{ check_policies.checked | default(false) }}"
+              policies: "{{ check_policies.policies | default([]) }}"
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_core_checks_passed: >-
+          {{
+            verification_results.checks.initialized.passed | bool and
+            verification_results.checks.unsealed.passed | bool
+          }}
+        all_checks_passed: >-
+          {{
+            verification_results.checks.initialized.passed | bool and
+            verification_results.checks.unsealed.passed | bool and
+            verification_results.checks.auth_methods.passed | bool and
+            verification_results.checks.secrets_engines.passed | bool
+          }}
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Verification Summary"
+          - "=========================================="
+          - ""
+          - "Core Checks:"
+          - "  Initialized: {{ 'PASS' if verification_results.checks.initialized.passed else 'FAIL' }}"
+          - "  Unsealed: {{ 'PASS' if verification_results.checks.unsealed.passed else 'FAIL' }}"
+          - "    - Seal threshold: {{ verification_results.checks.unsealed.threshold }}/{{ verification_results.checks.unsealed.shares }}"
+          - "  Health: {{ verification_results.checks.health.status_code }} (version: {{ verification_results.checks.health.version }})"
+          - ""
+          - "Configuration Checks:"
+          - "  Kubernetes Auth: {{ 'PASS' if verification_results.checks.auth_methods.kubernetes_enabled else 'NOT CONFIGURED' }}"
+          - "    - Methods: {{ verification_results.checks.auth_methods.enabled_methods | join(', ') }}"
+          - "  KV Secrets Engine: {{ 'PASS' if verification_results.checks.secrets_engines.kv_enabled else 'NOT CONFIGURED' }}"
+          - "    - Engines: {{ verification_results.checks.secrets_engines.enabled_engines | join(', ') }}"
+          - "  Policies: {{ verification_results.checks.policies.policies | length }} configured"
+          - "    - Policies: {{ verification_results.checks.policies.policies | join(', ') }}"
+          - ""
+          - "=========================================="
+          - "Core Status: {{ 'PASSED' if all_core_checks_passed else 'FAILED' }}"
+          - "Full Status: {{ 'PASSED' if all_checks_passed else 'PARTIAL' }}"
+          - "=========================================="
+
+    - name: Fail if core checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          Vault core verification failed. Vault must be initialized and unsealed.
+          Initialized: {{ verification_results.checks.initialized.passed }}
+          Unsealed: {{ verification_results.checks.unsealed.passed }}
+      when: not all_core_checks_passed
+
+    - name: Warn if optional checks did not pass
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: Not all optional checks passed"
+          - "  Kubernetes Auth: {{ 'OK' if verification_results.checks.auth_methods.kubernetes_enabled else 'Not configured - run vault-auth-kubernetes-enable.yml' }}"
+          - "  KV Secrets Engine: {{ 'OK' if verification_results.checks.secrets_engines.kv_enabled else 'Not configured - run vault-secrets-kv-create.yml' }}"
+      when: all_core_checks_passed and not all_checks_passed
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "Vault is fully operational - all verification checks passed"
+      when: all_checks_passed

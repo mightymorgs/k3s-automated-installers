@@ -1,0 +1,60 @@
+---
+# Tailscale Operator ServiceAccount (J2 template)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: operator
+  namespace: {{ tailscale_namespace | default('tailscale') }}
+  labels:
+    app.kubernetes.io/name: tailscale-operator
+
+---
+# Tailscale Operator ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tailscale-operator
+  labels:
+    app.kubernetes.io/name: tailscale-operator
+rules:
+  - apiGroups: [""]
+    resources: ["events", "services", "services/status", "secrets", "configmaps", "namespaces", "serviceaccounts", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingresses/status", "ingressclasses"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["tailscale.com"]
+    resources: ["connectors", "connectors/status", "proxyclasses", "proxyclasses/status", "dnsconfigs", "dnsconfigs/status", "proxygroups", "proxygroups/status", "recorders", "recorders/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "gateways/status", "httproutes", "httproutes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+---
+# Tailscale Operator ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tailscale-operator
+  labels:
+    app.kubernetes.io/name: tailscale-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tailscale-operator
+subjects:
+  - kind: ServiceAccount
+    name: operator
+    namespace: {{ tailscale_namespace | default('tailscale') }}

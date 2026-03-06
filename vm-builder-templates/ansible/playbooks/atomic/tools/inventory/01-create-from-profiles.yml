@@ -1,0 +1,239 @@
+# playbook_metadata:
+#   id: "atomic/tools/inventory/01-create-from-profiles"
+#   description: "Create VM inventory from profiles"
+#   dependencies: ["bws_access_configured"]
+#   provides: ["vm_inventory_created"]
+#
+# Creates a VM inventory in BWS using the profile-based template system.
+#
+# Required variables:
+#   vm_name: Full 7-component VM name
+#   size: Size profile name (small, medium, large, gpu)
+#   static_ip: Static IP with CIDR (optional, empty for DHCP)
+#
+# Optional variables:
+#   platform_override: Override platform profile (default: derived from vm_name)
+#   role_override: Override role profile (default: derived from vm_name)
+#
+# Example:
+#   ansible-playbook ansible/playbooks/atomic/tools/inventory/01-create-from-profiles.yml \
+#     -e vm_name=homelab-k3s-master-prod-mediastack-libvirt-latest \
+#     -e size=large \
+#     -e static_ip=192.168.0.50/24
+---
+- name: Create VM inventory from profiles
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    bws_project_id: "517eeecd-c99b-4387-9e77-b35c0066a149"
+
+  tasks:
+    - name: Validate vm_name has 7 components
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - (vm_name | split('-') | length) == 7
+        fail_msg: "vm_name must have exactly 7 hyphen-separated components"
+      tags: [validate]
+
+    - name: Parse VM name components
+      ansible.builtin.set_fact:
+        vm_parts: "{{ vm_name | split('-') }}"
+      tags: [parse]
+
+    - name: Extract name components
+      ansible.builtin.set_fact:
+        vm_client: "{{ vm_parts[0] }}"
+        vm_type: "{{ vm_parts[1] }}"
+        vm_subtype: "{{ vm_parts[2] }}"
+        vm_state: "{{ vm_parts[3] }}"
+        vm_purpose: "{{ vm_parts[4] }}"
+        vm_platform: "{{ vm_parts[5] }}"
+        vm_version: "{{ vm_parts[6] }}"
+      tags: [parse]
+
+    - name: Derive profile names from VM name
+      ansible.builtin.set_fact:
+        size_profile_key: "profiles/size/{{ size }}"
+        platform_profile_key: "profiles/platform/{{ platform_override | default(vm_platform + '-' + vm_client) }}"
+        role_profile_key: "profiles/role/{{ role_override | default(vm_type + '-' + vm_subtype) }}"
+      tags: [derive]
+
+    - name: Display profile resolution
+      ansible.builtin.debug:
+        msg:
+          - "VM Name: {{ vm_name }}"
+          - "Size Profile: {{ size_profile_key }}"
+          - "Platform Profile: {{ platform_profile_key }}"
+          - "Role Profile: {{ role_profile_key }}"
+          - "Static IP: {{ static_ip | default('DHCP') }}"
+      tags: [debug]
+
+    - name: Fetch BWS secret list
+      ansible.builtin.command: bws secret list --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_list
+      changed_when: false
+      no_log: true
+      tags: [bws]
+
+    - name: Parse BWS secrets
+      ansible.builtin.set_fact:
+        bws_secrets: "{{ bws_list.stdout | from_json }}"
+      no_log: true
+      tags: [bws]
+
+    - name: Get size profile ID
+      ansible.builtin.set_fact:
+        size_profile_id: >-
+          {{ bws_secrets | selectattr('key', 'equalto', size_profile_key) | map(attribute='id') | first }}
+      tags: [bws]
+
+    - name: Get platform profile ID
+      ansible.builtin.set_fact:
+        platform_profile_id: >-
+          {{ bws_secrets | selectattr('key', 'equalto', platform_profile_key) | map(attribute='id') | first }}
+      tags: [bws]
+
+    - name: Get role profile ID
+      ansible.builtin.set_fact:
+        role_profile_id: >-
+          {{ bws_secrets | selectattr('key', 'equalto', role_profile_key) | map(attribute='id') | first }}
+      tags: [bws]
+
+    - name: Fetch size profile
+      ansible.builtin.command: bws secret get {{ size_profile_id }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: size_profile_raw
+      changed_when: false
+      no_log: true
+      tags: [bws]
+
+    - name: Fetch platform profile
+      ansible.builtin.command: bws secret get {{ platform_profile_id }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: platform_profile_raw
+      changed_when: false
+      no_log: true
+      tags: [bws]
+
+    - name: Fetch role profile
+      ansible.builtin.command: bws secret get {{ role_profile_id }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: role_profile_raw
+      changed_when: false
+      no_log: true
+      tags: [bws]
+
+    - name: Parse profile contents
+      ansible.builtin.set_fact:
+        size_profile: "{{ (size_profile_raw.stdout | from_json).value | from_json }}"
+        platform_profile: "{{ (platform_profile_raw.stdout | from_json).value | from_json }}"
+        role_profile: "{{ (role_profile_raw.stdout | from_json).value | from_json }}"
+      no_log: true
+      tags: [parse]
+
+    - name: Generate SSH keypair
+      ansible.builtin.command: ssh-keygen -t ed25519 -f /tmp/vm-key-{{ vm_name }} -N "" -C "vm-{{ vm_name }}"
+      args:
+        creates: /tmp/vm-key-{{ vm_name }}
+      register: ssh_keygen
+      tags: [ssh]
+
+    - name: Read SSH private key
+      ansible.builtin.slurp:
+        src: /tmp/vm-key-{{ vm_name }}
+      register: ssh_private_key_file
+      no_log: true
+      tags: [ssh]
+
+    - name: Read SSH public key
+      ansible.builtin.slurp:
+        src: /tmp/vm-key-{{ vm_name }}.pub
+      register: ssh_public_key_file
+      tags: [ssh]
+
+    - name: Set SSH key facts
+      ansible.builtin.set_fact:
+        ssh_private_key_b64: "{{ ssh_private_key_file.content }}"
+        ssh_public_key: "{{ ssh_public_key_file.content | b64decode | trim }}"
+      no_log: true
+      tags: [ssh]
+
+    - name: Generate inventory from template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../../../templates/inventory/vm-inventory.json.j2"
+        dest: /tmp/inventory-{{ vm_name }}.json
+        mode: "0600"
+      tags: [template]
+
+    - name: Read generated inventory
+      ansible.builtin.slurp:
+        src: /tmp/inventory-{{ vm_name }}.json
+      register: inventory_content
+      tags: [template]
+
+    - name: Parse and compact inventory JSON
+      ansible.builtin.set_fact:
+        inventory_json: "{{ inventory_content.content | b64decode | from_json | to_json }}"
+      tags: [template]
+
+    - name: Display generated inventory
+      ansible.builtin.debug:
+        msg: "{{ inventory_json | from_json | to_nice_json }}"
+      tags: [debug]
+
+    - name: Check if inventory already exists
+      ansible.builtin.set_fact:
+        existing_inventory: >-
+          {{ bws_secrets | selectattr('key', 'equalto', 'inventory/' + vm_name) | list }}
+      tags: [bws]
+
+    - name: Create inventory in BWS (new)
+      ansible.builtin.command: >-
+        bws secret create
+        "inventory/{{ vm_name }}"
+        '{{ inventory_json }}'
+        "{{ bws_project_id }}"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_create
+      when: existing_inventory | length == 0
+      tags: [bws]
+
+    - name: Update inventory in BWS (existing)
+      ansible.builtin.command: >-
+        bws secret edit
+        "{{ (existing_inventory | first).id }}"
+        --value '{{ inventory_json }}'
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update
+      when: existing_inventory | length > 0
+      tags: [bws]
+
+    - name: Clean up temporary SSH keys
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/vm-key-{{ vm_name }}
+        - /tmp/vm-key-{{ vm_name }}.pub
+        - /tmp/inventory-{{ vm_name }}.json
+      tags: [cleanup]
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg:
+          - "Inventory created: inventory/{{ vm_name }}"
+          - "Size: {{ size }}"
+          - "Platform: {{ platform_profile.platform }}"
+          - "Role: {{ role_profile.role }}"
+          - "Static IP: {{ static_ip | default('DHCP') }}"
+      tags: [result]

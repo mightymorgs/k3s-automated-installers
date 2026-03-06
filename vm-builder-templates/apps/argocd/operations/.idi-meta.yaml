@@ -1,0 +1,103 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  application-create.yml:
+    summary: Create an ArgoCD application with source, destination, and sync policy.
+      Supports Git and Helm sources, Kustomize overlays, and automated sync. This
+      operation is idempotent - existing applications can be updated.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ argocd_api_base }}/applications/{{ app_name | urlencode }}'
+    - '{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif
+      %}'
+    - '{{ argocd_api_base }}/applications/{{ app_name | urlencode }}'
+    - '{{ argocd_api_base }}/applications/{{ app_name | urlencode }}'
+    wiring:
+      reads_from:
+      - app: argocd
+        field: admin_token
+      - app: argocd
+        field: url
+      writes_to:
+      - app: argocd
+        field: applications
+      - app: argocd
+        field: applications
+      - app: argocd
+        field: applications
+      - app: argocd
+        field: applications
+  cluster-create.yml:
+    summary: Register a Kubernetes cluster with ArgoCD. Supports bearer token auth,
+      TLS client certificates, AWS EKS auth, and exec-based authentication. The in-cluster
+      (https://kubernetes.default.svc) is registered by default.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ argocd_api_base }}/clusters/{{ cluster_server | urlencode }}'
+    - '{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif
+      %}'
+    - '{{ argocd_api_base }}/clusters/{{ cluster_server | urlencode }}'
+    wiring:
+      reads_from:
+      - app: argocd
+        field: admin_token
+      - app: argocd
+        field: url
+      writes_to:
+      - app: argocd
+        field: clusters
+      - app: argocd
+        field: clusters
+      - app: argocd
+        field: clusters
+  project-create.yml:
+    summary: Create an ArgoCD project with source/destination restrictions and RBAC.
+      This operation is idempotent - if a project with the same name exists, it can
+      be updated or skipped based on the upsert parameter.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ argocd_api_base }}/projects/{{ project_name | urlencode }}'
+    - '{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif
+      %}'
+    - '{{ argocd_api_base }}/projects/{{ project_name | urlencode }}'
+    - '{{ argocd_api_base }}/projects/{{ project_name | urlencode }}'
+    wiring:
+      reads_from:
+      - app: argocd
+        field: admin_token
+      - app: argocd
+        field: url
+      writes_to:
+      - app: argocd
+        field: projects
+      - app: argocd
+        field: projects
+      - app: argocd
+        field: projects
+  repository-create.yml:
+    summary: Register a Git or Helm repository with ArgoCD. Supports SSH keys, HTTP(S)
+      authentication, GitHub App authentication, and TLS client certs. This operation
+      is idempotent - existing repositories can be updated.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ argocd_api_base }}/repositories/{{ repo_url | urlencode }}'
+    - '{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif
+      %}'
+    - '{{ argocd_api_base }}/repositories/{{ repo_url | urlencode }}'
+    wiring:
+      reads_from:
+      - app: argocd
+        field: admin_token
+      - app: argocd
+        field: url
+      writes_to:
+      - app: argocd
+        field: repositories
+      - app: argocd
+        field: repositories
+      - app: argocd
+        field: repositories

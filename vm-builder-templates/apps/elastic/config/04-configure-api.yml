@@ -1,0 +1,126 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/elastic/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/elastic/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "elastic"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["elastic_deployed"]
+#   provides: ["elastic_api_configured"]
+#   tags: ["elastic", "api", "configuration", "zero-touch"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Disable xpack security for Elasticsearch in Tailscale mode.
+#     Sets xpack.security.enabled=false and xpack.security.http.ssl.enabled=false
+#     on the StatefulSet so the Elasticsearch API is accessible without
+#     authentication or HTTPS. Tailscale provides the authentication layer.
+#   requires_apps: ["elastic"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.elastic.configured"
+#         example: true
+
+- name: Configure Elasticsearch security bypass for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    elastic_namespace: "elastic"
+    app_namespace: "{{ elastic_namespace }}"
+    # elastic_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== 1. CHECK IF ELASTICSEARCH IS DEPLOYED ==========
+    - name: Check if Elasticsearch pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=elasticsearch --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: elastic_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Elasticsearch not deployed
+      ansible.builtin.debug:
+        msg: "Elasticsearch not deployed - skipping API configuration"
+      when: elastic_pod_check.rc != 0 or elastic_pod_check.stdout | length == 0
+
+    - name: End play if Elasticsearch not available
+      ansible.builtin.meta: end_play
+      when: elastic_pod_check.rc != 0 or elastic_pod_check.stdout | length == 0
+
+    # ========== 2. DISABLE XPACK SECURITY VIA ENVIRONMENT VARIABLES ==========
+    # When Tailscale is the auth layer, Elasticsearch's built-in security is
+    # redundant. Disabling xpack security removes basic auth and HTTPS
+    # requirements, allowing direct API access for authenticated tailnet users.
+    - name: Disable xpack security via environment variables
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env statefulset/elasticsearch -n {{ app_namespace }}
+          xpack.security.enabled=false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: security_patch_result
+      changed_when: "'updated' in security_patch_result.stdout"
+
+    # ========== 3. DISABLE XPACK HTTPS REQUIREMENT ==========
+    # With security disabled, SSL on the HTTP layer is also unnecessary.
+    # This ensures clients can connect via plain HTTP.
+    - name: Disable xpack HTTP SSL via environment variables
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env statefulset/elasticsearch -n {{ app_namespace }}
+          xpack.security.http.ssl.enabled=false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: ssl_patch_result
+      changed_when: "'updated' in ssl_patch_result.stdout"
+
+    # ========== 4. WAIT FOR ROLLOUT ==========
+    - name: Wait for Elasticsearch rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status statefulset/elasticsearch -n {{ app_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== 5. VERIFY ELASTICSEARCH IS ACCESSIBLE ==========
+    - name: Verify Elasticsearch cluster health endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ elastic_url }}/_cluster/health"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Elasticsearch not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Elasticsearch not accessible after rollout (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== 6. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Elasticsearch API Configuration Complete"
+          - "=========================================="
+          - "xpack.security.enabled: false"
+          - "xpack.security.http.ssl.enabled: false"
+          - "Auth Layer: Tailscale (built-in security bypassed)"
+          - "Health Check: {{ elastic_url }}/_cluster/health ({{ health_check.status }})"
+          - "=========================================="

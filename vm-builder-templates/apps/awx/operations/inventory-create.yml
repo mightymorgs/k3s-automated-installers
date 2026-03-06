@@ -1,0 +1,236 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/operations/inventory-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "awx.inventories.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/operations/inventory-create.yml"
+#     category: "platform"
+#     subsystem: "awx"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["23.x", "24.x"]
+#       version_range: ">=23.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - awx: "24.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from AWX API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_awx_operations"
+#   dependencies: ["awx_deployed", "awx_running"]
+#   provides: ["awx_inventory_created"]
+#   tags: ["awx", "inventory", "hosts", "automation", "operations"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an AWX inventory for host management. This operation is idempotent -
+#     if an inventory with the same name exists, it will be skipped. Supports
+#     standard, smart, and constructed inventory types.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.token"
+#         purpose: "AWX API token for authentication"
+#
+#     writes:
+#       - path: "_state.apps.awx.inventories.{inventory_name}.id"
+#         example: 15
+#       - path: "_state.apps.awx.inventories.{inventory_name}.status"
+#         example: "created"
+
+- name: AWX - Create Inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    awx_base_url: "{{ awx_url }}"
+    awx_api_base: "{{ awx_base_url }}/api/v2"
+
+    # Required fields
+    # awx_inventory_name: Name of the inventory (required)
+    # organization_id: Organization ID (required)
+
+    # Optional fields with sensible defaults
+    awx_inventory_description: "{{ awx_inventory_description_input | default('') }}"
+    awx_inventory_variables: "{{ awx_inventory_variables_input | default('') }}"
+    awx_inventory_kind: "{{ awx_inventory_kind_input | default('') }}"
+    awx_inventory_host_filter: "{{ awx_inventory_host_filter_input | default('') }}"
+    prevent_instance_group_fallback: "{{ prevent_instance_group_fallback_input | default(false) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - awx_inventory_name is defined and awx_inventory_name | length > 0
+          - organization_id is defined
+        fail_msg: "Required inputs missing: awx_inventory_name and organization_id are required"
+        success_msg: "All required inputs validated: awx_inventory_name={{ awx_inventory_name }}"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and AWX Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract AWX token
+      ansible.builtin.set_fact:
+        awx_token: "{{ inventory._state.apps.awx.token }}"
+      no_log: true
+
+    - name: Validate AWX token is available
+      ansible.builtin.assert:
+        that:
+          - awx_token | length > 0
+        fail_msg: "AWX token not found in BWS _state. Ensure AWX is configured."
+        success_msg: "AWX token retrieved from BWS _state"
+
+    # ===== STEP 4: Check for Existing Inventory (Idempotency) =====
+    - name: Check if inventory already exists by name
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/inventories/?name={{ awx_inventory_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: existing_inventory
+      no_log: false
+
+    - name: Set inventory exists flag
+      ansible.builtin.set_fact:
+        awx_inventory_exists: "{{ existing_inventory.json.count > 0 }}"
+        existing_inventory_id: "{{ existing_inventory.json.results[0].id | default(0) }}"
+
+    - name: Skip creation if inventory exists
+      ansible.builtin.debug:
+        msg: >-
+          Inventory '{{ awx_inventory_name }}' already exists with ID: {{ existing_inventory_id }}
+      when: awx_inventory_exists
+
+    # ===== STEP 5: Create Inventory =====
+    - name: Build inventory payload
+      ansible.builtin.set_fact:
+        inventory_payload:
+          name: "{{ awx_inventory_name }}"
+          description: "{{ awx_inventory_description }}"
+          organization: "{{ organization_id }}"
+          variables: "{{ awx_inventory_variables }}"
+          kind: "{{ awx_inventory_kind }}"
+          prevent_instance_group_fallback: "{{ prevent_instance_group_fallback }}"
+      when: not awx_inventory_exists
+
+    - name: Add host_filter if smart inventory
+      ansible.builtin.set_fact:
+        inventory_payload: "{{ inventory_payload | combine({'host_filter': awx_inventory_host_filter}) }}"
+      when:
+        - not awx_inventory_exists
+        - awx_inventory_kind == 'smart'
+        - awx_inventory_host_filter | length > 0
+
+    - name: Create AWX inventory
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/inventories/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ inventory_payload }}"
+        status_code: [201]
+        validate_certs: false
+      register: create_result
+      when: not awx_inventory_exists
+      no_log: false
+
+    - name: Set created inventory ID
+      ansible.builtin.set_fact:
+        created_inventory_id: "{{ create_result.json.id }}"
+      when: not awx_inventory_exists
+
+    # ===== STEP 6: Write Result to BWS._state =====
+    - name: Update BWS inventory with AWX inventory info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Merge inventory info into _state.apps.awx.inventories
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ awx_inventory_name }}" \
+          --argjson id {{ created_inventory_id | default(existing_inventory_id) }} \
+          --arg status "{{ 'created' if not awx_inventory_exists else 'existing' }}" \
+          --arg kind "{{ awx_inventory_kind | default('standard') }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.awx == null then ._state.apps.awx = {} else . end |
+          if ._state.apps.awx.inventories == null then ._state.apps.awx.inventories = {} else . end |
+          ._state.apps.awx.inventories[$name] = {
+            "id": $id,
+            "status": $status,
+            "kind": $kind,
+            "created_at": $timestamp
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 7: Output Result =====
+    - name: Display inventory creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if awx_inventory_exists else 'created' }}"
+          inventory_name: "{{ awx_inventory_name }}"
+          inventory_id: "{{ existing_inventory_id if awx_inventory_exists else created_inventory_id }}"
+          organization_id: "{{ organization_id }}"
+          kind: "{{ awx_inventory_kind | default('standard') }}"

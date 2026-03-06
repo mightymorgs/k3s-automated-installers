@@ -1,0 +1,87 @@
+---
+# Radarr StatefulSet
+# Movie PVR for automated downloads
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: radarr
+  namespace: media-stack
+  labels:
+    app: radarr
+    app.kubernetes.io/name: radarr
+    app.kubernetes.io/component: pvr
+    app.kubernetes.io/part-of: media-stack
+spec:
+  serviceName: radarr
+  replicas: 1
+  selector:
+    matchLabels:
+      app: radarr
+  template:
+    metadata:
+      labels:
+        app: radarr
+        app.kubernetes.io/name: radarr
+    spec:
+      containers:
+        - name: radarr
+          image: lscr.io/linuxserver/radarr:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Australia/Sydney"
+          ports:
+            - name: http
+              containerPort: 7878
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: shared-media
+              mountPath: /media
+              subPath: media
+            - name: shared-media
+              mountPath: /downloads
+              subPath: downloads
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: shared-media
+          persistentVolumeClaim:
+            claimName: media-shared-pvc
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+        labels:
+          app: radarr
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 1Gi

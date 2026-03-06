@@ -1,0 +1,102 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: teleport
+  namespace: teleport
+  labels:
+    app.kubernetes.io/name: teleport
+    app.kubernetes.io/component: zero-trust-access
+    app.kubernetes.io/part-of: golden-master
+spec:
+  serviceName: teleport
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: teleport
+      app.kubernetes.io/component: zero-trust-access
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teleport
+        app.kubernetes.io/component: zero-trust-access
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      serviceAccountName: teleport
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: teleport
+          image: public.ecr.aws/gravitational/teleport:16
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+          args:
+            - start
+            - --config=/etc/teleport/teleport.yaml
+          ports:
+            - name: ssh-proxy
+              containerPort: 3023
+              protocol: TCP
+            - name: tunnel
+              containerPort: 3024
+              protocol: TCP
+            - name: auth
+              containerPort: 3025
+              protocol: TCP
+            - name: kube
+              containerPort: 3027
+              protocol: TCP
+            - name: web
+              containerPort: 3080
+              protocol: TCP
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/teleport
+            - name: config
+              mountPath: /etc/teleport
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3080
+              scheme: HTTPS
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3080
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: teleport-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: teleport
+          app.kubernetes.io/component: zero-trust-access
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 10Gi

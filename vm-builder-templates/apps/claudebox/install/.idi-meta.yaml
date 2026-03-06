@@ -1,0 +1,13 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-deploy.yml:
+    summary: Deploy Claudebox isolated sandbox environment for AI-assisted operations.
+      Provides secure Claude Code CLI with MCP server access. Accessible via Tailscale
+      on NodePort 30800.
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ templates_dir }}/pvc.yaml.j2'
+    - '{{ templates_dir }}/service.yaml.j2'
+    - '{{ templates_dir }}/deployment.yaml.j2'

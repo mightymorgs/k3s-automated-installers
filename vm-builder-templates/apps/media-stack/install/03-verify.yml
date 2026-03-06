@@ -1,0 +1,136 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/media-stack/03-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/media-stack/install/03-verify.yml"
+#     category: "apps"
+#     subsystem: "media-stack"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "media-stack"
+#       supported_versions: ["latest"]
+#       version_range: "latest"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - media_stack: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-11"
+#         notes: "Awaiting functional test on GCP infrastructure"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["media_stack_ready"]
+#   provides: ["media_stack_verified"]
+#   tags: ["media-stack", "verification", "health-check"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify media stack applications are healthy and accessible.
+#     Checks HTTP endpoints and displays access URLs.
+
+- name: Verify Media Stack Health
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    media_namespace: media-stack
+    apps:
+      - name: sonarr
+        port: 8989
+        health_path: /ping
+      - name: radarr
+        port: 7878
+        health_path: /ping
+      - name: sabnzbd
+        port: 8080
+        health_path: /api?mode=version
+      - name: prowlarr
+        port: 9696
+        health_path: /ping
+      - name: qbittorrent
+        port: 8081
+        health_path: /api/v2/app/version
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    - name: Get Tailscale IP for access URLs
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Set access host
+      ansible.builtin.set_fact:
+        access_host: "{{ tailscale_ip.stdout | default(ansible_hostname) }}"
+
+    # ========== PER-APP HEALTH CHECKS ==========
+    - name: Get ready pod name for each app
+      ansible.builtin.shell: >-
+        kubectl -n {{ media_namespace }} get pods
+        -l app={{ item.name }}
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      loop: "{{ apps }}"
+      register: app_pods
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pods.rc == 0 and app_pods.stdout != ''
+
+    - name: Test health endpoint for each app (auto-detect curl/wget)
+      ansible.builtin.command: >-
+        kubectl exec -n {{ media_namespace }} {{ item.stdout }} --
+        /bin/sh -c "command -v curl >/dev/null
+        && curl -sf --max-time {{ health_probe_timeout_seconds }} http://127.0.0.1:{{ apps[idx].port }}{{ apps[idx].health_path }}
+        || wget -q -O - --timeout={{ health_probe_timeout_seconds }} http://127.0.0.1:{{ apps[idx].port }}{{ apps[idx].health_path }}"
+      loop: "{{ app_pods.results }}"
+      loop_control:
+        index_var: idx
+        label: "{{ apps[idx].name }}"
+      register: health_checks
+      changed_when: false
+      failed_when: health_checks.rc != 0
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: health_checks.rc == 0
+
+    - name: Get PVC status
+      ansible.builtin.command: kubectl -n {{ media_namespace }} get pvc
+      register: pvc_status
+      changed_when: false
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Media Stack Verification Complete"
+          - "=========================================="
+          - ""
+          - "Persistent Volume Claims:"
+          - "{{ pvc_status.stdout_lines }}"
+          - ""
+          - "Access URLs (via Tailscale):"
+          - "  Sonarr:      http://{{ access_host }}:8989"
+          - "  Radarr:      http://{{ access_host }}:7878"
+          - "  Prowlarr:    http://{{ access_host }}:9696"
+          - "  SABnzbd:     http://{{ access_host }}:8080"
+          - "  qBittorrent: http://{{ access_host }}:8081"
+          - "=========================================="

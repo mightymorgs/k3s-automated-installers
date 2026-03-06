@@ -1,0 +1,228 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/langfuse/operations/dataset-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "langfuse.datasets.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/langfuse/operations/dataset-create.yml"
+#     category: "platform"
+#     subsystem: "langfuse"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "langfuse"
+#       supported_versions: ["2.x", "3.x"]
+#       version_range: ">=2.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - langfuse: "3.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Langfuse API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_langfuse_operations"
+#   dependencies: ["langfuse_deployed", "langfuse_api_keys_available"]
+#   provides: ["langfuse_dataset_created"]
+#   tags: ["langfuse", "datasets", "evaluation", "llm-observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an evaluation dataset in Langfuse. This operation is idempotent -
+#     if a dataset with the same name exists, it will be skipped. Datasets
+#     are used to store test cases for LLM evaluation. Langfuse uses Basic
+#     auth with public key as username and secret key as password.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.langfuse.public_key"
+#         purpose: "Langfuse public key for Basic auth username"
+#       - path: "_state.apps.langfuse.secret_key"
+#         purpose: "Langfuse secret key for Basic auth password"
+#       - path: "_state.apps.langfuse.url"
+#         purpose: "Langfuse base URL"
+#
+#     writes:
+#       - path: "_state.apps.langfuse.datasets.{dataset_name}.name"
+#         example: "evaluation-set-v1"
+#       - path: "_state.apps.langfuse.datasets.{dataset_name}.id"
+#         example: "dataset-abc123"
+#       - path: "_state.apps.langfuse.datasets.{dataset_name}.created_at"
+#         example: "2026-01-27T12:00:00Z"
+
+- name: Langfuse - Create Dataset
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    langfuse_base_url: "{{ langfuse_url }}"
+    langfuse_api_base: "{{ langfuse_base_url }}/api/public"
+    endpoint: "/datasets"
+
+    # Required fields (must be provided by caller)
+    # name: Dataset name (required, unique)
+
+    # Optional fields with defaults
+    description: "{{ description_input | default('') }}"
+    metadata: "{{ metadata_input | default({}) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - name is defined and name | length > 0
+        fail_msg: "Required inputs missing: name"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Langfuse credentials
+      ansible.builtin.set_fact:
+        langfuse_public_key: >-
+          {{ inventory._state.apps.langfuse.public_key | default(langfuse_public_key) }}
+        langfuse_secret_key: >-
+          {{ inventory._state.apps.langfuse.secret_key | default(langfuse_secret_key) }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        langfuse_base_url: "{{ inventory._state.apps.langfuse.url }}"
+        langfuse_api_base: "{{ inventory._state.apps.langfuse.url }}/api/public"
+      when: inventory._state.apps.langfuse.url is defined
+
+    - name: Validate credentials are available
+      ansible.builtin.assert:
+        that:
+          - langfuse_public_key | length > 0
+          - langfuse_secret_key | length > 0
+        fail_msg: "Langfuse credentials not found in BWS _state or environment"
+        success_msg: "Langfuse credentials loaded"
+
+    # ===== STEP 3: Check for Existing Dataset (Idempotency) =====
+    - name: Check if dataset already exists
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}{{ endpoint }}/{{ name | urlencode }}"
+        method: GET
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_dataset
+      no_log: true
+
+    - name: Set existing dataset fact
+      ansible.builtin.set_fact:
+        dataset_exists: "{{ existing_dataset.status == 200 }}"
+        existing_dataset_data: "{{ existing_dataset.json if existing_dataset.status == 200 else {} }}"
+
+    - name: Skip creation if dataset exists
+      ansible.builtin.debug:
+        msg: "Dataset '{{ name }}' already exists with ID {{ existing_dataset_data.id | default('unknown') }}"
+      when: dataset_exists
+
+    # ===== STEP 4: Build Dataset Payload =====
+    - name: Build dataset creation payload
+      ansible.builtin.set_fact:
+        dataset_payload:
+          name: "{{ name }}"
+          description: "{{ description if description | length > 0 else omit }}"
+          metadata: "{{ metadata if metadata | length > 0 else omit }}"
+      when: not dataset_exists
+      no_log: true
+
+    # ===== STEP 5: Create Dataset =====
+    - name: Create dataset in Langfuse
+      ansible.builtin.uri:
+        url: "{{ langfuse_api_base }}{{ endpoint }}"
+        method: POST
+        user: "{{ langfuse_public_key }}"
+        password: "{{ langfuse_secret_key }}"
+        force_basic_auth: true
+        body_format: json
+        body: "{{ dataset_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not dataset_exists
+
+    - name: Set dataset result from creation or existing
+      ansible.builtin.set_fact:
+        dataset_id: >-
+          {{ existing_dataset_data.id if dataset_exists else create_result.json.id }}
+        dataset_name: >-
+          {{ existing_dataset_data.name if dataset_exists else create_result.json.name }}
+      no_log: false
+
+    # ===== STEP 6: Write Result to BWS._state =====
+    - name: Derive dataset key name for BWS writeback
+      ansible.builtin.set_fact:
+        dataset_key: "{{ name | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with dataset info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Merge dataset info into _state.apps.langfuse.datasets
+        UPDATED=$(echo "$CURRENT" | jq --arg dk "{{ dataset_key }}" \
+          --arg dname "{{ dataset_name }}" \
+          --arg did "{{ dataset_id }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.langfuse == null then ._state.apps.langfuse = {} else . end |
+          if ._state.apps.langfuse.datasets == null then ._state.apps.langfuse.datasets = {} else . end |
+          if ._state.apps.langfuse.datasets[$dk] == null then ._state.apps.langfuse.datasets[$dk] = {} else . end |
+          ._state.apps.langfuse.datasets[$dk].name = $dname |
+          ._state.apps.langfuse.datasets[$dk].id = $did |
+          ._state.apps.langfuse.datasets[$dk].created_at = $timestamp
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not dataset_exists
+
+    # ===== STEP 7: Output Result =====
+    - name: Display dataset creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if dataset_exists else 'created' }}"
+          dataset_id: "{{ dataset_id }}"
+          name: "{{ dataset_name }}"
+          description: "{{ description if description | length > 0 else 'N/A' }}"

@@ -1,0 +1,197 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/operations/vault-sys-init"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "vault.sys.init.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/operations/vault-sys-init.yml"
+#     category: "platform"
+#     subsystem: "vault"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vault"
+#       supported_versions: ["1.15.x", "1.16.x", "1.17.x", "1.18.x"]
+#       version_range: ">=1.15.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - vault: "1.18.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Vault API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_vault_operations"
+#   dependencies: ["vault_deployed", "vault_pod_running"]
+#   provides: ["vault_initialized", "vault_root_token_available", "vault_unseal_keys_available"]
+#   tags: ["vault", "initialization", "secrets-management", "phase3"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Initialize Vault cluster. This operation is idempotent - if Vault is already
+#     initialized, it will be skipped. Stores root token and unseal keys in BWS
+#     _state for secure retrieval by subsequent operations.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "vault.namespace"
+#         purpose: "Vault deployment namespace"
+#       - path: "vault.api_port"
+#         purpose: "Vault API port for HTTP requests"
+#
+#     writes:
+#       - path: "_state.apps.vault.initialized"
+#         example: true
+#       - path: "_state.apps.vault.root_token"
+#         example: "hvs.XXXXXXXXXXXXXX"
+#       - path: "_state.apps.vault.unseal_keys"
+#         example: ["key1", "key2", "key3", "key4", "key5"]
+#       - path: "_state.apps.vault.init_timestamp"
+#         example: "2026-01-27T12:00:00Z"
+
+- name: Vault - Initialize System
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    vault_base_url: "{{ vault_addr }}"
+    vault_api_base: "{{ vault_base_url }}/v1"
+    endpoint: "/sys/init"
+
+    # Vault initialization parameters
+    secret_shares: "{{ secret_shares_input | default(5) }}"
+    secret_threshold: "{{ secret_threshold_input | default(3) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    # ===== STEP 3: Check Vault Initialization Status (Idempotency) =====
+    - name: Check if Vault is already initialized
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint }}"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: init_status
+      failed_when: false
+
+    - name: Display current initialization status
+      ansible.builtin.debug:
+        msg: "Vault initialization status: {{ 'Initialized' if init_status.json.initialized else 'Not initialized' }}"
+
+    - name: Skip if Vault is already initialized
+      ansible.builtin.debug:
+        msg: "Vault is already initialized - skipping initialization"
+      when: init_status.json.initialized | default(false)
+
+    # ===== STEP 4: Initialize Vault =====
+    - name: Initialize Vault
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint }}"
+        method: POST
+        body_format: json
+        body:
+          secret_shares: "{{ secret_shares | int }}"
+          secret_threshold: "{{ secret_threshold | int }}"
+        status_code: [200]
+        validate_certs: false
+      register: init_result
+      no_log: true
+      when: not (init_status.json.initialized | default(false))
+
+    - name: Extract initialization credentials
+      ansible.builtin.set_fact:
+        vault_root_token: "{{ init_result.json.root_token }}"
+        vault_unseal_keys: "{{ init_result.json.keys }}"
+        vault_unseal_keys_base64: "{{ init_result.json.keys_base64 }}"
+      no_log: true
+      when: init_result is not skipped
+
+    # ===== STEP 5: Write Initialization Results to BWS._state =====
+    - name: Update BWS inventory with initialization credentials
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Merge initialization results into _state.apps.vault
+        UPDATED=$(echo "$CURRENT" | jq \
+          --argjson initialized true \
+          --arg root_token "{{ vault_root_token }}" \
+          --argjson unseal_keys '{{ vault_unseal_keys | to_json }}' \
+          --argjson unseal_keys_base64 '{{ vault_unseal_keys_base64 | to_json }}' \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.vault == null then ._state.apps.vault = {} else . end |
+          ._state.apps.vault.initialized = $initialized |
+          ._state.apps.vault.root_token = $root_token |
+          ._state.apps.vault.unseal_keys = $unseal_keys |
+          ._state.apps.vault.unseal_keys_base64 = $unseal_keys_base64 |
+          ._state.apps.vault.init_timestamp = $timestamp
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: init_result is not skipped
+
+    # ===== STEP 6: Output Result =====
+    - name: Display initialization result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'already_initialized' if init_status.json.initialized else 'initialized' }}"
+          secret_shares: "{{ secret_shares }}"
+          secret_threshold: "{{ secret_threshold }}"
+          message: >-
+            {{
+              'Vault was already initialized' if init_status.json.initialized
+              else 'Vault initialized successfully. Root token and unseal keys stored in BWS _state.'
+            }}

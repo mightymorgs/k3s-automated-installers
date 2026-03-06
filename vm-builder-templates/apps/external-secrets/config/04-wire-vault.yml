@@ -1,0 +1,295 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/external-secrets/04-wire-vault"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/external-secrets/config/04-wire-vault.yml"
+#     category: "platform"
+#     subsystem: "external-secrets"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260225_cross_app_wiring"
+#   dependencies: ["external_secrets_deployed", "vault_deployed", "vault_initialized"]
+#   provides: ["external_secrets_vault_wired", "clustersecretstore_vault_ready"]
+#   tags: ["external-secrets", "vault", "integration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Wire External Secrets Operator to HashiCorp Vault by creating a
+#     ClusterSecretStore backed by Vault's KV v2 engine using token auth.
+#     Creates a K8s Secret holding the Vault token, then applies the
+#     ClusterSecretStore CRD pointing at Vault's internal DNS address.
+#     Any namespace can then create ExternalSecret resources referencing
+#     this store to pull secrets from Vault.
+#   requires_apps: ["external-secrets", "vault"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.root_token"
+#         purpose: "Vault token for ClusterSecretStore authentication"
+#     writes:
+#       - path: "_state.apps.external_secrets.clustersecretstore.vault-backend"
+#         example:
+#           name: "vault-backend"
+#           provider: "vault"
+#           status: "ready"
+
+
+- name: Wire External Secrets Operator to Vault
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    external_secrets_namespace: "external-secrets"
+    vault_namespace: "vault"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    eso_namespace: "{{ external_secrets_namespace }}"
+    vault_internal_addr: "{{ vault_service_name }}.{{ vault_namespace }}.svc:{{ vault_service_port }}"
+    vault_kv_path: apps
+    vault_kv_version: v2
+    store_name: vault-backend
+    token_secret_name: vault-token-for-eso
+    token_secret_namespace: "{{ eso_namespace }}"
+    # Vault token passed as extra-var or from BWS
+
+  tasks:
+    # ========================================
+    # VALIDATE PREREQUISITES
+    # ========================================
+
+    # ========== SKIP IF VAULT NOT INSTALLED ==========
+    - name: Skip if vault is not installed on this VM
+      when: vault_root_token is not defined
+      block:
+        - name: "vault not installed — skipping external-secrets <-> vault wiring"
+          ansible.builtin.debug:
+            msg: "vault is not installed on this VM (no vault_root_token in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Validate vault_root_token is provided
+      ansible.builtin.fail:
+        msg: >-
+          vault_root_token must be provided via extra-vars (from BWS _state.apps.vault.root_token)
+      when: vault_root_token is not defined or vault_root_token | length == 0
+
+    - name: Check if ESO controller is running
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ eso_namespace }}
+          -l app.kubernetes.io/name=external-secrets
+          --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: eso_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if ESO not deployed
+      ansible.builtin.debug:
+        msg: "External Secrets Operator not deployed - skipping Vault wiring"
+      when: eso_check.rc != 0 or eso_check.stdout | length == 0
+
+    - name: End play if ESO not available
+      ansible.builtin.meta: end_play
+      when: eso_check.rc != 0 or eso_check.stdout | length == 0
+
+    - name: Check if Vault is accessible from cluster
+      ansible.builtin.command:
+        cmd: >-
+          kubectl run vault-check --rm -i --restart=Never
+          --image=curlimages/curl:latest --
+          curl -sf -o /dev/null -w "%{http_code}"
+          {{ vault_internal_addr }}/v1/sys/health
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: vault_health
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if Vault health check failed
+      ansible.builtin.fail:
+        msg: >-
+          Could not reach Vault at {{ vault_internal_addr }}.
+          Vault must be accessible before wiring ESO.
+          Check: kubectl run vault-check --rm -i --restart=Never
+          --image=curlimages/curl:latest -- curl -sf {{ vault_internal_addr }}/v1/sys/health
+      when: vault_health.rc != 0
+
+    # ========================================
+    # CREATE VAULT TOKEN SECRET
+    # ========================================
+    - name: Check if Vault token Secret already exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get secret {{ token_secret_name }}
+          -n {{ token_secret_namespace }} --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: existing_token_secret
+      changed_when: false
+      failed_when: false
+
+    - name: Create or update Vault token Secret for ESO
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: {{ token_secret_name }}
+            namespace: {{ token_secret_namespace }}
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/component: vault-auth
+          type: Opaque
+          stringData:
+            token: "{{ vault_root_token }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: token_secret_result
+      changed_when: "'created' in token_secret_result.stdout or 'configured' in token_secret_result.stdout"
+      no_log: true
+
+    - name: Display token Secret status
+      ansible.builtin.debug:
+        msg: "Vault token Secret '{{ token_secret_name }}' in ns '{{ token_secret_namespace }}': {{ token_secret_result.stdout }}"
+
+    # ========================================
+    # CREATE CLUSTERSECRETSTORE
+    # ========================================
+    - name: Check if ClusterSecretStore CRD is available
+      ansible.builtin.command:
+        cmd: >-
+          kubectl api-resources --api-group=external-secrets.io
+          -o name
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: eso_crds
+      changed_when: false
+      failed_when: false
+
+    - name: End play if ESO CRDs not installed
+      when: "'clustersecretstores' not in (eso_crds.stdout | default(''))"
+      block:
+        - name: Warn ESO CRDs not available
+          ansible.builtin.debug:
+            msg: >-
+              ClusterSecretStore CRD not found. External Secrets Operator CRDs
+              may not be installed. Skipping Vault wiring.
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Check if ClusterSecretStore already exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get clustersecretstore {{ store_name }} --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: existing_css
+      changed_when: false
+      failed_when: false
+
+    - name: Create or update ClusterSecretStore for Vault
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: external-secrets.io/v1
+          kind: ClusterSecretStore
+          metadata:
+            name: {{ store_name }}
+            labels:
+              app.kubernetes.io/name: {{ store_name }}
+              app.kubernetes.io/component: clustersecretstore
+              app.kubernetes.io/managed-by: ansible
+          spec:
+            provider:
+              vault:
+                server: "{{ vault_internal_addr }}"
+                path: "{{ vault_kv_path }}"
+                version: "{{ vault_kv_version }}"
+                auth:
+                  tokenSecretRef:
+                    name: "{{ token_secret_name }}"
+                    namespace: "{{ token_secret_namespace }}"
+                    key: "token"
+            retrySettings:
+              maxRetries: 5
+              retryInterval: "10s"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: css_result
+      changed_when: "'created' in css_result.stdout or 'configured' in css_result.stdout"
+
+    - name: Display ClusterSecretStore apply result
+      ansible.builtin.debug:
+        msg: "ClusterSecretStore '{{ store_name }}': {{ css_result.stdout }}"
+
+    # ========================================
+    # WAIT FOR CLUSTERSECRETSTORE READY
+    # ========================================
+    - name: Wait for ClusterSecretStore to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get clustersecretstore {{ store_name }}
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: css_status
+      until: css_status.stdout == "True"
+      retries: 12
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: Set ClusterSecretStore readiness fact
+      ansible.builtin.set_fact:
+        css_ready: "{{ css_status.stdout == 'True' }}"
+
+    - name: Fail if ClusterSecretStore not ready
+      ansible.builtin.fail:
+        msg: |
+          ClusterSecretStore '{{ store_name }}' is not Ready after 60s.
+          Possible causes:
+            - Vault not accessible at {{ vault_internal_addr }}
+            - Vault token is invalid or expired
+            - KV engine '{{ vault_kv_path }}' not enabled in Vault
+          Debug: kubectl describe clustersecretstore {{ store_name }}
+      when: not css_ready
+
+    # ========================================
+    # VERIFICATION
+    # ========================================
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "External Secrets <-> Vault Wiring Complete"
+          - "=========================================="
+          - ""
+          - "ClusterSecretStore: {{ store_name }}"
+          - "Vault Address: {{ vault_internal_addr }}"
+          - "KV Engine Path: {{ vault_kv_path }}/"
+          - "KV Version: {{ vault_kv_version }}"
+          - "Auth Method: Token (Secret {{ token_secret_namespace }}/{{ token_secret_name }})"
+          - "Status: {{ 'Ready' if css_ready else 'Not Ready - see warning above' }}"
+          - ""
+          - "Usage: Create ExternalSecret resources in any namespace:"
+          - "  secretStoreRef:"
+          - "    name: {{ store_name }}"
+          - "    kind: ClusterSecretStore"
+          - "  data:"
+          - "    - secretKey: my-secret"
+          - "      remoteRef:"
+          - "        key: {{ vault_kv_path }}/data/<app>/<key>"
+          - "        property: value"
+          - "=========================================="

@@ -1,0 +1,136 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/cloudflare-tunnel/01-configure-tunnel"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/cloudflare-tunnel/config/01-configure-tunnel.yml"
+#     category: "apps"
+#     subsystem: "cloudflare-tunnel"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260205_cloudflare_tunnel_config"
+#   dependencies: ["cloudflare_account_exists"]
+#   provides: ["cloudflare_tunnel_configured"]
+#   tags: ["cloudflare", "tunnel", "networking", "configuration"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Configure Cloudflare Tunnel for private network access
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.cloudflare.account_id"
+#       - path: "_state.cloudflare.api_token"
+#     writes:
+#       - path: "_state.apps.cloudflare_tunnel.tunnel_id"
+#         example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+#       - path: "_state.apps.cloudflare_tunnel.tunnel_token"
+#         example: "eyJhIjoiYWJjMTIz..."
+
+- name: Configure Cloudflare Tunnel
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cloudflare_api_url: "https://api.cloudflare.com/client/v4"
+    cloudflare_token: "{{ cloudflare_api_token }}"
+    # cloudflare_account_id: from BWS _state via Phase 4 extra-vars
+    domain: "{{ ingress_domain }}"
+    tunnel_name: "homelab-tunnel"
+
+  tasks:
+    # ========== 0. VALIDATE REQUIRED VARS ==========
+    - name: Fail if ingress_domain not provided by BWS
+      ansible.builtin.fail:
+        msg: "ingress_domain must be provided via BWS extra-vars — no fake defaults"
+      when: ingress_domain is not defined or ingress_domain | length == 0
+
+    - name: Fail if cloudflare_account_id not set
+      ansible.builtin.fail:
+        msg: "cloudflare_account_id must be provided — no fake defaults"
+      when: cloudflare_account_id is not defined or cloudflare_account_id | length == 0
+
+    # ========== 1. CHECK FOR EXISTING TUNNEL ==========
+    - name: Check if tunnel already exists
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{ tunnel_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+      register: existing_tunnels
+
+    - name: Set existing tunnel fact
+      ansible.builtin.set_fact:
+        tunnel_exists: "{{ existing_tunnels.json.result | length > 0 }}"
+        existing_tunnel_id: "{{ existing_tunnels.json.result[0].id | default('') }}"
+      when: existing_tunnels.json.result is defined
+
+    # ========== 2. CREATE TUNNEL IF NOT EXISTS ==========
+    - name: Create Cloudflare Tunnel
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ tunnel_name }}"
+          config_src: "cloudflare"
+        status_code: [200, 201]
+      register: new_tunnel
+      when: not tunnel_exists | default(false)
+
+    - name: Set tunnel ID
+      ansible.builtin.set_fact:
+        tunnel_id: "{{ new_tunnel.json.result.id if not tunnel_exists | default(false) else existing_tunnel_id }}"
+
+    # ========== 3. GET TUNNEL TOKEN ==========
+    - name: Get tunnel token
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ tunnel_id }}/token"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+        status_code: [200]
+      register: tunnel_token_response
+
+    - name: Store tunnel token
+      ansible.builtin.set_fact:
+        tunnel_token: "{{ tunnel_token_response.json.result }}"
+
+    # ========== 4. CREATE DNS ROUTE FOR TUNNEL ==========
+    - name: Create private network route through tunnel
+      ansible.builtin.uri:
+        url: "{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/teamnet/routes"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          network: "10.0.0.0/8"
+          comment: "Private network access via {{ tunnel_name }}"
+        status_code: [200, 201, 409]  # 409 if route already exists
+      register: route_result
+
+    # ========== 5. DISPLAY RESULT ==========
+    - name: Display tunnel configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Cloudflare Tunnel Configuration Complete"
+          - "=========================================="
+          - "Tunnel Name: {{ tunnel_name }}"
+          - "Tunnel ID: {{ tunnel_id }}"
+          - "Domain: {{ domain }}"
+          - "Private Network Route: 10.0.0.0/8"
+          - "=========================================="
+          - ""
+          - "To run cloudflared on your server:"
+          - "cloudflared tunnel run --token {{ tunnel_token }}"
+          - "=========================================="

@@ -1,0 +1,582 @@
+---
+name: Phase 4 - Dynamic App Configuration
+# Purpose: Run zero-touch configuration playbooks for installed apps
+# Runs on: Self-hosted runner on the target VM (after Phase 3 installation)
+#
+# How it works:
+#   1. Reads _state.apps from BWS inventory to see which apps are installed
+#   2. For each app, filters config playbooks by requires_apps metadata
+#   3. A wiring playbook (e.g., prowlarr/04-wire-sonarr.yml) only runs when ALL
+#      its required apps are installed (e.g., prowlarr + sonarr both present)
+#   4. Passes all available api_keys + config vars as extra-vars to ansible
+#   5. Per-app failures are reported (red X) but don't block other apps
+#   6. BWS records phase4_status: "completed" or "completed_with_errors"
+#
+# Job DAG:
+#   prepare (ubuntu-latest) — filter playbooks, build apps_with_playbooks
+#     |
+#   configure-all-apps (self-hosted) — parallel background subshells per app
+#     |
+#   write-phase4-state (self-hosted) — BWS status writeback
+#
+# BWS API calls: ~7 total (2x setup-bws list, pre-cache read, batch write read+edit, state write read+edit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_hostname:
+        description: VM hostname (must match runner label)
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-gcp-latest)
+        required: true
+        type: string
+      selected_apps:
+        description: 'JSON array of apps (optional - reads installed apps from BWS if empty)'
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: 'Config mode: "full" reconfigures everything, "rebuild" skips already-configured apps'
+        required: false
+        type: string
+        default: 'rebuild'
+
+  workflow_call:
+    inputs:
+      vm_hostname:
+        description: VM hostname
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key
+        required: true
+        type: string
+      selected_apps:
+        description: JSON array of apps (optional - reads from BWS if empty)
+        required: false
+        type: string
+      mode:
+        description: 'Config mode: full or rebuild (default)'
+        required: false
+        type: string
+        default: 'rebuild'
+
+jobs:
+  # ============================================================
+  # PREPARE — Read BWS inventory, filter config playbooks
+  # ============================================================
+  prepare:
+    runs-on: ubuntu-latest
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    outputs:
+      apps_with_playbooks: ${{ steps.filter.outputs.apps_with_playbooks }}
+      available_apps: ${{ steps.filter.outputs.available_apps }}
+      has_config: ${{ steps.filter.outputs.has_config }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Read BWS inventory for available apps
+        id: inventory
+        run: |
+          INVENTORY_KEY='${{ inputs.inventory_key }}'
+          INPUT_APPS='${{ inputs.selected_apps }}'
+
+          SECRET_ID=$(jq -r --arg key "$INVENTORY_KEY" '.[] | select(.key==$key) | .id' /tmp/bws_secrets.json)
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "null" ]; then
+            echo "ERROR: Could not find secret with key: $INVENTORY_KEY"
+            exit 1
+          fi
+
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Extract all apps that have status=installed in _state.apps
+          # Filter to object values only — _state.apps.installed is an array, not an app entry
+          AVAILABLE_APPS=$(echo "$INVENTORY" | jq -c '[._state.apps // {} | to_entries[] | select(.value | type == "object") | select(.value.status != null and .value.status == "installed") | .key]')
+          echo "Available apps (status=installed): $AVAILABLE_APPS"
+
+          # If selected_apps is provided, intersect with available
+          if [ -n "$INPUT_APPS" ] && [ "$INPUT_APPS" != "[]" ] && [ "$INPUT_APPS" != "" ]; then
+            echo "Filtering to selected apps from input"
+            AVAILABLE_APPS=$(echo "$AVAILABLE_APPS" | jq -c --argjson sel "$INPUT_APPS" '[.[] | select(. as $a | $sel | index($a))]')
+            echo "Filtered available apps: $AVAILABLE_APPS"
+          fi
+
+          echo "available_apps=$AVAILABLE_APPS" >> "$GITHUB_OUTPUT"
+
+      - name: Filter config playbooks by requires_apps
+        id: filter
+        run: |
+          AVAILABLE_APPS='${{ steps.inventory.outputs.available_apps }}'
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          echo "Available apps: $AVAILABLE_APPS"
+
+          # For each app in registry, filter config_playbook_details:
+          #   - Exclude extract-api-keys (Phase 3 responsibility)
+          #   - Exclude vault init/sync (Phase 3 responsibility: vault/config/00-*, vault/config/01-*)
+          #   - Exclude configure-sso (Phase 5 SSO wiring)
+          #   - Only include playbooks where ALL requires_apps are installed
+          FILTERED=$(echo "$REGISTRY" | jq -c --argjson avail "$AVAILABLE_APPS" '
+            [.apps | to_entries[] |
+             {app: .key, playbooks: [
+               (.value.config_playbook_details // [])[] |
+               select(
+                 (.path | test("extract-api-keys") | not) and
+                 (.path | test("vault/config/0[01]-") | not) and
+                 (.path | test("configure-sso") | not) and
+                 ([.requires_apps[] | . as $r | $avail | index($r) != null] | all)
+               ) | .path
+             ]} |
+             select(.playbooks | length > 0)
+            ]')
+
+          echo "Filtered apps with eligible playbooks:"
+          echo "$FILTERED" | jq '.'
+
+          HAS_CONFIG="false"
+          if [ "$(echo "$FILTERED" | jq 'length')" -gt 0 ]; then
+            HAS_CONFIG="true"
+          fi
+
+          {
+            echo "apps_with_playbooks=$FILTERED"
+            echo "available_apps=$AVAILABLE_APPS"
+            echo "has_config=$HAS_CONFIG"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Apps with config playbooks: $(echo "$FILTERED" | jq 'length')"
+          echo "Has config playbooks: $HAS_CONFIG"
+
+  # ============================================================
+  # CONFIGURE ALL APPS — Single job, parallel background subshells
+  # ============================================================
+  configure-all-apps:
+    needs: [prepare]
+    if: needs.prepare.outputs.has_config == 'true'
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      # ── Step 1: Checkout + Setup BWS ──────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      # ── Step 2: Pre-cache BWS inventory (1 API call) ──────────
+      - name: Pre-cache BWS inventory
+        id: cache_inventory
+        run: |
+          set -euo pipefail
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+          echo "secret_id=$SECRET_ID" >> "$GITHUB_OUTPUT"
+
+          INVENTORY=$(get_val "$SECRET_ID")
+          echo "$INVENTORY" > /tmp/bws-inventory.json
+          echo "BWS inventory cached to /tmp/bws-inventory.json ($(echo "$INVENTORY" | jq 'length') top-level keys)"
+
+      # ── Step 3: Build cross-app state JSON (local jq, 0 BWS calls)
+      - name: Build cross-app state JSON from cached inventory
+        run: |
+          set -euo pipefail
+          INVENTORY=$(cat /tmp/bws-inventory.json)
+
+          # Extract cross-app state: credentials, URLs, nodeports, vault, k3s CIDRs, domain
+          # This is built ONCE and merged into every per-app config JSON
+          CROSS_APP_STATE=$(echo "$INVENTORY" | jq --arg vm_hostname "${{ inputs.vm_hostname }}" '
+            # Normalize hyphenated app keys to underscores for Ansible compatibility
+            # BWS keys like "external-secrets" become "external_secrets_namespace" etc.
+            ([._state.apps // {} | to_entries[] |
+              select(.value | type == "object") |
+              . as $app | ($app.key | gsub("-"; "_")) as $norm_key |
+              (
+                (select(.value.api_key != null and (.value.api_key | length) > 0) |
+                 {key: ($norm_key + "_api_key"), value: $app.value.api_key}),
+                (select(.value.admin_password != null and (.value.admin_password | length) > 0) |
+                 {key: ($norm_key + "_admin_password"), value: $app.value.admin_password}),
+                (select(.value.root_token != null and (.value.root_token | length) > 0) |
+                 {key: ($norm_key + "_root_token"), value: $app.value.root_token}),
+                (select(.value.admin_token != null and (.value.admin_token | length) > 0) |
+                 {key: ($norm_key + "_admin_token"), value: $app.value.admin_token}),
+                (select(.value.url != null and (.value.url | length) > 0) |
+                 {key: ($norm_key + "_url"), value: $app.value.url}),
+                (select(.value.nodeport != null) |
+                 {key: ($norm_key + "_nodeport"), value: (.value.nodeport | tostring)}),
+                (select(.value.pod_name != null and (.value.pod_name | length) > 0) |
+                 {key: ($norm_key + "_pod_name"), value: $app.value.pod_name}),
+                (select(.value.namespace != null and (.value.namespace | length) > 0) |
+                 {key: ($norm_key + "_namespace"), value: $app.value.namespace}),
+                (select(.value.service_name != null and (.value.service_name | length) > 0) |
+                 {key: ($norm_key + "_service_name"), value: $app.value.service_name}),
+                (select(.value.service_port != null) |
+                 {key: ($norm_key + "_service_port"), value: (.value.service_port | tostring)}),
+                (select(.value.websecure_port != null) |
+                 {key: ($norm_key + "_websecure_port"), value: (.value.websecure_port | tostring)})
+              )
+             ] | from_entries) +
+            # Top-level vault state (00-init-unseal writes to _state.vault, not _state.apps.vault)
+            (if ._state.vault.root_token then {vault_root_token: ._state.vault.root_token} else {} end) +
+            (if ._state.vault.unseal_key then {vault_unseal_key: ._state.vault.unseal_key} else {} end) +
+            (if ._state.vault.initialized then {vault_initialized: ._state.vault.initialized} else {} end) +
+            # k3s CIDRs (Phase 3 writes to _state.k3s)
+            (if ._state.k3s.pod_cidr then {k3s_pod_cidr: ._state.k3s.pod_cidr} else {} end) +
+            (if ._state.k3s.service_cidr then {k3s_service_cidr: ._state.k3s.service_cidr} else {} end) +
+            # Top-level ingress fields — some playbooks use {{ domain }}, others {{ ingress_domain }}
+            (if .ingress.domain then {domain: .ingress.domain, ingress_domain: .ingress.domain} else {} end) +
+            {vm_hostname: $vm_hostname, inventory_secret_name: "'"${{ inputs.inventory_key }}"'"}
+          ')
+
+          echo "$CROSS_APP_STATE" > /tmp/cross-app-state.json
+          KEY_COUNT=$(echo "$CROSS_APP_STATE" | jq 'keys | length')
+          echo "Cross-app state: $KEY_COUNT keys"
+          echo "Keys: $(echo "$CROSS_APP_STATE" | jq -r 'keys | join(", ")')"
+
+      # ── Step 4: Build per-app config JSONs (local jq, 0 BWS calls)
+      - name: Build per-app config JSONs from cached inventory
+        run: |
+          set -euo pipefail
+          APPS_WITH_PLAYBOOKS='${{ needs.prepare.outputs.apps_with_playbooks }}'
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          INVENTORY=$(cat /tmp/bws-inventory.json)
+
+          for APP in $(echo "$APPS_WITH_PLAYBOOKS" | jq -r '.[].app'); do
+            # Layer 1: App-specific template config from BWS _config
+            # Falls back to legacy apps.config, then registry defaults
+            APP_CONFIG=$(echo "$INVENTORY" | jq -c --arg app "$APP" '._config[$app] // .apps.config[$app] // {}')
+
+            if [ "$APP_CONFIG" = "{}" ] || [ "$APP_CONFIG" = "null" ]; then
+              # Seed from registry defaults if no BWS config exists
+              APP_CONFIG=$(echo "$REGISTRY" | jq -c --arg app "$APP" '
+                .apps[$app].variables // {} |
+                to_entries | map({key: .key, value: .value.default}) | from_entries')
+              echo "  $APP: seeded from registry defaults ($(echo "$APP_CONFIG" | jq 'length') vars)"
+            else
+              # Sanitize: remove stale Jinja2 expressions
+              APP_CONFIG=$(echo "$APP_CONFIG" | jq -c 'with_entries(select(.value | tostring | test("\\{\\{") | not))')
+            fi
+
+            # Layer 2: Merge cross-app state (cross-app wins for same keys — runtime > defaults)
+            MERGED=$(jq -s '.[0] * .[1]' <(echo "$APP_CONFIG") /tmp/cross-app-state.json)
+            echo "$MERGED" > "/tmp/config-${APP}.json"
+
+            # Mask credential values in logs (skip urls, nodeports, non-secret template vars)
+            for val in $(echo "$MERGED" | jq -r 'to_entries[] | select(.key | test("_url$|_nodeport$|^vm_hostname$|^inventory_secret_name$|^app_|^storage_|^cpu_|^memory_|^replicas$|^image$|^container_port$|^health_path$") | not) | .value // empty | select(length > 0)' 2>/dev/null); do
+              echo "::add-mask::$val"
+            done
+
+            TOTAL=$(echo "$MERGED" | jq 'keys | length')
+            echo "  $APP: $TOTAL vars merged"
+          done
+
+          APP_COUNT=$(echo "$APPS_WITH_PLAYBOOKS" | jq 'length')
+          echo "Built config JSONs for $APP_COUNT apps"
+
+      # ── Step 5: Determine skip list (local jq, 0 BWS calls) ──
+      - name: Determine skip list from cached inventory
+        id: skip_list
+        run: |
+          set -euo pipefail
+          MODE="${{ inputs.mode }}"
+          APPS_WITH_PLAYBOOKS='${{ needs.prepare.outputs.apps_with_playbooks }}'
+          INVENTORY=$(cat /tmp/bws-inventory.json)
+          SKIP_LIST="[]"
+
+          if [ "$MODE" != "full" ]; then
+            for APP in $(echo "$APPS_WITH_PLAYBOOKS" | jq -r '.[].app'); do
+              CONFIGURED_AT=$(echo "$INVENTORY" | jq -r --arg app "$APP" '._state.apps[$app].configured_at // ""')
+              if [ -n "$CONFIGURED_AT" ]; then
+                SKIP_LIST=$(echo "$SKIP_LIST" | jq -c --arg app "$APP" '. + [$app]')
+                echo "SKIP: $APP (configured_at=$CONFIGURED_AT, mode=rebuild)"
+              fi
+            done
+          fi
+
+          echo "skip_list=$SKIP_LIST" >> "$GITHUB_OUTPUT"
+          SKIP_COUNT=$(echo "$SKIP_LIST" | jq 'length')
+          echo "Skip list: $SKIP_COUNT apps"
+
+      # ── Step 6: Parallel configure — all apps ─────────────────
+      - name: Configure all apps in parallel
+        run: |
+          set -euo pipefail
+          APPS_WITH_PLAYBOOKS='${{ needs.prepare.outputs.apps_with_playbooks }}'
+          SKIP_LIST='${{ steps.skip_list.outputs.skip_list }}'
+
+          # All apps minus skip list
+          CONFIG_APPS=$(echo "$APPS_WITH_PLAYBOOKS" | jq -c --argjson skip "$SKIP_LIST" '
+            [.[] | select(.app as $a | $skip | index($a) | not)]')
+
+          CONFIG_COUNT=$(echo "$CONFIG_APPS" | jq 'length')
+          SKIP_COUNT=$(echo "$SKIP_LIST" | jq 'length')
+
+          echo "=========================================="
+          echo "Configuring $CONFIG_COUNT apps in parallel (${SKIP_COUNT} skipped)"
+          echo "Apps: $(echo "$CONFIG_APPS" | jq -r '[.[].app] | join(", ")')"
+          echo "=========================================="
+
+          # Write skip status files for skipped apps
+          for APP in $(echo "$SKIP_LIST" | jq -r '.[]'); do
+            echo "0" > "/tmp/config-exit-${APP}"
+            echo "SKIP" > "/tmp/config-status-${APP}"
+          done
+
+          # Launch parallel background subshells — within each app, playbooks run sequentially
+          for APP_ENTRY in $(echo "$CONFIG_APPS" | jq -c '.[]'); do
+            APP=$(echo "$APP_ENTRY" | jq -r '.app')
+
+            (
+              FAIL_COUNT=0
+              PASS_COUNT=0
+              FAILED_PLAYBOOKS=""
+
+              for playbook in $(echo "$APP_ENTRY" | jq -r '.playbooks[]'); do
+                echo ">>> Running: $playbook"
+                if ansible-playbook "$playbook" \
+                  -i "localhost," \
+                  -e ansible_connection=local \
+                  -e target_hosts=localhost \
+                  -e inventory_secret_name="${{ inputs.inventory_key }}" \
+                  -e "@/tmp/config-${APP}.json"; then
+                  PASS_COUNT=$((PASS_COUNT + 1))
+                  echo "<<< Completed: $playbook"
+                else
+                  BASENAME=$(basename "$playbook")
+                  echo "::error::${APP} config playbook failed: ${BASENAME}"
+                  FAILED_PLAYBOOKS="${FAILED_PLAYBOOKS} ${BASENAME}"
+                  FAIL_COUNT=$((FAIL_COUNT + 1))
+                fi
+              done
+
+              if [ "$FAIL_COUNT" -gt 0 ]; then
+                echo "FAILED_PLAYBOOKS=${FAILED_PLAYBOOKS}" > "/tmp/config-status-${APP}"
+                echo "1" > "/tmp/config-exit-${APP}"
+              else
+                echo "OK" > "/tmp/config-status-${APP}"
+                echo "0" > "/tmp/config-exit-${APP}"
+              fi
+              echo "pass=${PASS_COUNT} fail=${FAIL_COUNT}" >> "/tmp/config-status-${APP}"
+            ) > "/tmp/config-log-${APP}.txt" 2>&1 &
+          done
+
+          echo "Waiting for all configurations to complete..."
+          wait
+          echo "All configurations complete."
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+      # ── Step 7: Display per-app config logs ───────────────────
+      - name: Display per-app config logs
+        if: always()
+        id: config_summary
+        run: |
+          set -euo pipefail
+          APPS_WITH_PLAYBOOKS='${{ needs.prepare.outputs.apps_with_playbooks }}'
+          SKIP_LIST='${{ steps.skip_list.outputs.skip_list }}'
+          CONFIGURED_APPS="[]"
+          FAILED_APPS="[]"
+          OVERALL_FAIL=0
+
+          for APP_ENTRY in $(echo "$APPS_WITH_PLAYBOOKS" | jq -c '.[]'); do
+            APP=$(echo "$APP_ENTRY" | jq -r '.app')
+            PLAYBOOK_COUNT=$(echo "$APP_ENTRY" | jq '.playbooks | length')
+            EXIT_CODE=$(cat "/tmp/config-exit-${APP}" 2>/dev/null || echo "?")
+            STATUS=$(head -1 "/tmp/config-status-${APP}" 2>/dev/null || echo "UNKNOWN")
+
+            if [ "$STATUS" = "SKIP" ]; then
+              echo "::group::${APP} (skipped -- already configured)"
+              echo "Skipped in mode=rebuild (already has configured_at timestamp)"
+              echo "::endgroup::"
+              continue
+            fi
+
+            if [ "$STATUS" = "OK" ]; then
+              echo "::group::${APP} (${PLAYBOOK_COUNT} playbooks, exit: 0, OK)"
+              if [ -f "/tmp/config-log-${APP}.txt" ]; then
+                cat "/tmp/config-log-${APP}.txt"
+              fi
+              echo "::endgroup::"
+              CONFIGURED_APPS=$(echo "$CONFIGURED_APPS" | jq -c --arg app "$APP" '. + [$app]')
+            else
+              echo "::group::${APP} (${PLAYBOOK_COUNT} playbooks, exit: ${EXIT_CODE}, FAILED)"
+              if [ -f "/tmp/config-log-${APP}.txt" ]; then
+                cat "/tmp/config-log-${APP}.txt"
+              fi
+              echo "::endgroup::"
+              echo "::error::${APP} configuration failed"
+              FAILED_APPS=$(echo "$FAILED_APPS" | jq -c --arg app "$APP" '. + [$app]')
+              OVERALL_FAIL=1
+            fi
+          done
+
+          echo "configured_apps=$CONFIGURED_APPS" >> "$GITHUB_OUTPUT"
+          echo "failed_apps=$FAILED_APPS" >> "$GITHUB_OUTPUT"
+
+          CONFIGURED_COUNT=$(echo "$CONFIGURED_APPS" | jq 'length')
+          FAILED_COUNT=$(echo "$FAILED_APPS" | jq 'length')
+          SKIPPED_COUNT=$(echo "$SKIP_LIST" | jq 'length')
+
+          echo "=========================================="
+          echo "Configuration Summary"
+          echo "=========================================="
+          echo "  Configured: $CONFIGURED_COUNT"
+          echo "  Failed:     $FAILED_COUNT"
+          echo "  Skipped:    $SKIPPED_COUNT"
+          if [ "$FAILED_COUNT" -gt 0 ]; then
+            echo "  Failed apps: $(echo "$FAILED_APPS" | jq -r 'join(", ")')"
+            for FAPP in $(echo "$FAILED_APPS" | jq -r '.[]'); do
+              echo "::error::Configuration FAILED: $FAPP (exit=$(cat "/tmp/config-exit-${FAPP}" 2>/dev/null || echo unknown))"
+            done
+          fi
+          echo "=========================================="
+
+          # Fail the step if any apps failed — makes the job show as failed in Actions UI
+          if [ "$OVERALL_FAIL" = "1" ]; then
+            echo "ERROR: $FAILED_COUNT app(s) failed to configure"
+            exit 1
+          fi
+
+      # ── Step 8: Batch BWS write (1 read + 1 write) ───────────
+      - name: Batch write configured_at timestamps to BWS
+        if: always()
+        run: |
+          set -euo pipefail
+          CONFIGURED_APPS='${{ steps.config_summary.outputs.configured_apps }}'
+          CONFIGURED_COUNT=$(echo "$CONFIGURED_APPS" | jq 'length')
+
+          if [ "$CONFIGURED_COUNT" -eq 0 ]; then
+            echo "No apps configured -- skipping BWS write"
+            exit 0
+          fi
+
+          SECRET_ID='${{ steps.cache_inventory.outputs.secret_id }}'
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Fresh read of BWS inventory (not cached — avoid clobbering Phase 3 writes)
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Set configured_at timestamp for each successfully configured app
+          for APP in $(echo "$CONFIGURED_APPS" | jq -r '.[]'); do
+            INVENTORY=$(echo "$INVENTORY" | jq \
+              --arg app "$APP" \
+              --arg ts "$TIMESTAMP" '
+              ._state.apps[$app].configured_at = $ts
+            ')
+          done
+
+          # Write back (1 BWS API call)
+          bws secret edit --value "$INVENTORY" "$SECRET_ID"
+          echo "Batch BWS write complete: $CONFIGURED_COUNT apps configured_at=$TIMESTAMP"
+
+  # ============================================================
+  # STATE WRITEBACK — Phase 4 completion status
+  # ============================================================
+  write-phase4-state:
+    needs: [prepare, configure-all-apps]
+    if: always()
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      BWS_INVENTORY_SECRET_NAME: ${{ inputs.inventory_key }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Write Phase 4 status to BWS
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+
+          # Get current inventory (fresh read, not cached)
+          SECRET_ID=$(id_for "${{ inputs.inventory_key }}")
+          CURRENT=$(get_val "$SECRET_ID")
+
+          # Determine if configure-all-apps had failures
+          CONFIGURE_RESULT="${{ needs.configure-all-apps.result }}"
+
+          if [ "$CONFIGURE_RESULT" = "success" ]; then
+            PHASE4_STATUS="completed"
+          else
+            PHASE4_STATUS="completed_with_errors"
+          fi
+
+          # Update with Phase 4 info (record actual status, not unconditional success)
+          UPDATED=$(echo "$CURRENT" | jq \
+            --arg status "$PHASE4_STATUS" '
+            .apps.auto_configured = true |
+            .bootstrap.phase4_status = $status |
+            .bootstrap.phase_completed = "4" |
+            .bootstrap.config_completed_at = (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+          ')
+
+          # Write back
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "Phase 4 status written to BWS: $PHASE4_STATUS"
+
+      - name: Display configuration summary
+        run: |
+          TAILSCALE_IP=$(tailscale ip -4)
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          CONFIGURE_RESULT="${{ needs.configure-all-apps.result }}"
+          AVAILABLE_APPS='${{ needs.prepare.outputs.available_apps }}'
+
+          if [ "$CONFIGURE_RESULT" = "success" ]; then
+            echo "=========================================="
+            echo "Phase 4 Complete - Apps Auto-Configured"
+            echo "=========================================="
+          else
+            echo "=========================================="
+            echo "Phase 4 Completed With Errors"
+            echo "=========================================="
+            echo ""
+            echo "::warning::Some app configuration playbooks failed. Check the configure-all-apps job logs."
+          fi
+
+          echo ""
+          echo "Configured Apps:"
+          echo "----------------------------------------"
+
+          for app in $(echo "$AVAILABLE_APPS" | jq -r '.[]'); do
+            DISPLAY_NAME=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].display_name')
+            CONFIG_COUNT=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].config_count')
+            echo "  $DISPLAY_NAME: $CONFIG_COUNT config steps"
+          done
+
+          echo ""
+          echo "Configuration Applied:"
+          echo "  - API keys detected from BWS inventory (Phase 3)"
+          echo "  - Cross-app wiring based on requires_apps metadata"
+          echo "  - Only matching integrations configured"
+          echo ""
+          echo "Access URLs:"
+          echo "----------------------------------------"
+
+          for app in $(echo "$AVAILABLE_APPS" | jq -r '.[]'); do
+            DISPLAY_NAME=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].display_name')
+            NODEPORT=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].nodeport')
+            if [ "$NODEPORT" != "null" ]; then
+              printf "  %-20s http://%s:%s\n" "$DISPLAY_NAME:" "$TAILSCALE_IP" "$NODEPORT"
+            fi
+          done
+
+          echo "----------------------------------------"
+          echo ""
+          echo "VM: ${{ inputs.vm_hostname }}"
+          echo "Tailscale IP: ${TAILSCALE_IP}"
+          echo "=========================================="

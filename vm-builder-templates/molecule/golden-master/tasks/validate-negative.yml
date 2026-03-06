@@ -1,0 +1,349 @@
+---
+# validate-negative.yml — Negative tests for safety mechanism regression
+#
+# These tests verify that safety logic WORKS. Each test checks that a
+# golden master pattern includes the corresponding safety guard. If an
+# app has a dangerous pattern (password generation, volumeClaimTemplates,
+# etc.) but is MISSING the safety guard, these tests flag it.
+#
+# All assertions use failed_when: false (report-only mode). Results are
+# collected in negative_results for the summary report.
+
+# =========================================================================
+# 0. SETUP — load playbook content for inspection
+# =========================================================================
+
+- name: "NEGATIVE | Initialize results list"
+  ansible.builtin.set_fact:
+    negative_results: []
+
+- name: "NEGATIVE | Set app paths"
+  ansible.builtin.set_fact:
+    install_dir: "{{ apps_base }}/{{ app_name }}/install"
+    config_dir: "{{ apps_base }}/{{ app_name }}/config"
+
+- name: "NEGATIVE | Find install playbooks"
+  ansible.builtin.find:
+    paths: "{{ install_dir }}"
+    patterns: "*.yml"
+  register: neg_install_files
+  failed_when: false
+
+- name: "NEGATIVE | Find config playbooks"
+  ansible.builtin.find:
+    paths: "{{ config_dir }}"
+    patterns: "*.yml"
+  register: neg_config_files
+  failed_when: false
+
+- name: "NEGATIVE | Slurp install playbooks"
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  register: neg_install_slurped
+  loop: "{{ neg_install_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  failed_when: false
+
+- name: "NEGATIVE | Slurp config playbooks"
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  register: neg_config_slurped
+  loop: "{{ neg_config_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  failed_when: false
+
+- name: "NEGATIVE | Build install content string"
+  ansible.builtin.set_fact:
+    neg_install_content: >-
+      {{ neg_install_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+
+- name: "NEGATIVE | Build config content string"
+  ansible.builtin.set_fact:
+    neg_config_content: >-
+      {{ neg_config_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+
+# Separate install playbooks into deploy (01-deploy) and verify (02-verify)
+- name: "NEGATIVE | Build verify content string"
+  ansible.builtin.set_fact:
+    neg_verify_content: >-
+      {{ neg_install_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | selectattr('source', 'search', '02-verify')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+
+- name: "NEGATIVE | Build deploy-only content string"
+  ansible.builtin.set_fact:
+    neg_deploy_content: >-
+      {{ neg_install_slurped.results | default([])
+         | selectattr('content', 'defined')
+         | selectattr('source', 'search', '01-deploy')
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n') }}
+
+# =========================================================================
+# Condition flags — determine which negative tests are relevant
+# =========================================================================
+
+- name: "NEGATIVE | Detect password generation"
+  ansible.builtin.set_fact:
+    neg_has_password_gen: >-
+      {{ "lookup('password'" in neg_deploy_content
+         or 'ansible.builtin.password' in neg_deploy_content }}
+
+- name: "NEGATIVE | Detect volumeClaimTemplates"
+  ansible.builtin.set_fact:
+    neg_has_volume_claims: >-
+      {{ 'volumeClaimTemplates' in neg_deploy_content }}
+
+- name: "NEGATIVE | Detect health check in verify playbook"
+  ansible.builtin.set_fact:
+    neg_has_health_check: >-
+      {{ 'curl ' in neg_verify_content
+         or 'wget ' in neg_verify_content
+         or '/health' in neg_verify_content
+         or '/healthz' in neg_verify_content }}
+
+- name: "NEGATIVE | Detect kubectl exec in config playbooks"
+  ansible.builtin.set_fact:
+    neg_has_kubectl_exec: >-
+      {{ 'kubectl exec' in neg_config_content }}
+
+# =========================================================================
+# TEST 1: Empty secret guard fires
+#
+# If a deploy playbook generates passwords (lookup('password'...)),
+# it MUST also have an ansible.builtin.fail task that checks for empty
+# values. Without this guard, an empty password silently corrupts the
+# credential pipeline (K8s Secret -> PushSecret -> Vault -> BWS).
+# =========================================================================
+
+- name: "NEGATIVE-01 | Empty secret guard exists when passwords are generated"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'ansible.builtin.fail' in neg_deploy_content
+        and ('empty' in neg_deploy_content
+             or 'length == 0' in neg_deploy_content
+             or 'length > 0' in neg_deploy_content
+             or 'Refusing' in neg_deploy_content)
+    fail_msg: >-
+      [{{ app_name }}] NEGATIVE-01 FAIL: Deploy playbook generates passwords
+      (lookup('password'...)) but has no ansible.builtin.fail guard checking
+      for empty values. An empty credential would silently corrupt the pipeline.
+      Fix: add a fail task with 'Refusing to deploy' when credential length == 0.
+    success_msg: >-
+      [{{ app_name }}] NEGATIVE-01 PASS: Non-empty secret guard present.
+  register: neg_test_01
+  failed_when: false
+  when: neg_has_password_gen | bool
+
+- name: "NEGATIVE-01 | Record result"
+  ansible.builtin.set_fact:
+    negative_results: >-
+      {{ negative_results + [{
+        'test': 'NEGATIVE-01',
+        'name': 'empty-secret-guard',
+        'app': app_name,
+        'skipped': not (neg_has_password_gen | bool),
+        'passed': (neg_test_01.evaluated_to | default(true)) if (neg_has_password_gen | bool) else true,
+        'msg': neg_test_01.msg | default('skipped — no password generation')
+      }] }}
+
+# =========================================================================
+# TEST 2: PVC safety gate exists
+#
+# If a deploy playbook references volumeClaimTemplates (StatefulSet with
+# persistent storage), it MUST also have PVC downgrade logic that prevents
+# replace --force from deleting Bound PVCs. Without this, a rebuild-mode
+# deploy can cause data loss.
+# =========================================================================
+
+- name: "NEGATIVE-02 | PVC safety gate exists when volumeClaimTemplates present"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'existing_pvc' in neg_deploy_content
+        or 'claim_template' in neg_deploy_content
+        or 'pvc_bound' in neg_deploy_content
+        or 'workload_action' in neg_deploy_content
+        or 'pvc_safety' in neg_deploy_content
+    fail_msg: >-
+      [{{ app_name }}] NEGATIVE-02 FAIL: Deploy playbook uses volumeClaimTemplates
+      but has no PVC safety gate (no existing_pvc/claim_template/pvc_bound check).
+      replace --force on a StatefulSet with volumeClaimTemplates deletes PVCs and
+      causes data loss. Fix: add PVC existence check that downgrades to kubectl apply.
+    success_msg: >-
+      [{{ app_name }}] NEGATIVE-02 PASS: PVC safety gate present.
+  register: neg_test_02
+  failed_when: false
+  when: neg_has_volume_claims | bool
+
+- name: "NEGATIVE-02 | Record result"
+  ansible.builtin.set_fact:
+    negative_results: >-
+      {{ negative_results + [{
+        'test': 'NEGATIVE-02',
+        'name': 'pvc-safety-gate',
+        'app': app_name,
+        'skipped': not (neg_has_volume_claims | bool),
+        'passed': (neg_test_02.evaluated_to | default(true)) if (neg_has_volume_claims | bool) else true,
+        'msg': neg_test_02.msg | default('skipped — no volumeClaimTemplates')
+      }] }}
+
+# =========================================================================
+# TEST 3: Protected prefix enforced
+#
+# Files with numeric prefix < 40 (00-, 10-, 20-, 30-) are protected
+# resources (namespace, secrets, pushsecret, PVC). These must ALWAYS use
+# kubectl apply, never kubectl {{ kubectl_action }} (which could be
+# replace --force in full install mode). The prefix convention is the
+# contract — if a protected-prefix file appears in a kubectl_action block,
+# the safety mechanism is broken.
+# =========================================================================
+
+- name: "NEGATIVE-03 | No protected prefix in kubectl_action blocks"
+  ansible.builtin.assert:
+    that:
+      # Check that no line combines kubectl_action with a protected-prefix file.
+      # Protected prefixes: 00-, 01- through 39- (anything < 40).
+      # The deploy playbook should only use kubectl_action for prefix >= 40.
+      - >-
+        neg_deploy_content is not search('kubectl_action.*0[0-3][0-9]-')
+      - >-
+        neg_deploy_content is not search('kubectl_action.*00-')
+      - >-
+        neg_deploy_content is not search('kubectl_action.*10-')
+      - >-
+        neg_deploy_content is not search('kubectl_action.*20-')
+      - >-
+        neg_deploy_content is not search('kubectl_action.*30-')
+    fail_msg: >-
+      [{{ app_name }}] NEGATIVE-03 FAIL: A protected-prefix file (00-, 10-, 20-, 30-)
+      is referenced in a kubectl {{ '{{' }} kubectl_action {{ '}}' }} block. Protected
+      resources must always use kubectl apply. Fix: move the file to the split-apply
+      section or ensure its prefix is >= 40 if it should use kubectl_action.
+    success_msg: >-
+      [{{ app_name }}] NEGATIVE-03 PASS: Protected prefix convention enforced.
+  register: neg_test_03
+  failed_when: false
+  when: neg_deploy_content | length > 0
+
+- name: "NEGATIVE-03 | Record result"
+  ansible.builtin.set_fact:
+    negative_results: >-
+      {{ negative_results + [{
+        'test': 'NEGATIVE-03',
+        'name': 'protected-prefix-enforced',
+        'app': app_name,
+        'skipped': neg_deploy_content | length == 0,
+        'passed': (neg_test_03.evaluated_to | default(true)) if (neg_deploy_content | length > 0) else true,
+        'msg': neg_test_03.msg | default('skipped — no deploy playbook')
+      }] }}
+
+# =========================================================================
+# TEST 4: Health check can fail pipeline
+#
+# If a verify playbook has a health check (curl/wget or /health endpoint),
+# it must NOT have ignore_errors: true (which swallows failures) AND must
+# have retries: (which handles transient failures). The combination of
+# "no ignore_errors" + "has retries" means health failures are visible
+# AND transient issues are tolerated — the correct balance.
+# =========================================================================
+
+- name: "NEGATIVE-04 | Health check has retries and no ignore_errors"
+  ansible.builtin.assert:
+    that:
+      - neg_verify_content is not search('ignore_errors:\s*(true|yes)')
+      - "'retries:' in neg_verify_content"
+    fail_msg: >-
+      [{{ app_name }}] NEGATIVE-04 FAIL: Verify playbook has a health check but
+      either uses ignore_errors: true (swallows failures) or lacks retries:
+      (no transient failure tolerance). Fix: remove ignore_errors and add
+      retries + until for health check tasks.
+    success_msg: >-
+      [{{ app_name }}] NEGATIVE-04 PASS: Health check failures are visible and retried.
+  register: neg_test_04
+  failed_when: false
+  when: neg_has_health_check | bool
+
+- name: "NEGATIVE-04 | Record result"
+  ansible.builtin.set_fact:
+    negative_results: >-
+      {{ negative_results + [{
+        'test': 'NEGATIVE-04',
+        'name': 'health-check-can-fail',
+        'app': app_name,
+        'skipped': not (neg_has_health_check | bool),
+        'passed': (neg_test_04.evaluated_to | default(true)) if (neg_has_health_check | bool) else true,
+        'msg': neg_test_04.msg | default('skipped — no health check in verify')
+      }] }}
+
+# =========================================================================
+# TEST 5: Pod discovery is dynamic
+#
+# If a config playbook uses kubectl exec (to run commands inside a pod),
+# it MUST also have kubectl.*get pods (to discover the pod name
+# dynamically). Hardcoded pod names like app-0 break when StatefulSets
+# scale or pods are rescheduled.
+# =========================================================================
+
+- name: "NEGATIVE-05 | Config playbook discovers pods dynamically"
+  ansible.builtin.assert:
+    that:
+      - neg_config_content is search('kubectl.*get pods')
+    fail_msg: >-
+      [{{ app_name }}] NEGATIVE-05 FAIL: Config playbook uses kubectl exec but
+      does not use 'kubectl get pods' for dynamic pod discovery. Hardcoded pod
+      names (e.g. app-0) break on scaling or rescheduling. Fix: add a
+      kubectl get pods task with label selectors before kubectl exec.
+    success_msg: >-
+      [{{ app_name }}] NEGATIVE-05 PASS: Pod discovery is dynamic.
+  register: neg_test_05
+  failed_when: false
+  when: neg_has_kubectl_exec | bool
+
+- name: "NEGATIVE-05 | Record result"
+  ansible.builtin.set_fact:
+    negative_results: >-
+      {{ negative_results + [{
+        'test': 'NEGATIVE-05',
+        'name': 'dynamic-pod-discovery',
+        'app': app_name,
+        'skipped': not (neg_has_kubectl_exec | bool),
+        'passed': (neg_test_05.evaluated_to | default(true)) if (neg_has_kubectl_exec | bool) else true,
+        'msg': neg_test_05.msg | default('skipped — no kubectl exec in config')
+      }] }}
+
+# =========================================================================
+# SUMMARY — aggregate results for the report
+# =========================================================================
+
+- name: "NEGATIVE | Count results"
+  ansible.builtin.set_fact:
+    negative_total: "{{ negative_results | length }}"
+    negative_passed: "{{ negative_results | selectattr('passed') | list | length }}"
+    negative_skipped: "{{ negative_results | selectattr('skipped') | list | length }}"
+    negative_failed: >-
+      {{ negative_results
+         | rejectattr('skipped')
+         | rejectattr('passed')
+         | list | length }}
+
+- name: "NEGATIVE | Display summary for {{ app_name }}"
+  ansible.builtin.debug:
+    msg:
+      - "--- Negative tests: {{ app_name }} ---"
+      - "Total: {{ negative_total }} | Passed: {{ negative_passed }} | Skipped: {{ negative_skipped }} | Failed: {{ negative_failed }}"

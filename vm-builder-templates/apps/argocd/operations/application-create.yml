@@ -1,0 +1,451 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/argocd/operations/application-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "argocd.applications.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/argocd/operations/application-create.yml"
+#     category: "platform"
+#     subsystem: "argocd"
+#     role: "operations"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "argocd"
+#       supported_versions: ["2.10.x", "2.11.x", "2.12.x", "2.13.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - argocd: "2.13.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from ArgoCD API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_argocd_operations"
+#   dependencies: ["argocd_deployed", "argocd_admin_token_available", "argocd_repository_created"]
+#   provides: ["argocd_application_created"]
+#   tags: ["argocd", "applications", "gitops", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an ArgoCD application with source, destination, and sync policy.
+#     Supports Git and Helm sources, Kustomize overlays, and automated sync.
+#     This operation is idempotent - existing applications can be updated.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.argocd.admin_token"
+#         purpose: "ArgoCD API token for authentication"
+#       - path: "_state.apps.argocd.url"
+#         purpose: "ArgoCD server URL"
+#
+#     writes:
+#       - path: "_state.apps.argocd.applications.{app_name}.name"
+#         example: "vault"
+#       - path: "_state.apps.argocd.applications.{app_name}.project"
+#         example: "platform"
+#       - path: "_state.apps.argocd.applications.{app_name}.sync_status"
+#         example: "Synced"
+#       - path: "_state.apps.argocd.applications.{app_name}.health_status"
+#         example: "Healthy"
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     required:
+#       - name: app_name
+#         description: "Application name"
+#       - name: repo_url
+#         description: "Git repository URL or Helm chart repository"
+#       - name: dest_server
+#         description: "Kubernetes API server URL (use https://kubernetes.default.svc for in-cluster)"
+#       - name: dest_namespace
+#         description: "Target namespace for resources"
+#     optional:
+#       - name: project
+#         description: "ArgoCD project (default: default)"
+#       - name: source_path
+#         description: "Path within the repository to the manifests"
+#       - name: target_revision
+#         description: "Git branch, tag, or commit SHA (default: HEAD)"
+#       - name: source_chart
+#         description: "Helm chart name (for Helm repositories)"
+#       - name: helm_values
+#         description: "Helm values (inline YAML)"
+#       - name: helm_value_files
+#         description: "Helm value files"
+#       - name: kustomize_images
+#         description: "Kustomize image overrides"
+#       - name: auto_sync
+#         description: "Enable automated sync (default: false)"
+#       - name: auto_prune
+#         description: "Enable auto pruning (default: false)"
+#       - name: self_heal
+#         description: "Enable self-healing (default: false)"
+#       - name: upsert
+#         description: "Update existing application (default: false)"
+
+- name: ArgoCD - Create Application
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    argocd_namespace: "argocd"
+    argocd_base_url: "{{ argocd_url }}"
+    argocd_api_base: "{{ argocd_base_url }}/api/v1"
+    endpoint: "/applications"
+
+    # Required fields
+    # app_name: Application name (required)
+    # repo_url: Repository URL (required)
+    # dest_server: Destination server (required)
+    # dest_namespace: Destination namespace (required)
+
+    # Optional fields with sensible defaults
+    project: "{{ project_input | default('default') }}"
+    source_path: "{{ source_path_input | default('.') }}"
+    target_revision: "{{ target_revision_input | default('HEAD') }}"
+    source_chart: "{{ source_chart_input | default(omit) }}"
+    helm_values: "{{ helm_values_input | default(omit) }}"
+    helm_value_files: "{{ helm_value_files_input | default([]) }}"
+    helm_parameters: "{{ helm_parameters_input | default([]) }}"
+    kustomize_name_prefix: "{{ kustomize_name_prefix_input | default(omit) }}"
+    kustomize_name_suffix: "{{ kustomize_name_suffix_input | default(omit) }}"
+    kustomize_images: "{{ kustomize_images_input | default([]) }}"
+    kustomize_common_labels: "{{ kustomize_common_labels_input | default({}) }}"
+    kustomize_common_annotations: "{{ kustomize_common_annotations_input | default({}) }}"
+    auto_sync: "{{ auto_sync_input | default(false) }}"
+    auto_prune: "{{ auto_prune_input | default(false) }}"
+    self_heal: "{{ self_heal_input | default(false) }}"
+    allow_empty: "{{ allow_empty_input | default(false) }}"
+    sync_options: "{{ sync_options_input | default([]) }}"
+    retry_limit: "{{ retry_limit_input | default(omit) }}"
+    retry_backoff_duration: "{{ retry_backoff_duration_input | default('5s') }}"
+    retry_backoff_factor: "{{ retry_backoff_factor_input | default(2) }}"
+    retry_backoff_max_duration: "{{ retry_backoff_max_duration_input | default('3m') }}"
+    ignore_differences: "{{ ignore_differences_input | default([]) }}"
+    revision_history_limit: "{{ revision_history_limit_input | default(10) }}"
+    app_labels: "{{ app_labels_input | default({}) }}"
+    app_annotations: "{{ app_annotations_input | default({}) }}"
+    app_finalizers: "{{ app_finalizers_input | default(['resources-finalizer.argocd.argoproj.io']) }}"
+    upsert: "{{ upsert_input | default(false) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - app_name is defined and app_name | length > 0
+          - repo_url is defined and repo_url | length > 0
+          - dest_server is defined and dest_server | length > 0
+          - dest_namespace is defined and dest_namespace | length > 0
+        fail_msg: "Required inputs missing: app_name, repo_url, dest_server, dest_namespace"
+        success_msg: "All required inputs validated"
+
+    - name: Display playbook information
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ArgoCD - Create Application"
+          - "=========================================="
+          - "Application Name: {{ app_name }}"
+          - "Project: {{ project }}"
+          - "Repository URL: {{ repo_url }}"
+          - "Source Path: {{ source_path }}"
+          - "Target Revision: {{ target_revision }}"
+          - "Destination Server: {{ dest_server }}"
+          - "Destination Namespace: {{ dest_namespace }}"
+          - "Auto Sync: {{ auto_sync }}"
+          - "Upsert Mode: {{ upsert }}"
+          - "=========================================="
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract ArgoCD admin token
+      ansible.builtin.set_fact:
+        argocd_admin_token: >-
+          {{
+            inventory._state.apps.argocd.admin_token | default(argocd_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        argocd_base_url: "{{ inventory._state.apps.argocd.url }}"
+        argocd_api_base: "{{ inventory._state.apps.argocd.url }}/api/v1"
+      when: inventory._state.apps.argocd.url is defined
+
+    # ===== STEP 3: Check for Existing Application (Idempotency) =====
+    - name: Check if application already exists
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/applications/{{ app_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_app
+      no_log: false
+
+    - name: Set existing application fact
+      ansible.builtin.set_fact:
+        app_exists: "{{ existing_app.status == 200 }}"
+        existing_app_data: "{{ existing_app.json if existing_app.status == 200 else {} }}"
+
+    - name: Skip creation if application exists and upsert is false
+      ansible.builtin.debug:
+        msg: "Application '{{ app_name }}' already exists - skipping (upsert={{ upsert }})"
+      when: app_exists and not upsert | bool
+
+    # ===== STEP 4: Build Application Payload =====
+    - name: Build base source configuration
+      ansible.builtin.set_fact:
+        source_config:
+          repoURL: "{{ repo_url }}"
+          path: "{{ source_path if source_chart is not defined or source_chart == omit else omit }}"
+          targetRevision: "{{ target_revision }}"
+          chart: "{{ source_chart if source_chart is defined and source_chart != omit else omit }}"
+      when: not app_exists or upsert | bool
+
+    - name: Build Helm configuration
+      ansible.builtin.set_fact:
+        helm_config:
+          valueFiles: "{{ helm_value_files if helm_value_files | length > 0 else omit }}"
+          values: "{{ helm_values if helm_values is defined and helm_values != omit else omit }}"
+          parameters: "{{ helm_parameters if helm_parameters | length > 0 else omit }}"
+      when:
+        - not app_exists or upsert | bool
+        - (helm_values is defined and helm_values != omit) or (helm_value_files | length > 0) or (helm_parameters | length > 0)
+
+    - name: Add Helm config to source
+      ansible.builtin.set_fact:
+        source_config: "{{ source_config | combine({'helm': helm_config}, recursive=True) }}"
+      when:
+        - not app_exists or upsert | bool
+        - helm_config is defined
+
+    - name: Build Kustomize configuration
+      ansible.builtin.set_fact:
+        kustomize_config:
+          namePrefix: "{{ kustomize_name_prefix if kustomize_name_prefix is defined and kustomize_name_prefix != omit else omit }}"
+          nameSuffix: "{{ kustomize_name_suffix if kustomize_name_suffix is defined and kustomize_name_suffix != omit else omit }}"
+          images: "{{ kustomize_images if kustomize_images | length > 0 else omit }}"
+          commonLabels: "{{ kustomize_common_labels if kustomize_common_labels | length > 0 else omit }}"
+          commonAnnotations: "{{ kustomize_common_annotations if kustomize_common_annotations | length > 0 else omit }}"
+      when:
+        - not app_exists or upsert | bool
+        - (kustomize_images | length > 0) or (kustomize_common_labels | length > 0) or (kustomize_name_prefix is defined and kustomize_name_prefix != omit)
+
+    - name: Add Kustomize config to source
+      ansible.builtin.set_fact:
+        source_config: "{{ source_config | combine({'kustomize': kustomize_config}, recursive=True) }}"
+      when:
+        - not app_exists or upsert | bool
+        - kustomize_config is defined
+
+    - name: Build sync policy
+      ansible.builtin.set_fact:
+        sync_policy: {}
+      when: not app_exists or upsert | bool
+
+    - name: Add automated sync to policy
+      ansible.builtin.set_fact:
+        sync_policy: >-
+          {{
+            sync_policy | combine({
+              'automated': {
+                'prune': auto_prune | bool,
+                'selfHeal': self_heal | bool,
+                'allowEmpty': allow_empty | bool
+              }
+            })
+          }}
+      when:
+        - not app_exists or upsert | bool
+        - auto_sync | bool
+
+    - name: Add sync options to policy
+      ansible.builtin.set_fact:
+        sync_policy: "{{ sync_policy | combine({'syncOptions': sync_options}) }}"
+      when:
+        - not app_exists or upsert | bool
+        - sync_options | length > 0
+
+    - name: Add retry to policy
+      ansible.builtin.set_fact:
+        sync_policy: >-
+          {{
+            sync_policy | combine({
+              'retry': {
+                'limit': retry_limit | int,
+                'backoff': {
+                  'duration': retry_backoff_duration,
+                  'factor': retry_backoff_factor | int,
+                  'maxDuration': retry_backoff_max_duration
+                }
+              }
+            })
+          }}
+      when:
+        - not app_exists or upsert | bool
+        - retry_limit is defined and retry_limit != omit
+
+    - name: Build application payload
+      ansible.builtin.set_fact:
+        app_payload:
+          metadata:
+            name: "{{ app_name }}"
+            labels: "{{ app_labels if app_labels | length > 0 else omit }}"
+            annotations: "{{ app_annotations if app_annotations | length > 0 else omit }}"
+            finalizers: "{{ app_finalizers if app_finalizers | length > 0 else omit }}"
+          spec:
+            project: "{{ project }}"
+            source: "{{ source_config }}"
+            destination:
+              server: "{{ dest_server }}"
+              namespace: "{{ dest_namespace }}"
+            syncPolicy: "{{ sync_policy if sync_policy | length > 0 else omit }}"
+            ignoreDifferences: "{{ ignore_differences if ignore_differences | length > 0 else omit }}"
+            revisionHistoryLimit: "{{ revision_history_limit | int }}"
+      when: not app_exists or upsert | bool
+      no_log: true
+
+    # ===== STEP 5: Create Application =====
+    - name: Create application in ArgoCD
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}{{ endpoint }}{% if upsert | bool %}?upsert=true{% endif %}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ app_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not app_exists
+
+    - name: Update existing application in ArgoCD
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/applications/{{ app_name | urlencode }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ app_payload }}"
+        status_code: [200]
+        validate_certs: false
+      register: update_result
+      no_log: true
+      when: app_exists and upsert | bool
+
+    - name: Set application result
+      ansible.builtin.set_fact:
+        app_action: >-
+          {{ 'skipped' if app_exists and not upsert | bool else ('updated' if app_exists else 'created') }}
+
+    # ===== STEP 6: Get Application Status =====
+    - name: Get application status
+      ansible.builtin.uri:
+        url: "{{ argocd_api_base }}/applications/{{ app_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ argocd_admin_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: app_status
+      when: app_action != 'skipped'
+      no_log: false
+
+    - name: Extract application status info
+      ansible.builtin.set_fact:
+        sync_status: "{{ app_status.json.status.sync.status | default('Unknown') }}"
+        health_status: "{{ app_status.json.status.health.status | default('Unknown') }}"
+      when: app_action != 'skipped' and app_status.json is defined
+
+    - name: Set default values for skipped applications
+      ansible.builtin.set_fact:
+        sync_status: "{{ existing_app_data.status.sync.status | default('Unknown') }}"
+        health_status: "{{ existing_app_data.status.health.status | default('Unknown') }}"
+      when: app_action == 'skipped'
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Derive application key name for BWS writeback
+      ansible.builtin.set_fact:
+        app_key: "{{ app_name | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with application info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge application info into _state.apps.argocd.applications
+        UPDATED=$(echo "$CURRENT" | jq --arg app "{{ app_key }}" \
+          --arg name "{{ app_name }}" \
+          --arg project "{{ project }}" \
+          --arg sync "{{ sync_status }}" \
+          --arg health "{{ health_status }}" \
+          '
+          if ._state.apps.argocd == null then ._state.apps.argocd = {} else . end |
+          if ._state.apps.argocd.applications == null then ._state.apps.argocd.applications = {} else . end |
+          if ._state.apps.argocd.applications[$app] == null then ._state.apps.argocd.applications[$app] = {} else . end |
+          ._state.apps.argocd.applications[$app].name = $name |
+          ._state.apps.argocd.applications[$app].project = $project |
+          ._state.apps.argocd.applications[$app].sync_status = $sync |
+          ._state.apps.argocd.applications[$app].health_status = $health
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: app_action != 'skipped'
+
+    # ===== STEP 8: Output Result =====
+    - name: Display application creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ app_action }}"
+          app_name: "{{ app_name }}"
+          project: "{{ project }}"
+          repo_url: "{{ repo_url }}"
+          dest_server: "{{ dest_server }}"
+          dest_namespace: "{{ dest_namespace }}"
+          sync_status: "{{ sync_status }}"
+          health_status: "{{ health_status }}"
+          auto_sync_enabled: "{{ auto_sync }}"

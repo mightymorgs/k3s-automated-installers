@@ -1,0 +1,7 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  cloudflared-deployment.yaml.j2:
+    summary: 'Jinja2 template: cloudflared-deployment.yaml.j2'
+    source: inferred
+    confidence: medium

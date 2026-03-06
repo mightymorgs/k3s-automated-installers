@@ -1,0 +1,218 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/operations/vault-sys-unseal"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "vault.sys.unseal.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/operations/vault-sys-unseal.yml"
+#     category: "platform"
+#     subsystem: "vault"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "vault"
+#       supported_versions: ["1.15.x", "1.16.x", "1.17.x", "1.18.x"]
+#       version_range: ">=1.15.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - vault: "1.18.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Vault API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_vault_operations"
+#   dependencies: ["vault_initialized", "vault_unseal_keys_available"]
+#   provides: ["vault_unsealed", "vault_ready"]
+#   tags: ["vault", "unseal", "secrets-management", "phase3"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Unseal Vault using unseal keys stored in BWS _state. This operation is
+#     idempotent - if Vault is already unsealed, it will be skipped. Automatically
+#     reads unseal keys from BWS and applies them until threshold is met.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.unseal_keys"
+#         purpose: "Unseal keys generated during initialization"
+#       - path: "_state.apps.vault.initialized"
+#         purpose: "Check if Vault was initialized"
+#
+#     writes:
+#       - path: "_state.apps.vault.sealed"
+#         example: false
+#       - path: "_state.apps.vault.unseal_timestamp"
+#         example: "2026-01-27T12:05:00Z"
+#       - path: "_state.apps.vault.status"
+#         example: "unsealed"
+
+- name: Vault - Unseal System
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    vault_base_url: "{{ vault_addr }}"
+    vault_api_base: "{{ vault_base_url }}/v1"
+    endpoint_unseal: "/sys/unseal"
+    endpoint_seal_status: "/sys/seal-status"
+
+  tasks:
+    # ===== STEP 1: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 2: Read BWS Inventory and Unseal Keys =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract unseal keys from BWS _state
+      ansible.builtin.set_fact:
+        unseal_keys: "{{ inventory._state.apps.vault.unseal_keys | default([]) }}"
+      no_log: true
+
+    - name: Validate unseal keys are available
+      ansible.builtin.assert:
+        that:
+          - unseal_keys | length > 0
+        fail_msg: >-
+          No unseal keys found in BWS _state. Run vault-sys-init.yml first to
+          initialize Vault and store unseal keys.
+        success_msg: "Found {{ unseal_keys | length }} unseal keys in BWS _state"
+
+    # ===== STEP 3: Check Vault Seal Status (Idempotency) =====
+    - name: Check current seal status
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint_seal_status }}"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: seal_status
+      failed_when: false
+
+    - name: Display current seal status
+      ansible.builtin.debug:
+        msg:
+          sealed: "{{ seal_status.json.sealed | default(true) }}"
+          threshold: "{{ seal_status.json.t | default('unknown') }}"
+          shares: "{{ seal_status.json.n | default('unknown') }}"
+          progress: "{{ seal_status.json.progress | default(0) }}"
+
+    - name: Skip if Vault is already unsealed
+      ansible.builtin.debug:
+        msg: "Vault is already unsealed - skipping unseal operation"
+      when: not (seal_status.json.sealed | default(true))
+
+    # ===== STEP 4: Unseal Vault (apply keys until threshold met) =====
+    - name: Apply unseal keys
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint_unseal }}"
+        method: POST
+        body_format: json
+        body:
+          key: "{{ item }}"
+        status_code: [200]
+        validate_certs: false
+      loop: "{{ unseal_keys[:seal_status.json.t | default(3) | int] }}"
+      loop_control:
+        index_var: key_index
+        label: "Unseal key {{ key_index + 1 }}"
+      register: unseal_results
+      no_log: true
+      when: seal_status.json.sealed | default(true)
+
+    # ===== STEP 5: Verify Unseal Success =====
+    - name: Verify Vault is now unsealed
+      ansible.builtin.uri:
+        url: "{{ vault_api_base }}{{ endpoint_seal_status }}"
+        method: GET
+        status_code: [200]
+        validate_certs: false
+      register: final_seal_status
+      when: seal_status.json.sealed | default(true)
+
+    - name: Assert Vault is unsealed
+      ansible.builtin.assert:
+        that:
+          - not (final_seal_status.json.sealed | default(true))
+        fail_msg: "Failed to unseal Vault - still sealed after applying keys"
+        success_msg: "Vault successfully unsealed"
+      when: final_seal_status is not skipped
+
+    # ===== STEP 6: Write Unseal Status to BWS._state =====
+    - name: Update BWS inventory with unseal status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.vault with unseal status
+        UPDATED=$(echo "$CURRENT" | jq \
+          --argjson sealed false \
+          --arg status "unsealed" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state == null then ._state = {} else . end |
+          if ._state.apps == null then ._state.apps = {} else . end |
+          if ._state.apps.vault == null then ._state.apps.vault = {} else . end |
+          ._state.apps.vault.sealed = $sealed |
+          ._state.apps.vault.status = $status |
+          ._state.apps.vault.unseal_timestamp = $timestamp
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: seal_status.json.sealed | default(true)
+
+    # ===== STEP 7: Output Result =====
+    - name: Display unseal result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'already_unsealed' if not (seal_status.json.sealed | default(true)) else 'unsealed' }}"
+          sealed: false
+          message: >-
+            {{
+              'Vault was already unsealed' if not (seal_status.json.sealed | default(true))
+              else 'Vault unsealed successfully. Status updated in BWS _state.'
+            }}

@@ -1,0 +1,39 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  configmap.yaml:
+    summary: 'K8s ConfigMap: configmap.yaml'
+    source: inferred
+    confidence: medium
+  elasticsearch-service.yaml:
+    summary: 'K8s Service: elasticsearch-service.yaml'
+    source: inferred
+    confidence: medium
+  elasticsearch-statefulset.yaml:
+    summary: 'K8s StatefulSet: elasticsearch-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  kibana-deployment.yaml:
+    summary: 'K8s Deployment: kibana-deployment.yaml'
+    source: inferred
+    confidence: medium
+  kibana-service.yaml:
+    summary: 'K8s Service: kibana-service.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  service.yaml:
+    summary: 'K8s Service: service.yaml'
+    source: inferred
+    confidence: medium
+  statefulset.yaml:
+    summary: 'K8s StatefulSet: statefulset.yaml'
+    source: inferred
+    confidence: medium

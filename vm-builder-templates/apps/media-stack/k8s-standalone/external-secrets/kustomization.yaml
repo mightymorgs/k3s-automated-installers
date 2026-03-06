@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: media-stack
+
+resources:
+  - sonarr-external-secret.yaml
+  - radarr-external-secret.yaml
+  - prowlarr-external-secret.yaml
+  - sabnzbd-external-secret.yaml
+  - qbittorrent-external-secret.yaml

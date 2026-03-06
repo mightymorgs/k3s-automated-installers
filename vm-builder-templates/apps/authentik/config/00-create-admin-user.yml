@@ -1,0 +1,320 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/config/00-create-admin-user"
+#   type: "atomic"
+#   path_info:
+#     file_path: "atomic/apps/authentik/config/00-create-admin-user.yml"
+#     category: "platform"
+#     subsystem: "authentik"
+#     role: "config"
+#   batch_id: "20260224_cloudflare_phase5"
+#   dependencies: ["authentik_deployed"]
+#   provides: ["admin_user_created"]
+#   tags: ["authentik", "admin", "user", "sso", "phase5"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create an authentik admin (superuser) using console credentials from BWS.
+#     Reads username and password from shared BWS secrets. Idempotent — skips
+#     creation if user already exists, updates password if user exists.
+#   bws_state:
+#     reads:
+#       - path: "inventory/shared/secrets/console/username"
+#         purpose: "Admin username"
+#       - path: "inventory/shared/secrets/console/password"
+#         purpose: "Admin password"
+#       - path: "_state.apps.authentik.admin_token"
+#         purpose: "Fast-path API token (populated on subsequent runs)"
+#     writes:
+#       - path: "_state.apps.authentik.admin_user_created"
+#         example: true
+
+- name: Create Authentik Admin User from BWS Console Credentials
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: false
+  become: true
+
+  vars:
+    registry_path: "{{ playbook_dir }}/../../../registry.json"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # === Read registry for authentik service details ===
+    - name: Read app registry
+      ansible.builtin.slurp:
+        src: "{{ registry_path }}"
+      register: registry_content
+      delegate_to: localhost
+      become: false
+
+    - name: Parse registry
+      ansible.builtin.set_fact:
+        app_registry: "{{ registry_content.content | b64decode | from_json }}"
+
+    - name: Extract authentik namespace from registry
+      ansible.builtin.set_fact:
+        _ak_namespace: "{{ app_registry.apps.authentik.ingress.namespace }}"
+
+    # === Read inventory from BWS cache ===
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    # === Extract authentik URL from BWS inventory (written by Phase 3) ===
+    - name: Extract authentik URL from inventory
+      ansible.builtin.set_fact:
+        authentik_url: "{{ _inventory._state.apps.authentik.url | default('') }}"
+
+    - name: Fail if authentik URL not in BWS
+      ansible.builtin.fail:
+        msg: "authentik URL not found in BWS _state.apps.authentik.url — Phase 3 may have failed"
+      when: authentik_url | length == 0
+
+    # === Read console credentials from BWS cache ===
+    - name: Read console username from BWS
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/shared/secrets/console/username" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: console_username_raw
+      changed_when: false
+
+    - name: Read console password from BWS
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/shared/secrets/console/password" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: console_password_raw
+      changed_when: false
+      no_log: true
+
+    - name: Set console credentials
+      ansible.builtin.set_fact:
+        console_username: "{{ console_username_raw.stdout | trim }}"
+        console_password: "{{ console_password_raw.stdout | trim }}"
+      no_log: true
+
+    # === Get authentik admin token (same pattern as 03-create-proxy-providers) ===
+    - name: Try BWS inventory for admin token
+      ansible.builtin.set_fact:
+        authentik_admin_token: "{{ _inventory._state.apps.authentik.admin_token | default('') }}"
+      no_log: true
+
+    - name: Create API token via recovery key if not in BWS
+      when: authentik_admin_token | length == 0
+      block:
+        - name: Get authentik server pod name
+          ansible.builtin.shell: >-
+            kubectl -n {{ _ak_namespace }} get pod
+            -l app.kubernetes.io/name=authentik
+            -o jsonpath='{.items[0].metadata.name}'
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: _ak_pod
+          changed_when: false
+
+        - name: Create recovery key for akadmin
+          ansible.builtin.shell: |
+            kubectl exec -n {{ _ak_namespace }} {{ _ak_pod.stdout }} -- ak create_recovery_key 10 akadmin 2>&1 | tail -1
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: recovery_output
+          changed_when: false
+
+        - name: Extract recovery token from URL
+          ansible.builtin.shell: |
+            echo "{{ recovery_output.stdout }}" | grep -oP '/use-token/\K[^/]+'
+          register: recovery_token_raw
+          changed_when: false
+
+        - name: Authenticate via recovery token
+          ansible.builtin.shell: |
+            set -eu
+            curl -s -c /tmp/ak_cookies.txt \
+              -L \
+              -o /dev/null \
+              "{{ authentik_url }}/recovery/use-token/{{ recovery_token_raw.stdout | trim }}/"
+            SESSION=$(grep authentik_session /tmp/ak_cookies.txt | awk '{print $NF}' || true)
+            CSRF=$(grep authentik_csrf /tmp/ak_cookies.txt | awk '{print $NF}' || true)
+            echo "$SESSION"
+            echo "$CSRF"
+          register: auth_raw
+          changed_when: false
+
+        - name: Set session vars
+          ansible.builtin.set_fact:
+            _ak_session: "{{ auth_raw.stdout_lines[0] }}"
+            _ak_csrf: "{{ auth_raw.stdout_lines[1] }}"
+          no_log: true
+
+        - name: Check if phase5-api-token already exists
+          ansible.builtin.shell: |
+            curl -s \
+              -b "authentik_session={{ _ak_session }}; authentik_csrf={{ _ak_csrf }}" \
+              -H "X-authentik-CSRF: {{ _ak_csrf }}" \
+              "{{ authentik_url }}/api/v3/core/tokens/?identifier=phase5-api-token"
+          register: token_check_raw
+          changed_when: false
+
+        - name: Create API token if not exists
+          ansible.builtin.shell: |
+            curl -s \
+              -b "authentik_session={{ _ak_session }}; authentik_csrf={{ _ak_csrf }}" \
+              -H "X-authentik-CSRF: {{ _ak_csrf }}" \
+              -H "Content-Type: application/json" \
+              -X POST \
+              -d '{"identifier": "phase5-api-token", "intent": "api", "description": "Phase 5 automation", "expiring": false}' \
+              "{{ authentik_url }}/api/v3/core/tokens/"
+          register: token_create_raw
+          changed_when: true
+          when: (token_check_raw.stdout | from_json).pagination.count == 0
+
+        - name: View token key
+          ansible.builtin.shell: |
+            curl -s \
+              -b "authentik_session={{ _ak_session }}; authentik_csrf={{ _ak_csrf }}" \
+              -H "X-authentik-CSRF: {{ _ak_csrf }}" \
+              "{{ authentik_url }}/api/v3/core/tokens/phase5-api-token/view_key/" | jq -r '.key'
+          register: token_key_raw
+          changed_when: false
+
+        - name: Set authentik token
+          ansible.builtin.set_fact:
+            authentik_admin_token: "{{ token_key_raw.stdout | trim }}"
+          no_log: true
+
+        - name: Clean up cookie jar
+          ansible.builtin.file:
+            path: /tmp/ak_cookies.txt
+            state: absent
+
+    # === Create or update admin user ===
+    - name: Check if user already exists
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          "{{ authentik_url }}/api/v3/core/users/?username={{ console_username }}"
+      environment:
+        AK_TOKEN: "{{ authentik_admin_token }}"
+      register: user_check_raw
+      changed_when: false
+
+    - name: Parse user check result
+      ansible.builtin.set_fact:
+        _user_exists: "{{ (user_check_raw.stdout | from_json).pagination.count > 0 }}"
+        _user_pk: "{{ ((user_check_raw.stdout | from_json).results[0].pk | default('')) if (user_check_raw.stdout | from_json).pagination.count > 0 else '' }}"
+
+    - name: Create admin user
+      ansible.builtin.shell: |
+        set -eu
+        RESULT=$(curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d "$(jq -n \
+            --arg username "$CONSOLE_USER" \
+            --arg name "$CONSOLE_USER" \
+            '{username: $username, name: $name, is_active: true}')" \
+          "{{ authentik_url }}/api/v3/core/users/")
+        PK=$(printf '%s\n' "$RESULT" | jq -r '.pk // empty')
+        if [ -z "$PK" ]; then
+          printf '%s\n' "$RESULT" | jq -c '.' >&2
+          exit 1
+        fi
+        echo "$PK"
+      environment:
+        AK_TOKEN: "{{ authentik_admin_token }}"
+        CONSOLE_USER: "{{ console_username }}"
+      register: user_create_raw
+      changed_when: true
+      when: not _user_exists
+
+    - name: Set user PK
+      ansible.builtin.set_fact:
+        admin_user_pk: "{{ user_create_raw.stdout | trim if not _user_exists else _user_pk }}"
+
+    # === Add user to authentik Admins group (superuser via group membership) ===
+    # authentik grants superuser status through group membership, not the
+    # is_superuser field on the user object directly.
+    - name: Find superuser group (authentik Admins)
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          "{{ authentik_url }}/api/v3/core/groups/?is_superuser=true" | jq -r '.results[0].pk'
+      environment:
+        AK_TOKEN: "{{ authentik_admin_token }}"
+      register: admin_group_pk_raw
+      changed_when: false
+
+    - name: Add user to superuser group
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d '{"pk": {{ admin_user_pk }}}' \
+          "{{ authentik_url }}/api/v3/core/groups/{{ admin_group_pk_raw.stdout | trim }}/add_user/"
+      environment:
+        AK_TOKEN: "{{ authentik_admin_token }}"
+      changed_when: true
+
+    - name: Set user password
+      ansible.builtin.shell: |
+        curl -s \
+          -H "Authorization: Bearer $AK_TOKEN" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d "$(jq -n --arg pw "$CONSOLE_PASS" '{password: $pw}')" \
+          "{{ authentik_url }}/api/v3/core/users/{{ admin_user_pk }}/set_password/"
+      environment:
+        AK_TOKEN: "{{ authentik_admin_token }}"
+        CONSOLE_PASS: "{{ console_password }}"
+      changed_when: true
+      no_log: true
+
+    # === Write state to BWS ===
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Write admin user state and token to BWS
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ _inv_id_raw.stdout | trim }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        updated=$(printf '%s' "$inv" | jq \
+          --arg token "{{ authentik_admin_token }}" \
+          --arg username "{{ console_username }}" \
+          '._state.apps.authentik.admin_token = $token |
+           ._state.apps.authentik.admin_user_created = true |
+           ._state.apps.authentik.admin_username = $username')
+
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      changed_when: true
+      no_log: true
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "Authentik admin user configured"
+          - "  Username: {{ console_username }}"
+          - "  Superuser: yes (via authentik Admins group {{ admin_group_pk_raw.stdout | trim }})"
+          - "  User PK: {{ admin_user_pk }}"
+          - "  User {{ 'created' if not _user_exists else 'already existed (password updated)' }}"
+          - "  Admin token saved to BWS for future runs"

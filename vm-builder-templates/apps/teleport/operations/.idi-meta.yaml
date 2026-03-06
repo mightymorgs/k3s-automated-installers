@@ -1,0 +1,101 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  app-create.yml:
+    summary: Register an application with Teleport for secure access. This enables
+      zero-trust application access with authentication, authorization, and audit
+      logging. Applications can be internal web apps, APIs, or cloud consoles. Idempotent
+      - skips if app already exists.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ app_name }}'
+    - '{{ teleport_api_base }}{{ endpoint }}'
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ app_name }}'
+    wiring:
+      reads_from:
+      - app: teleport
+        field: admin_token
+      - app: teleport
+        field: proxy_url
+      writes_to:
+      - app: teleport
+        field: registered_apps
+      - app: teleport
+        field: registered_apps
+      - app: teleport
+        field: registered_apps
+      - app: teleport
+        field: registered_apps
+  oidc-connector-create.yml:
+    summary: Create an OIDC SSO connector in Teleport. This enables users to authenticate
+      via external identity providers like Authentik, Okta, or Google Workspace. Claims
+      are mapped to Teleport roles for authorization. Idempotent - skips if exists.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ connector_name }}'
+    - '{{ teleport_api_base }}{{ endpoint }}'
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ connector_name }}'
+    wiring:
+      reads_from:
+      - app: teleport
+        field: admin_token
+      - app: teleport
+        field: proxy_url
+      - app: authentik
+        field: oauth
+      - app: authentik
+        field: oauth
+      writes_to:
+      - app: teleport
+        field: oidc_connectors
+      - app: teleport
+        field: oidc_connectors
+      - app: teleport
+        field: oidc_connectors
+  role-create.yml:
+    summary: Create an RBAC role in Teleport. Roles define what resources users can
+      access and what actions they can perform. This operation is idempotent - if
+      the role exists, it will be skipped. Supports SSH, Kubernetes, database, and
+      app access.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ role_name }}'
+    - '{{ teleport_api_base }}{{ endpoint }}'
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ role_name }}'
+    wiring:
+      reads_from:
+      - app: teleport
+        field: admin_token
+      - app: teleport
+        field: proxy_url
+      writes_to:
+      - app: teleport
+        field: roles
+      - app: teleport
+        field: roles
+  user-create.yml:
+    summary: Create a local user in Teleport. Users are assigned roles that define
+      their access permissions. This operation is idempotent - if the user exists,
+      it will be skipped. For SSO users, use OIDC/SAML connector instead.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ user_name }}'
+    - '{{ teleport_api_base }}{{ endpoint }}'
+    - '{{ teleport_api_base }}{{ endpoint }}/{{ user_name }}'
+    wiring:
+      reads_from:
+      - app: teleport
+        field: admin_token
+      - app: teleport
+        field: proxy_url
+      writes_to:
+      - app: teleport
+        field: users
+      - app: teleport
+        field: users
+      - app: teleport
+        field: users

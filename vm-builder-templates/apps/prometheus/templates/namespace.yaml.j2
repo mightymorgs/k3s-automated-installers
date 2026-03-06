@@ -1,0 +1,9 @@
+---
+# Prometheus Namespace (J2 template)
+# Defaults match k8s-base/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ app_namespace | default('observability') }}
+  labels:
+    name: {{ app_namespace | default('observability') }}

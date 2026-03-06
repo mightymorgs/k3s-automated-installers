@@ -1,0 +1,220 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/operations/volume-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "longhorn.volume.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/operations/volume-create.yml"
+#     category: "platform"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["v1.5.x", "v1.6.x", "v1.7.x"]
+#       version_range: ">=v1.5.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - longhorn: "v1.6.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Longhorn CRD schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_longhorn_operations"
+#   dependencies: ["longhorn_system_ready"]
+#   provides: ["longhorn_volume_created"]
+#   tags: ["longhorn", "storage", "volume", "crd", "operations"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a Longhorn Volume via CRD. This operation is idempotent -
+#     if a volume with the same name exists, it will be skipped.
+#     Supports all volume parameters: size, replicas, data locality, etc.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.longhorn.status"
+#         purpose: "Verify Longhorn is ready before creating volume"
+#
+#     writes:
+#       - path: "_state.apps.longhorn.volumes.{volume_name}.status"
+#         example: "created"
+#       - path: "_state.apps.longhorn.volumes.{volume_name}.size"
+#         example: "10Gi"
+#       - path: "_state.apps.longhorn.volumes.{volume_name}.replicas"
+#         example: 2
+
+- name: Longhorn - Create Volume
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    longhorn_namespace: "{{ longhorn_namespace_input | default('longhorn-system') }}"
+
+    # Required fields
+    # volume_name: Name of the volume (required)
+    # size: Volume size with unit (e.g., "10Gi") (required)
+
+    # Optional fields with sensible defaults
+    number_of_replicas: "{{ number_of_replicas_input | default(2) }}"
+    data_locality: "{{ data_locality_input | default('best-effort') }}"
+    access_mode: "{{ access_mode_input | default('rwo') }}"
+    frontend: "{{ frontend_input | default('blockdev') }}"
+    stale_replica_timeout: "{{ stale_replica_timeout_input | default(2880) }}"
+    from_backup: "{{ from_backup_input | default('') }}"
+    encrypted: "{{ encrypted_input | default(false) }}"
+    snapshot_data_integrity: "{{ snapshot_data_integrity_input | default('ignored') }}"
+    revision_counter_disabled: "{{ revision_counter_disabled_input | default(false) }}"
+    node_selector: "{{ node_selector_input | default({}) }}"
+    disk_selector: "{{ disk_selector_input | default([]) }}"
+    recurring_job_selector: "{{ recurring_job_selector_input | default([]) }}"
+    backing_image: "{{ backing_image_input | default('') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - volume_name is defined and volume_name | length > 0
+          - size is defined and size | length > 0
+        fail_msg: "Required inputs missing: volume_name and size are required"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Check Longhorn System Readiness =====
+    - name: Verify Longhorn manager pods are running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-manager
+      register: longhorn_manager_pods
+
+    - name: Assert Longhorn manager is ready
+      ansible.builtin.assert:
+        that:
+          - longhorn_manager_pods.resources | length > 0
+          - longhorn_manager_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+        fail_msg: "Longhorn manager is not running. Ensure Longhorn is deployed first."
+        success_msg: "Longhorn manager is running"
+
+    # ===== STEP 3: Check for Existing Volume (Idempotency) =====
+    - name: Check if volume already exists
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Volume
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ volume_name }}"
+      register: existing_volume
+
+    - name: Skip creation if volume exists
+      ansible.builtin.debug:
+        msg: >-
+          Volume '{{ volume_name }}' already exists
+          with state: {{ existing_volume.resources[0].status.state | default('unknown') }}
+      when: existing_volume.resources | length > 0
+
+    # ===== STEP 4: Create Volume CRD =====
+    - name: Create Longhorn Volume
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: Volume
+          metadata:
+            name: "{{ volume_name }}"
+            namespace: "{{ longhorn_namespace }}"
+            labels:
+              longhornvolume: "{{ volume_name }}"
+          spec:
+            size: "{{ size }}"
+            numberOfReplicas: "{{ number_of_replicas }}"
+            dataLocality: "{{ data_locality }}"
+            accessMode: "{{ access_mode }}"
+            frontend: "{{ frontend }}"
+            staleReplicaTimeout: "{{ stale_replica_timeout }}"
+            fromBackup: "{{ from_backup if from_backup | length > 0 else omit }}"
+            encrypted: "{{ encrypted }}"
+            snapshotDataIntegrity: "{{ snapshot_data_integrity }}"
+            revisionCounterDisabled: "{{ revision_counter_disabled }}"
+            nodeSelector: "{{ node_selector if node_selector | length > 0 else omit }}"
+            diskSelector: "{{ disk_selector if disk_selector | length > 0 else omit }}"
+            recurringJobSelector: "{{ recurring_job_selector if recurring_job_selector | length > 0 else omit }}"
+            backingImage: "{{ backing_image if backing_image | length > 0 else omit }}"
+      register: volume_result
+      when: existing_volume.resources | length == 0
+
+    # ===== STEP 5: Wait for Volume to be Ready =====
+    - name: Wait for volume to be ready
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Volume
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ volume_name }}"
+      register: volume_status
+      until: >-
+        volume_status.resources | length > 0 and
+        (volume_status.resources[0].status.state | default('')) in ['detached', 'attached', 'healthy']
+      retries: 30
+      delay: 10
+      when: existing_volume.resources | length == 0
+
+    # ===== STEP 6: Write Result to BWS._state (if configured) =====
+    - name: Update BWS inventory with volume info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge volume info into _state.apps.longhorn.volumes
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg vol "{{ volume_name }}" \
+          --arg size "{{ size }}" \
+          --argjson replicas {{ number_of_replicas }} \
+          --arg locality "{{ data_locality }}" \
+          '
+          if ._state.apps.longhorn == null then ._state.apps.longhorn = {} else . end |
+          if ._state.apps.longhorn.volumes == null then ._state.apps.longhorn.volumes = {} else . end |
+          ._state.apps.longhorn.volumes[$vol] = {
+            "status": "created",
+            "size": $size,
+            "replicas": $replicas,
+            "data_locality": $locality,
+            "created_at": now | strftime("%Y-%m-%dT%H:%M:%SZ")
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when:
+        - inventory_secret_name | length > 0
+        - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        - existing_volume.resources | length == 0
+
+    # ===== STEP 7: Output Result =====
+    - name: Display volume creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if existing_volume.resources | length > 0 else 'created' }}"
+          volume_name: "{{ volume_name }}"
+          size: "{{ size }}"
+          replicas: "{{ number_of_replicas }}"
+          data_locality: "{{ data_locality }}"
+          namespace: "{{ longhorn_namespace }}"

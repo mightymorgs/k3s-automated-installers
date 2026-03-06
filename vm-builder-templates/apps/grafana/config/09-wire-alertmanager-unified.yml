@@ -1,0 +1,168 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/09-wire-alertmanager-unified"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/09-wire-alertmanager-unified.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "alertmanager_deployed", "grafana_alertmanager_wired"]
+#   provides: ["grafana_unified_alerting_configured"]
+#   tags: ["grafana", "alertmanager", "unified-alerting", "integration", "wiring", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Grafana unified alerting to send alerts to Alertmanager.
+#     This is the push direction (Grafana -> Alertmanager). The existing
+#     07-wire-alertmanager.yml adds Alertmanager as a datasource (pull).
+#     This playbook enables unified alerting via environment variables on
+#     the Grafana deployment, disables legacy alerting, and configures the
+#     external Alertmanager URL. Idempotent: checks current env vars before
+#     patching.
+#   requires_apps: ["grafana", "alertmanager"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Configure Grafana Unified Alerting with Alertmanager
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    # alertmanager_url: from BWS _state via Phase 4 extra-vars
+    alertmanager_internal_url: "{{ alertmanager_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== SKIP IF ALERTMANAGER NOT INSTALLED ==========
+    - name: Skip if alertmanager is not installed on this VM
+      when: alertmanager_url is not defined
+      block:
+        - name: "alertmanager not installed — skipping unified alerting wiring"
+          ansible.builtin.debug:
+            msg: "alertmanager is not installed on this VM (no alertmanager_url in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== VERIFY GRAFANA API ==========
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== CHECK IF UNIFIED ALERTING ALREADY CONFIGURED ==========
+    # Read the current deployment env vars to check if unified alerting is
+    # already enabled. This avoids unnecessary restarts.
+    - name: Get current Grafana deployment env vars
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment grafana -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[0].env[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_env_names
+      changed_when: false
+      failed_when: false
+
+    - name: Check if unified alerting env vars already set
+      ansible.builtin.set_fact:
+        unified_alerting_configured: >-
+          {{ 'GF_UNIFIED_ALERTING_ENABLED' in (current_env_names.stdout | default(''))
+             and 'GF_UNIFIED_ALERTING_EXECUTE_ALERTS' in (current_env_names.stdout | default('')) }}
+
+    - name: Note unified alerting already configured
+      ansible.builtin.debug:
+        msg: "Grafana unified alerting env vars already set - skipping patch"
+      when: unified_alerting_configured
+
+    # ========== PATCH DEPLOYMENT WITH UNIFIED ALERTING ENV VARS ==========
+    # Enable Grafana unified alerting and point it at the external Alertmanager.
+    # GF_UNIFIED_ALERTING_ENABLED=true     - enable the new alerting engine
+    # GF_ALERTING_ENABLED=false            - disable legacy alerting
+    # GF_UNIFIED_ALERTING_EXECUTE_ALERTS=true - actually fire alerts
+    # GF_UNIFIED_ALERTING_ALERTMANAGERS_URL  - external Alertmanager endpoint
+    - name: Enable unified alerting via environment variables
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env deployment/grafana -n {{ app_namespace }}
+          GF_UNIFIED_ALERTING_ENABLED=true
+          GF_ALERTING_ENABLED=false
+          GF_UNIFIED_ALERTING_EXECUTE_ALERTS=true
+          GF_UNIFIED_ALERTING_ALERTMANAGERS_URL={{ alertmanager_internal_url }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: env_patch_result
+      changed_when: "'updated' in env_patch_result.stdout"
+      when: not unified_alerting_configured
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Grafana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/grafana -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not unified_alerting_configured
+
+    # ========== VERIFY GRAFANA IS HEALTHY ==========
+    - name: Verify Grafana health endpoint is reachable after rollout
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: post_rollout_health
+      retries: 10
+      delay: 6
+      until: post_rollout_health.status is defined and post_rollout_health.status == 200
+      failed_when: false
+      when: not unified_alerting_configured
+
+    - name: Fail if Grafana not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Grafana not accessible after rollout (last status: {{ post_rollout_health.status | default('unknown') }})"
+      when: >-
+        not unified_alerting_configured and
+        (post_rollout_health.status is not defined or post_rollout_health.status != 200)
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana Unified Alerting Configuration Complete"
+          - "=========================================="
+          - "Unified Alerting: Enabled"
+          - "Legacy Alerting: Disabled"
+          - "Execute Alerts: true"
+          - "External Alertmanager: {{ alertmanager_internal_url }}"
+          - "Status: {{ 'Already configured' if unified_alerting_configured else 'Patched and restarted' }}"
+          - "=========================================="

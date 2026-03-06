@@ -1,0 +1,25 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mcp-tools
+
+resources:
+  - namespace.yaml
+  - vault-mcp-deployment.yaml
+  - vault-mcp-service.yaml
+  - awx-mcp-deployment.yaml
+  - awx-mcp-service.yaml
+  - teleport-mcp-deployment.yaml
+  - teleport-mcp-service.yaml
+  - k8s-rag-mcp-deployment.yaml
+  - k8s-rag-mcp-service.yaml
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/part-of: mcp-servers
+  platform.austerit.com/component: ai-operations
+
+commonAnnotations:
+  platform.austerit.com/managed-by: kustomize
+  platform.austerit.com/version: "1.0.0"

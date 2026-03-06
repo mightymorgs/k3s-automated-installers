@@ -1,0 +1,39 @@
+---
+# Server Transports for Traefik
+# Defines how Traefik connects to backend services
+
+# Skip TLS Verification (for self-signed certs in dev/staging)
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: insecure-skip-verify
+  namespace: kube-system
+spec:
+  insecureSkipVerify: true
+
+---
+# Secure Transport with custom CA (for internal PKI)
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: internal-ca
+  namespace: kube-system
+spec:
+  serverName: "*.svc.cluster.local"
+  rootCAsSecrets:
+    - internal-ca-cert
+  maxIdleConnsPerHost: 10
+
+---
+# Default Secure Transport
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: default-secure
+  namespace: kube-system
+spec:
+  forwardingTimeouts:
+    dialTimeout: 30s
+    responseHeaderTimeout: 30s
+    idleConnTimeout: 90s
+  maxIdleConnsPerHost: 10

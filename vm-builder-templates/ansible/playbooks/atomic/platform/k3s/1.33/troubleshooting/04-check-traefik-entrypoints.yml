@@ -1,0 +1,156 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/troubleshooting/04-check-traefik-entrypoints"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/troubleshooting/04-check-traefik-entrypoints.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "troubleshooting"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "traefik"
+#       folder_version: "1.33"
+#       supported_versions: ["2.x", "3.x"]
+#       version_range: ">=2.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - traefik: "latest"
+#         k3s: "1.33.5+k3s1"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-10"
+#         notes: "Verifies websecure entrypoint exists on port 443"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed", "traefik_deployed"]
+#   provides: ["traefik_entrypoints_verified"]
+#   tags: ["k3s", "traefik", "troubleshooting", "diagnostics", "entrypoints"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Check Traefik configuration and available entrypoints
+- name: Check Traefik Entrypoints Configuration
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Display diagnostic information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Checking Traefik Entrypoints
+          - ==========================================
+          - 'Goal: Verify websecure entrypoint exists'
+          - ==========================================
+
+    # ========== PHASE 1: Fetch kubeconfig ==========
+    - name: Fetch kubeconfig from remote host
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_raw
+    - name: Save kubeconfig locally
+      ansible.builtin.copy:
+        content: "{{ kubeconfig_raw.content | b64decode | regex_replace('127.0.0.1', ansible_host) }}"
+        dest: /tmp/media-stack-kubeconfig.yaml
+        mode: '0600'
+      delegate_to: localhost
+
+    # ========== PHASE 2: Check Traefik Deployment ==========
+    - name: Get Traefik deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kube-system
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: traefik_deployments
+    - name: Find Traefik deployment
+      ansible.builtin.set_fact:
+        traefik_deployment: >-
+          {{ traefik_deployments.resources | selectattr('metadata.name', 'search', 'traefik') | first | default(None) }}
+    - name: Display Traefik deployment info
+      ansible.builtin.debug:
+        msg:
+          - "Traefik deployment: {{ traefik_deployment.metadata.name if traefik_deployment else 'NOT FOUND' }}"
+          - "Image: {{ traefik_deployment.spec.template.spec.containers[0].image if traefik_deployment else 'N/A' }}"
+          - 'Args: {{ traefik_deployment.spec.template.spec.containers[0].args | default([]) }}'
+      when: traefik_deployment is not none
+
+    # ========== PHASE 3: Check Traefik Service ==========
+    - name: Get Traefik service
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: kube-system
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: traefik_services
+    - name: Find Traefik service
+      ansible.builtin.set_fact:
+        traefik_service: >-
+          {{ traefik_services.resources | selectattr('metadata.name', 'search', 'traefik') | first | default(None) }}
+    - name: Display Traefik service ports
+      ansible.builtin.debug:
+        msg:
+          - "Traefik service: {{ traefik_service.metadata.name if traefik_service else 'NOT FOUND' }}"
+          - 'Ports:'
+          - '{{ traefik_service.spec.ports }}'
+      when: traefik_service is not none
+
+    # ========== PHASE 4: Check for websecure port ==========
+    - name: Check if websecure port (443) is configured
+      ansible.builtin.set_fact:
+        has_websecure: "{{ traefik_service.spec.ports | selectattr('port', 'equalto', 443) | list | length > 0 }}"
+      when: traefik_service is not none
+    - name: Display websecure status
+      ansible.builtin.debug:
+        msg: "Websecure entrypoint (port 443): {{ 'CONFIGURED' if has_websecure | default(false) else 'MISSING' }}"
+
+    # ========== PHASE 5: Check K3s Traefik HelmChart ==========
+    - name: Get Traefik HelmChart
+      kubernetes.core.k8s_info:
+        api_version: helm.cattle.io/v1
+        kind: HelmChart
+        name: traefik
+        namespace: kube-system
+        kubeconfig: /tmp/media-stack-kubeconfig.yaml
+      delegate_to: localhost
+      register: traefik_helmchart
+      failed_when: false
+    - name: Display HelmChart configuration
+      ansible.builtin.debug:
+        var: traefik_helmchart.resources[0].spec.valuesContent
+      when:
+        - traefik_helmchart.resources is defined
+        - traefik_helmchart.resources | length > 0
+
+    # ========== PHASE 6: Summary ==========
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Traefik Configuration Summary
+          - ==========================================
+          - ''
+          - "Deployment: {{ 'Found' if traefik_deployment else 'NOT FOUND' }}"
+          - "Service: {{ 'Found' if traefik_service else 'NOT FOUND' }}"
+          - >-
+            Websecure (port 443): {{ 'CONFIGURED' if has_websecure | default(false)
+            else 'MISSING - THIS IS THE PROBLEM!' }}
+          - ''
+          - >-
+            {% if not (has_websecure | default(false)) %}Action Required: Configure
+            websecure entrypoint in K3s Traefik HelmChart{% endif %}
+          - ==========================================

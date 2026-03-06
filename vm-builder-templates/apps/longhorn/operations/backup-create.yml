@@ -1,0 +1,271 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/operations/backup-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "longhorn.backups.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/operations/backup-create.yml"
+#     category: "platform"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["v1.5.x", "v1.6.x", "v1.7.x"]
+#       version_range: ">=v1.5.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - longhorn: "v1.6.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Longhorn CRD schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_longhorn_operations"
+#   dependencies: ["longhorn_backup_target_configured", "longhorn_volume_exists"]
+#   provides: ["longhorn_backup_created"]
+#   tags: ["longhorn", "storage", "backup", "crd", "operations", "disaster-recovery"]
+#   estimated_duration: 300
+#   parallel_safe: true
+#   idempotent: false
+#   description: >-
+#     Create a Longhorn Backup for an existing volume. Backups are stored in the
+#     configured BackupTarget (S3, NFS, or Azure Blob). Each backup creates a new
+#     point-in-time copy. Requires a snapshot to exist or creates one automatically.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.longhorn.status"
+#         purpose: "Verify Longhorn is ready before creating backup"
+#       - path: "_state.apps.longhorn.backup_target.url"
+#         purpose: "Verify backup target is configured"
+#
+#     writes:
+#       - path: "_state.apps.longhorn.backups.{backup_name}.status"
+#         example: "completed"
+#       - path: "_state.apps.longhorn.backups.{backup_name}.volume"
+#         example: "my-volume"
+#       - path: "_state.apps.longhorn.backups.{backup_name}.snapshot"
+#         example: "snap-12345"
+
+- name: Longhorn - Create Backup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    longhorn_namespace: "{{ longhorn_namespace_input | default('longhorn-system') }}"
+
+    # Required fields
+    # volume_name: Name of the volume to backup (required)
+
+    # Optional fields
+    snapshot_name: "{{ snapshot_name_input | default('') }}"
+    backup_labels: "{{ backup_labels_input | default({}) }}"
+    backup_mode: "{{ backup_mode_input | default('') }}"  # full or incremental
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - volume_name is defined and volume_name | length > 0
+        fail_msg: "Required input missing: volume_name is required"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Check Longhorn System Readiness =====
+    - name: Verify Longhorn manager pods are running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-manager
+      register: longhorn_manager_pods
+
+    - name: Assert Longhorn manager is ready
+      ansible.builtin.assert:
+        that:
+          - longhorn_manager_pods.resources | length > 0
+          - longhorn_manager_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+        fail_msg: "Longhorn manager is not running. Ensure Longhorn is deployed first."
+        success_msg: "Longhorn manager is running"
+
+    # ===== STEP 3: Verify Backup Target is Configured =====
+    - name: Check backup target configuration
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Setting
+        namespace: "{{ longhorn_namespace }}"
+        name: backup-target
+      register: backup_target_setting
+
+    - name: Assert backup target is configured
+      ansible.builtin.assert:
+        that:
+          - backup_target_setting.resources | length > 0
+          - backup_target_setting.resources[0].value | default('') | length > 0
+        fail_msg: "Backup target is not configured. Set backup-target setting first."
+        success_msg: "Backup target is configured: {{ backup_target_setting.resources[0].value | default('') }}"
+
+    # ===== STEP 4: Verify Volume Exists =====
+    - name: Check if source volume exists
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Volume
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ volume_name }}"
+      register: source_volume
+
+    - name: Assert volume exists
+      ansible.builtin.assert:
+        that:
+          - source_volume.resources | length > 0
+        fail_msg: "Volume '{{ volume_name }}' does not exist"
+        success_msg: "Volume '{{ volume_name }}' found"
+
+    # ===== STEP 5: Create Snapshot if Not Provided =====
+    - name: Generate snapshot name if not provided
+      ansible.builtin.set_fact:
+        effective_snapshot_name: >-
+          {{ snapshot_name if snapshot_name | length > 0 else
+             'backup-snap-' + lookup('password', '/dev/null length=8 chars=ascii_lowercase,digits') }}
+
+    - name: Create snapshot for backup (if no snapshot specified)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: Snapshot
+          metadata:
+            name: "{{ effective_snapshot_name }}"
+            namespace: "{{ longhorn_namespace }}"
+            labels:
+              longhornvolume: "{{ volume_name }}"
+              backup-snapshot: "true"
+          spec:
+            volume: "{{ volume_name }}"
+            labels:
+              created-for: backup
+      register: snapshot_result
+      when: snapshot_name | length == 0
+
+    - name: Wait for snapshot to be ready
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Snapshot
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ effective_snapshot_name }}"
+      register: snapshot_status
+      until: >-
+        snapshot_status.resources | length > 0 and
+        (snapshot_status.resources[0].status.readyToUse | default(false)) == true
+      retries: 30
+      delay: 5
+      when: snapshot_name | length == 0
+
+    # ===== STEP 6: Generate Backup Name =====
+    - name: Generate backup name
+      ansible.builtin.set_fact:
+        backup_name: >-
+          backup-{{ volume_name }}-{{
+            lookup('password', '/dev/null length=8 chars=ascii_lowercase,digits')
+          }}
+
+    # ===== STEP 7: Create Backup CRD =====
+    - name: Create Longhorn Backup
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: Backup
+          metadata:
+            name: "{{ backup_name }}"
+            namespace: "{{ longhorn_namespace }}"
+            labels:
+              longhornvolume: "{{ volume_name }}"
+          spec:
+            snapshotName: "{{ effective_snapshot_name }}"
+            labels: "{{ backup_labels if backup_labels | length > 0 else omit }}"
+            backupMode: "{{ backup_mode if backup_mode | length > 0 else omit }}"
+      register: backup_result
+
+    # ===== STEP 8: Wait for Backup to Complete =====
+    - name: Wait for backup to complete
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Backup
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ backup_name }}"
+      register: backup_status
+      until: >-
+        backup_status.resources | length > 0 and
+        (backup_status.resources[0].status.state | default('')) in ['Completed', 'Error']
+      retries: 60
+      delay: 10
+
+    - name: Assert backup completed successfully
+      ansible.builtin.assert:
+        that:
+          - backup_status.resources[0].status.state == 'Completed'
+        fail_msg: >-
+          Backup failed with state: {{ backup_status.resources[0].status.state | default('unknown') }},
+          error: {{ backup_status.resources[0].status.error | default('none') }}
+        success_msg: "Backup completed successfully"
+
+    # ===== STEP 9: Write Result to BWS._state (if configured) =====
+    - name: Update BWS inventory with backup info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge backup info into _state.apps.longhorn.backups
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg backup "{{ backup_name }}" \
+          --arg volume "{{ volume_name }}" \
+          --arg snapshot "{{ effective_snapshot_name }}" \
+          --arg url "{{ backup_status.resources[0].status.url | default('') }}" \
+          '
+          if ._state.apps.longhorn == null then ._state.apps.longhorn = {} else . end |
+          if ._state.apps.longhorn.backups == null then ._state.apps.longhorn.backups = {} else . end |
+          ._state.apps.longhorn.backups[$backup] = {
+            "status": "completed",
+            "volume": $volume,
+            "snapshot": $snapshot,
+            "url": $url,
+            "created_at": now | strftime("%Y-%m-%dT%H:%M:%SZ")
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when:
+        - inventory_secret_name | length > 0
+        - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+
+    # ===== STEP 10: Output Result =====
+    - name: Display backup creation result
+      ansible.builtin.debug:
+        msg:
+          status: "completed"
+          backup_name: "{{ backup_name }}"
+          volume_name: "{{ volume_name }}"
+          snapshot_name: "{{ effective_snapshot_name }}"
+          backup_url: "{{ backup_status.resources[0].status.url | default('') }}"
+          size: "{{ backup_status.resources[0].status.size | default('unknown') }}"
+          namespace: "{{ longhorn_namespace }}"

@@ -1,0 +1,46 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-get-admin-password.yml:
+    summary: Retrieve ArgoCD admin password and optionally store in BWS
+    source: inferred
+    confidence: medium
+  02-configure-repositories.yml:
+    summary: Configure ArgoCD Git repositories with credentials from BWS
+    source: inferred
+    confidence: medium
+    calls_api:
+    - git@github.com:mightymorgs/k8s-platform-automation.git
+    - '{{ item.url }}'
+  04-configure-api.yml:
+    summary: Enable anonymous read-only access for ArgoCD in Tailscale mode. Patches
+      argocd-cm ConfigMap to enable anonymous users and argocd-rbac-cm to grant read-only
+      role. Tailscale provides the authentication layer.
+    source: inferred
+    confidence: medium
+  05-wire-awx.yml:
+    summary: Configure ArgoCD Notifications to send webhook events to AWX on successful
+      app syncs. Patches the argocd-notifications-cm ConfigMap to add a webhook service,
+      notification template, and trigger for sync-succeeded events. The notifications
+      controller auto-reloads ConfigMap changes.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_internal_url }}/api/v2/job_templates/1/launch/'
+    requires_apps:
+    - awx
+    references_services:
+    - awx
+  06-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to ArgoCD application-controller and
+      argocd-server deployments. Both already expose metrics natively (controller
+      on port 8082, server on port 8083). This playbook adds pod-level annotations
+      so Prometheus auto-discovers and scrapes both endpoints via its kubernetes-pods
+      scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- awx
+- prometheus

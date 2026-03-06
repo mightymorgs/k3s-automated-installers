@@ -1,0 +1,130 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  credential-create.yml:
+    summary: Create an AWX credential for authentication (SSH, SCM, cloud, etc.).
+      This operation is idempotent - if a credential with the same name exists in
+      the organization, it will be skipped. Supports all credential types.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/credential_types/{{ credential_type_id }}/'
+    - '{{ awx_api_base }}/credentials/?name={{ credential_name | urlencode }}'
+    - '{{ awx_api_base }}/credentials/'
+    wiring:
+      reads_from:
+      - app: awx
+        field: token
+      writes_to:
+      - app: awx
+        field: credentials
+      - app: awx
+        field: credentials
+      - app: awx
+        field: credentials
+  inventory-create.yml:
+    summary: Create an AWX inventory for host management. This operation is idempotent
+      - if an inventory with the same name exists, it will be skipped. Supports standard,
+      smart, and constructed inventory types.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/inventories/?name={{ awx_inventory_name | urlencode }}'
+    - '{{ awx_api_base }}/inventories/'
+    wiring:
+      reads_from:
+      - app: awx
+        field: token
+      writes_to:
+      - app: awx
+        field: inventories
+      - app: awx
+        field: inventories
+  job-template-create.yml:
+    summary: Create an AWX job template for playbook execution. This operation is
+      idempotent - if a job template with the same name exists, it will be skipped.
+      Supports all job template options including credentials, survey, and launch
+      settings.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/job_templates/?name={{ job_template_name | urlencode }}'
+    - '{{ awx_api_base }}/job_templates/'
+    - '{{ awx_api_base }}/job_templates/{{ created_template_id }}/credentials/'
+    wiring:
+      reads_from:
+      - app: awx
+        field: token
+      - app: awx
+        field: projects
+      - app: awx
+        field: inventories
+      writes_to:
+      - app: awx
+        field: job_templates
+      - app: awx
+        field: job_templates
+  job-template-launch.yml:
+    summary: Launch a job from an AWX job template with optional runtime overrides.
+      Can optionally wait for job completion and return status. Supports extra vars,
+      limit, tags, and other launch-time parameters.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/job_templates/?name={{ job_template_name | urlencode }}'
+    - '{{ awx_api_base }}/job_templates/{{ resolved_template_id }}/launch/'
+    - '{{ awx_api_base }}/jobs/{{ launched_job_id }}/'
+    wiring:
+      reads_from:
+      - app: awx
+        field: token
+      - app: awx
+        field: job_templates
+      writes_to:
+      - app: awx
+        field: jobs
+      - app: awx
+        field: jobs
+      - app: awx
+        field: job_templates
+  project-create.yml:
+    summary: Create an AWX project for SCM-based playbook management. This operation
+      is idempotent - if a project with the same name exists, it will be skipped.
+      Supports all project parameters including SCM type, URL, branch, and credentials.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/projects/?name={{ project_name | urlencode }}'
+    - '{{ awx_api_base }}/projects/'
+    - '{{ awx_api_base }}/projects/{{ created_project_id }}/'
+    wiring:
+      reads_from:
+      - app: awx
+        field: token
+      - app: awx
+        field: url
+      writes_to:
+      - app: awx
+        field: projects
+      - app: awx
+        field: projects
+  project-sync.yml:
+    summary: Trigger an SCM update for an AWX project to pull latest changes from
+      the repository. Waits for the sync job to complete and reports status.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/projects/?name={{ project_name | urlencode }}'
+    - '{{ awx_api_base }}/projects/{{ resolved_project_id }}/update/'
+    - '{{ awx_api_base }}/project_updates/{{ sync_job_id }}/'
+    wiring:
+      reads_from:
+      - app: awx
+        field: token
+      - app: awx
+        field: projects
+      writes_to:
+      - app: awx
+        field: projects
+      - app: awx
+        field: projects

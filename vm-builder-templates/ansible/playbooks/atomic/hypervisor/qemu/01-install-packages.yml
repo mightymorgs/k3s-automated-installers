@@ -1,0 +1,130 @@
+---
+# playbook_metadata:
+#   id: "atomic/hypervisor/qemu/01-install-packages"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/hypervisor/qemu/01-install-packages.yml"
+#     category: "hypervisor"
+#     subsystem: "qemu"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "qemu-kvm"
+#       folder_version: null
+#       supported_versions: ["8.x", "9.x"]
+#       version_range: ">=8.0.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - qemu: "9.x"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-22"
+#         notes: "Tested on bare-metal hypervisor with Intel VT-x"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: []
+#   provides: ["qemu_kvm_installed", "libvirt_installed"]
+#   tags: ["qemu", "kvm", "libvirt", "hypervisor", "installation"]
+#   estimated_duration: 180
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Install QEMU/KVM and libvirt packages on hypervisor host.
+#     Installs virtualization tools, Python bindings, and enables libvirtd service.
+
+- name: Install QEMU/KVM and libvirt packages
+  hosts: hypervisor
+  become: true
+  vars:
+    force_reinstall: "{{ force_reinstall | default('false') }}"
+
+  tasks:
+    - name: Check if QEMU/KVM already installed
+      ansible.builtin.command:
+        cmd: dpkg -l qemu-kvm
+      register: qemu_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if already installed and not forcing reinstall
+      ansible.builtin.meta: end_play
+      when:
+        - qemu_check.rc == 0
+        - force_reinstall != 'true'
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install QEMU/KVM packages
+      ansible.builtin.apt:
+        name:
+          - qemu-kvm
+          - qemu-system
+          - qemu-utils
+        state: present
+      register: qemu_install
+
+    - name: Install libvirt packages
+      ansible.builtin.apt:
+        name:
+          - libvirt-daemon-system
+          - libvirt-clients
+          - libvirt-daemon
+        state: present
+      register: libvirt_install
+
+    - name: Install virtualization tools
+      ansible.builtin.apt:
+        name:
+          - virtinst
+          - bridge-utils
+          - genisoimage
+          - cloud-image-utils
+        state: present
+
+    - name: Install Python libvirt bindings
+      ansible.builtin.apt:
+        name:
+          - python3-libvirt
+        state: present
+
+    - name: Add user to libvirt group
+      ansible.builtin.user:
+        name: "{{ ansible_user_id }}"
+        groups: libvirt,kvm
+        append: true
+
+    - name: Start and enable libvirtd service
+      ansible.builtin.systemd:
+        name: libvirtd
+        state: started
+        enabled: true
+
+    - name: Verify QEMU/KVM installation
+      ansible.builtin.command:
+        cmd: kvm-ok
+      register: kvm_ok
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display KVM verification result
+      ansible.builtin.debug:
+        msg: "{{ kvm_ok.stdout_lines }}"
+      when: kvm_ok.rc == 0
+
+    - name: Warn if KVM not available
+      ansible.builtin.debug:
+        msg: "WARNING: KVM acceleration not available. VMs will be slow."
+      when: kvm_ok.rc != 0

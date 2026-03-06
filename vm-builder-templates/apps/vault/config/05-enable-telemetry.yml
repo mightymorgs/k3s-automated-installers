@@ -1,0 +1,254 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/vault/05-enable-telemetry"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/vault/config/05-enable-telemetry.yml"
+#     category: "apps"
+#     subsystem: "vault"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["vault_deployed", "vault_initialized"]
+#   provides: ["vault_telemetry_enabled", "vault_metrics_available"]
+#   tags: ["vault", "prometheus", "telemetry", "metrics", "observability", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable Vault Prometheus telemetry. Creates a ConfigMap with a Vault
+#     telemetry config overlay that sets prometheus_retention_time and
+#     unauthenticated_metrics_access on the listener. Patches the Vault
+#     StatefulSet to mount the overlay and sets VAULT_CONFIG_DIR to load it.
+#     After restart, /v1/sys/metrics is accessible without a token.
+#   requires_apps: ["vault", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Enable Vault Prometheus Telemetry
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    vault_namespace: "vault"
+    # vault_url: from BWS _state via Phase 4 extra-vars
+    vault_api_url: "{{ vault_url }}"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF VAULT IS DEPLOYED ==========
+    - name: Check if Vault pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ vault_namespace }} -l app.kubernetes.io/name=vault --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: vault_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Vault not deployed
+      ansible.builtin.meta: end_play
+      when: vault_pod_check.rc != 0 or vault_pod_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Vault pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app.kubernetes.io/name=vault \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ vault_namespace }} \
+          -l app=vault \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ========== ENSURE VAULT IS UNSEALED ==========
+    - name: Ensure Vault is unsealed before checking telemetry
+      ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+
+    # ========== CHECK IF TELEMETRY ALREADY ENABLED ==========
+    # Try the unauthenticated metrics endpoint. If it returns 200,
+    # telemetry is already configured with unauthenticated access.
+    - name: Check if /v1/sys/metrics responds without token
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/metrics?format=prometheus"
+        method: GET
+        status_code: [200, 400, 403, 404, 429, 472, 473, 500, 501, 503]
+        return_content: false
+      register: metrics_check
+      failed_when: false
+
+    - name: Set telemetry_already_enabled fact
+      ansible.builtin.set_fact:
+        telemetry_already_enabled: "{{ metrics_check.status is defined and metrics_check.status == 200 }}"
+
+    - name: Note telemetry already enabled
+      ansible.builtin.debug:
+        msg: "Vault telemetry already enabled (metrics endpoint returned {{ metrics_check.status }}) - skipping"
+      when: telemetry_already_enabled
+
+    # ========== CREATE TELEMETRY CONFIG OVERLAY ==========
+    # Vault supports loading additional config from a directory via
+    # VAULT_CONFIG_DIR. We create a ConfigMap with a telemetry overlay
+    # that enables prometheus_retention_time and unauthenticated metrics.
+    - name: Apply Vault telemetry ConfigMap
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: vault-telemetry-config
+            namespace: {{ vault_namespace }}
+          data:
+            telemetry.hcl: |
+              telemetry {
+                prometheus_retention_time = "30s"
+                disable_hostname         = true
+              }
+
+              listener "tcp" {
+                address       = "0.0.0.0:8200"
+                tls_disable   = 1
+                telemetry {
+                  unauthenticated_metrics_access = true
+                }
+              }
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: configmap_result
+      changed_when: "'created' in configmap_result.stdout"
+      when: not telemetry_already_enabled
+
+    # ========== CHECK IF VOLUME ALREADY MOUNTED ==========
+    - name: Check if telemetry volume already in StatefulSet
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset vault -n {{ vault_namespace }}
+          -o jsonpath='{.spec.template.spec.volumes[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_volumes
+      changed_when: false
+
+    - name: Set volume_already_mounted fact
+      ansible.builtin.set_fact:
+        volume_already_mounted: "{{ 'telemetry-config' in (current_volumes.stdout | default('')) }}"
+
+    # ========== PATCH STATEFULSET WITH CONFIG OVERLAY VOLUME ==========
+    # Mount the ConfigMap at /vault/config/telemetry so Vault loads it
+    # alongside the existing config. Vault merges all .hcl files found
+    # in VAULT_CONFIG_DIR at startup.
+    - name: Patch Vault StatefulSet to mount telemetry config
+      ansible.builtin.shell: |
+        kubectl patch statefulset vault -n {{ vault_namespace }} \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"telemetry-config","configMap":{"name":"vault-telemetry-config"}}},{"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"telemetry-config","mountPath":"/vault/config/telemetry","readOnly":true}}]'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout and '(no change)' not in patch_result.stdout"
+      when: not telemetry_already_enabled and not volume_already_mounted
+
+    # ========== SET VAULT_CONFIG_DIR IF NOT ALREADY SET ==========
+    # VAULT_CONFIG_DIR tells Vault to load all .hcl files from that directory
+    # in addition to the main config file.
+    - name: Check current VAULT_LOCAL_CONFIG or VAULT_CONFIG_DIR
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset vault -n {{ vault_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[0].env[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_env_names
+      changed_when: false
+
+    - name: Set VAULT_CONFIG_DIR environment variable
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env statefulset/vault -n {{ vault_namespace }}
+          VAULT_CONFIG_DIR=/vault/config/telemetry
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: env_result
+      changed_when: "'updated' in env_result.stdout"
+      when: >-
+        not telemetry_already_enabled and
+        'VAULT_CONFIG_DIR' not in (current_env_names.stdout | default(''))
+
+    # ========== ADD PROMETHEUS SCRAPE ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations to Vault pod template
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset vault -n {{ vault_namespace }}
+          --type=merge
+          -p={"spec":{"template":{"metadata":{"annotations":{
+            "prometheus.io/scrape":"true",
+            "prometheus.io/port":"8200",
+            "prometheus.io/path":"/v1/sys/metrics?format=prometheus"
+          }}}}}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: annotation_patch
+      changed_when: "'patched' in annotation_patch.stdout and '(no change)' not in annotation_patch.stdout"
+      when: not telemetry_already_enabled
+
+    # ========== WAIT FOR ROLLOUT ==========
+    # StatefulSet rolling update restarts vault-0, which triggers a seal.
+    # The rollout completes when the new pod is Running (Vault starts sealed).
+    - name: Wait for Vault StatefulSet rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status statefulset/vault
+          -n {{ vault_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not telemetry_already_enabled
+
+    # ========== UNSEAL VAULT AFTER RESTART ==========
+    # StatefulSet patches trigger a rolling restart, which re-seals Vault.
+    - name: Ensure Vault is unsealed after rollout
+      ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+      when: not telemetry_already_enabled
+
+    # ========== VERIFY METRICS ENDPOINT ==========
+    - name: Verify /v1/sys/metrics endpoint responds
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/metrics?format=prometheus"
+        method: GET
+        status_code: [200]
+        return_content: false
+      register: metrics_verify
+      retries: 5
+      delay: 6
+      until: metrics_verify.status is defined and metrics_verify.status == 200
+      failed_when: false
+      when: not telemetry_already_enabled
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display telemetry configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Prometheus Telemetry Configuration"
+          - "=========================================="
+          - ""
+          - "Status: {{ 'Already enabled' if telemetry_already_enabled else 'Configured' }}"
+          - "Config Method: ConfigMap overlay + VAULT_CONFIG_DIR"
+          - "Prometheus Retention: 30s"
+          - "Unauthenticated Metrics: true"
+          - "Metrics Endpoint: {{ vault_api_url }}/v1/sys/metrics?format=prometheus"
+          - ""
+          - "Prometheus Annotations:"
+          - "  prometheus.io/scrape: true"
+          - "  prometheus.io/port: 8200"
+          - "  prometheus.io/path: /v1/sys/metrics?format=prometheus"
+          - ""
+          - "Unsealed: {{ vault_is_unsealed | default(false) }}"
+          - "=========================================="

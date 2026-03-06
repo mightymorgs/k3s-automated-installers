@@ -1,0 +1,239 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/operations/providers-oauth2-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "authentik.providers.oauth2.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/operations/providers-oauth2-create.yml"
+#     category: "platform"
+#     subsystem: "authentik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "authentik"
+#       supported_versions: ["2023.x", "2024.x", "2025.x"]
+#       version_range: ">=2023.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - authentik: "2024.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from OpenAPI schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_authentik_operations"
+#   dependencies: ["authentik_deployed", "authentik_admin_token_available"]
+#   provides: ["oauth2_provider_created"]
+#   tags: ["authentik", "oauth2", "providers", "phase5", "sso"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an OAuth2 provider in Authentik. This operation is idempotent -
+#     if a provider with the same name exists, it will be skipped.
+#     Returns the provider ID for use in application creation.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.authentik.admin_token"
+#         purpose: "Authentik API admin token for authentication"
+#       - path: "_state.flows.authorization"
+#         purpose: "Default authorization flow slug"
+#       - path: "_state.flows.invalidation"
+#         purpose: "Default invalidation flow slug"
+#
+#     writes:
+#       - path: "_state.apps.{app_name}.oauth.provider_id"
+#         example: 42
+#       - path: "_state.apps.{app_name}.oauth.client_id"
+#         example: "grafana-homelab"
+#       - path: "_state.apps.{app_name}.oauth.client_secret"
+#         example: "generated-64-char-secret"
+
+- name: Authentik - Create OAuth2 Provider
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    authentik_base_url: "{{ authentik_url }}"
+    authentik_api_base: "{{ authentik_base_url }}/api/v3"
+    endpoint: "/providers/oauth2/"
+
+    # Required fields (must be provided by caller)
+    # name: Provider display name (required)
+    # authorization_flow: Flow UUID for authorization (required)
+    # invalidation_flow: Flow UUID for invalidation (required)
+    # redirect_uris: List of allowed redirect URIs (required)
+
+    # Optional fields with sensible defaults
+    client_type: "{{ client_type_input | default('confidential') }}"
+    include_claims_in_id_token: "{{ include_claims_in_id_token_input | default(true) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - name is defined and name | length > 0
+          - authorization_flow is defined and authorization_flow | length > 0
+          - invalidation_flow is defined and invalidation_flow | length > 0
+          - redirect_uris is defined and redirect_uris | length > 0
+        fail_msg: "Required inputs missing: name, authorization_flow, invalidation_flow, redirect_uris"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Authentik admin token
+      ansible.builtin.set_fact:
+        authentik_admin_token: "{{ inventory._state.apps.authentik.admin_token }}"
+      no_log: true
+
+    # ===== STEP 3: Check for Existing Provider (Idempotency) =====
+    - name: Check if OAuth2 provider already exists
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+        status_code: [200]
+      register: existing_providers
+      no_log: false
+
+    - name: Filter for existing provider by name
+      ansible.builtin.set_fact:
+        existing_provider: >-
+          {{
+            existing_providers.json.results
+            | selectattr('name', 'equalto', name)
+            | list
+            | first
+            | default(none)
+          }}
+      no_log: false
+
+    - name: Skip creation if provider exists
+      ansible.builtin.debug:
+        msg: "OAuth2 provider '{{ name }}' already exists with ID {{ existing_provider.pk }}"
+      when: existing_provider is not none
+
+    # ===== STEP 4: Generate Client Credentials (if not provided) =====
+    - name: Generate client_id if not provided
+      ansible.builtin.set_fact:
+        client_id: "{{ client_id_input | default(name | lower | regex_replace('[^a-z0-9-]', '-')) }}"
+      when: existing_provider is none
+      no_log: false
+
+    - name: Generate client_secret if not provided
+      ansible.builtin.set_fact:
+        client_secret: >-
+          {{ client_secret_input | default(
+             lookup('password', '/dev/null length=64 chars=ascii_letters,digits')
+          ) }}
+      when: existing_provider is none
+      no_log: true
+
+    # ===== STEP 5: Create OAuth2 Provider =====
+    - name: Create OAuth2 provider in Authentik
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ name }}"
+          authorization_flow: "{{ authorization_flow }}"
+          invalidation_flow: "{{ invalidation_flow }}"
+          redirect_uris: "{{ redirect_uris }}"
+          authentication_flow: "{{ authentication_flow | default(omit) }}"
+          property_mappings: "{{ property_mappings | default(omit) }}"
+          client_type: "{{ client_type }}"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          access_code_validity: "{{ access_code_validity | default(omit) }}"
+          access_token_validity: "{{ access_token_validity | default(omit) }}"
+          refresh_token_validity: "{{ refresh_token_validity | default(omit) }}"
+          include_claims_in_id_token: "{{ include_claims_in_id_token }}"
+          signing_key: "{{ signing_key | default(omit) }}"
+          sub_mode: "hashed_user_id"
+          issuer_mode: "per_provider"
+        status_code: [200, 201]
+      register: provider_result
+      no_log: true
+      when: existing_provider is none
+
+    - name: Set provider_id from result
+      ansible.builtin.set_fact:
+        provider_id: "{{ existing_provider.pk if existing_provider is not none else provider_result.json.pk }}"
+        oauth_credentials:
+          provider_id: "{{ existing_provider.pk if existing_provider is not none else provider_result.json.pk }}"
+          client_id: "{{ existing_provider.client_id if existing_provider is not none else client_id }}"
+          client_secret: "{{ client_secret if existing_provider is none else omit }}"
+      no_log: true
+
+    # ===== STEP 6: Write Result to BWS._state =====
+    - name: Derive app key name for BWS writeback
+      ansible.builtin.set_fact:
+        app_key: "{{ app_name | default(name | lower | regex_replace('[^a-z0-9-]', '-')) }}"
+      no_log: false
+
+    - name: Update BWS inventory with provider credentials
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge provider credentials into _state.apps.{app_name}.oauth
+        UPDATED=$(echo "$CURRENT" | jq --arg app "{{ app_key }}" \
+          --argjson provider_id {{ provider_id }} \
+          --arg client_id "{{ oauth_credentials.client_id }}" \
+          --arg client_secret "{{ oauth_credentials.client_secret | default('') }}" \
+          '
+          if ._state.apps[$app] == null then ._state.apps[$app] = {} else . end |
+          if ._state.apps[$app].oauth == null then ._state.apps[$app].oauth = {} else . end |
+          ._state.apps[$app].oauth.provider_id = $provider_id |
+          ._state.apps[$app].oauth.client_id = $client_id |
+          if $client_secret != "" then ._state.apps[$app].oauth.client_secret = $client_secret else . end
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: app_name is defined or existing_provider is none
+
+    # ===== STEP 7: Output Result =====
+    - name: Display provider creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if existing_provider is not none else 'created' }}"
+          provider_id: "{{ provider_id }}"
+          client_id: "{{ oauth_credentials.client_id }}"
+          name: "{{ name }}"

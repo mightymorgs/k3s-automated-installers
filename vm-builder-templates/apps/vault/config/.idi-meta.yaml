@@ -1,0 +1,81 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  00-init-unseal.yml:
+    summary: Initialize and unseal Vault, write root token and unseal key to BWS inventory
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_url }}/v1/sys/seal-status'
+    - '{{ vault_api_url }}/v1/sys/seal-status'
+    - '{{ vault_api_url }}/v1/sys/health'
+    references_services:
+    - vault-api
+  01-sync-from-bws.yml:
+    summary: Sync secrets from Bitwarden Secrets Manager (BWS) to HashiCorp Vault
+      KV store
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_api_url }}/v1/sys/seal-status'
+    - '{{ vault_api_url }}/v1/sys/health'
+    - '{{ vault_api_url }}/v1/sys/mounts/{{ vault_kv_path }}'
+    - '{{ vault_api_url }}/v1/sys/mounts/{{ vault_kv_path }}'
+    - '{{ vault_api_url }}/v1/{{ item.item.vault_path }}'
+    - '{{ vault_api_url }}/v1/sys/policies/acl/media-stack'
+    - '{{ vault_api_url }}/v1/sys/policies/acl/external-secrets-operator'
+    - '{{ vault_api_url }}/v1/{{ item.vault_path }}'
+    references_services:
+    - vault-api
+  03-configure-apps.yml:
+    summary: Configure Vault policies and secrets for all apps
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_addr }}/v1/sys/health'
+    - '{{ vault_addr }}/v1/sys/mounts/apps'
+    - '{{ vault_addr }}/v1/sys/auth/kubernetes'
+    - '{{ vault_addr }}/v1/auth/kubernetes/config'
+    - '{{ vault_addr }}/v1/sys/policies/acl/{{ item.name }}'
+    - '{{ vault_addr }}/v1/auth/kubernetes/role/{{ item.name }}'
+    - '{{ vault_addr }}/v1/apps/data/{{ item.0.name }}/{{ item.1.key }}'
+  04-configure-api.yml:
+    summary: Configure Vault UI accessibility for Tailscale Ingress mode. Sets VAULT_UI,
+      VAULT_API_ADDR, and VAULT_CLUSTER_ADDR environment variables on the Vault StatefulSet
+      so the UI and API work correctly behind a Tailscale proxy. Vault still requires
+      token-based login (auth cannot be disabled for a secrets engine). This playbook
+      ensures the UI is ACCESSIBLE, not auth-bypassed.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_url }}/v1/sys/health'
+  05-enable-telemetry.yml:
+    summary: Enable Vault Prometheus telemetry. Creates a ConfigMap with a Vault telemetry
+      config overlay that sets prometheus_retention_time and unauthenticated_metrics_access
+      on the listener. Patches the Vault StatefulSet to mount the overlay and sets
+      VAULT_CONFIG_DIR to load it. After restart, /v1/sys/metrics is accessible without
+      a token.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_url }}/v1/sys/metrics?format=prometheus'
+    - '{{ vault_url }}/v1/sys/health'
+    - '{{ vault_url }}/v1/sys/metrics?format=prometheus'
+    requires_apps:
+    - prometheus
+  06-enable-audit.yml:
+    summary: 'Enable Vault file audit device writing to stdout. Audit logs written
+      to stdout are collected automatically by Alloy (DaemonSet) from /var/log/pods,
+      so no persistent volume is required. Uses the Vault HTTP API with the root token
+      to enable the audit device. Idempotent: checks if an audit device is already
+      enabled before creating one.'
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_url }}/v1/sys/health'
+    - '{{ vault_url }}/v1/sys/audit'
+    - '{{ vault_url }}/v1/sys/audit/stdout'
+    - '{{ vault_url }}/v1/sys/audit'
+depends_on_apps:
+- prometheus
+- vault-api

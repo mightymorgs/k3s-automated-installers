@@ -1,0 +1,336 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/01-apply-kustomize"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/install/01-apply-kustomize.yml"
+#     category: "apps"
+#     subsystem: "teleport"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "teleport"
+#       supported_versions: ["15.x", "16.x", "17.x"]
+#       version_range: ">=15.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#       longhorn: ">=1.5.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - teleport: "17.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-04"
+#         notes: "Pending functional test on target infrastructure"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["teleport_manifests_applied", "teleport_namespace_ready"]
+#   tags: ["teleport", "access", "zero-trust", "kustomize", "golden-master"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: Apply Teleport Kustomize manifests to K3s cluster
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What BWS paths this playbook reads from
+#     reads:
+#       - path: "_state.vault.url"
+#         purpose: "Vault endpoint for certificate storage"
+#
+#     # What BWS paths this playbook writes to
+#     writes:
+#       - path: "_state.apps.teleport.status"
+#         example: "ready"
+#       - path: "_state.apps.teleport.url"
+#         example: "https://teleport.teleport.svc:443"
+#       - path: "_state.apps.teleport.api_key"
+#         example: "join-token-extracted-from-statefulset"
+#       - path: "_state.apps.teleport.nodeport"
+#         example: 30444
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "teleport"
+#     service_name: "teleport"
+#     service_port: 443
+#     namespace: "teleport"
+#
+#     # Ingress mode from inventory
+#     mode_from_inventory: "ingress.mode"
+#
+#     # Cloudflare Tunnel mode
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#
+#       # Origin certificate (Cloudflare → Traefik HTTPS)
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#
+#     # Tailscale MagicDNS mode
+#     tailscale:
+#       in_cluster: true
+#
+#       # Tailscale certificate
+#       cert:
+#         method: "tailscale-cert"
+#
+#     # Path routing
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#
+#     # OAuth configuration
+#     oauth:
+#       client_id_format: "teleport-{client}"
+#
+#       # Redirect URIs (mode-dependent)
+#       redirect_uri_template:
+#         cloudflare: "https://{subdomain}.{domain}/v1/webapi/oidc/callback"
+#         tailscale: "https://{subdomain}.{vm_hostname}.{tailnet}/v1/webapi/oidc/callback"
+#
+#       scopes: ["openid", "profile", "email"]
+#
+#     # ForwardAuth middleware configuration
+#     forwardauth:
+#       enabled: false
+#       trust_forward_header: false
+#
+#     # Bypass SSO for these paths
+#     bypass_paths:
+#       - "/v1/webapi/ping"
+#       - "/healthz"
+#
+#     # OAuth credentials written here
+#     credentials_path: "_state.apps.teleport.oauth"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Teleport"
+#     icon: "shield"
+#     category: "Security"
+#     description: "Zero-trust infrastructure access platform"
+#     docs_url: "https://goteleport.com/docs/"
+#     port: 443
+#     nodeport: 30444
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for Teleport"
+#       type: "string"
+#       default: "public.ecr.aws/gravitational/teleport-distroless:16.4.12"
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of Teleport replicas"
+#       type: "integer"
+#       default: 1
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "string"
+#       default: "ClusterIP"
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PVCs"
+#       type: "string"
+#       default: "longhorn"
+#     cluster_name:
+#       label: "Cluster Name"
+#       description: "Teleport cluster name"
+#       type: "string"
+#       default: "teleport.teleport.svc"
+#     auth_type:
+#       label: "Auth Type"
+#       description: "Authentication type (local, oidc, saml)"
+#       type: "string"
+#       default: "local"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "250m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "256Mi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "1000m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "512Mi"
+#     storage_size:
+#       label: "Data Storage"
+#       description: "Persistent volume size for Teleport data"
+#       type: "string"
+#       default: "10Gi"
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "string"
+#       default: "30444"
+
+- name: Deploy Teleport
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: teleport
+    app_namespace: "teleport"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/teleport-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    web_port: 3080
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+
+  tasks:
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render ServiceAccount template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/serviceaccount.yaml.j2"
+        dest: "{{ render_dir }}/serviceaccount.yaml"
+        mode: '0644'
+
+    - name: Render ConfigMap template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/configmap.yaml.j2"
+        dest: "{{ render_dir }}/configmap.yaml"
+        mode: '0644'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/statefulset.yaml.j2"
+        dest: "{{ render_dir }}/statefulset.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Wait for StatefulSet to create pod
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pod -l app.kubernetes.io/name={{ app_name }} --no-headers
+      register: pod_exists
+      changed_when: false
+      retries: "{{ (app_start_timeout_seconds / retry_interval_seconds) | int }}"
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_exists.rc == 0 and pod_exists.stdout | length > 0
+
+    - name: Wait for pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app.kubernetes.io/name={{ app_name }},app.kubernetes.io/component=zero-trust-access
+        --timeout={{ app_start_timeout_seconds }}s
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_wait.rc == 0
+
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Teleport Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ image | default('public.ecr.aws/gravitational/teleport-distroless:16.4.12') }}"
+          - "Access URL: https://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30444) }}"
+          - "=========================================="
+
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent

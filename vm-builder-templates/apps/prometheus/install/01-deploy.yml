@@ -1,0 +1,493 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prometheus/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prometheus/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "prometheus"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "prometheus"
+#       supported_versions: ["latest", "2.45.x", "2.x"]
+#       version_range: ">=2.40.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       vault: ">=1.15.0"
+#       longhorn: ">=1.6.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - prometheus: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-23"
+#         notes: "Created for golden path observability stack"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["k3s_server_installed", "vault_deployed", "eso_deployed"]
+#   provides: ["prometheus_deployed"]
+#   tags: ["prometheus", "observability", "metrics", "monitoring"]
+#   estimated_duration: 180
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Deploy Prometheus metrics collection system to K3s cluster. Scrapes metrics from
+#     all cluster workloads. Accessible via Tailscale on NodePort 30090.
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What this playbook reads from BWS
+#     reads:
+#       - path: "_state.apps.vault.url"
+#         purpose: "Vault endpoint for ExternalSecret backend"
+#       - path: "apps.prometheus.retention"
+#         purpose: "Metrics retention period"
+#
+#     # What this playbook writes to BWS
+#     writes:
+#       - path: "_state.apps.prometheus.status"
+#         example: "ready"
+#       - path: "_state.apps.prometheus.url"
+#         example: "http://prometheus.observability.svc:9090"
+#       - path: "_state.apps.prometheus.nodeport"
+#         example: 30090
+#       - path: "_state.apps.prometheus.ingress_url"
+#         example: "https://prometheus.demo.com"
+#
+#   # ========== WIRING CONFIGURATION (v3.2 NEW) ==========
+#   wiring:
+#     # Prometheus is a datasource - doesn't wire TO other apps
+#     # Grafana wires to Prometheus
+#     can_wire_to: []
+#
+#   # ========== INGRESS CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "prometheus"
+#     service_name: "prometheus"
+#     service_port: 9090
+#     namespace: "observability"
+#
+#     # Ingress mode from inventory
+#     mode_from_inventory: "ingress.mode"
+#
+#     # Cloudflare Tunnel mode
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#
+#       # Origin certificate (Cloudflare → Traefik HTTPS)
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#
+#     # Tailscale MagicDNS mode
+#     tailscale:
+#       in_cluster: true
+#
+#       # Tailscale certificate
+#       cert:
+#         method: "tailscale-cert"
+#
+#     # Path routing
+#     paths:
+#       - path: "/"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2 NEW - Phase 5) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#
+#     # OAuth configuration
+#     oauth:
+#       client_id_format: "prometheus-{client}"
+#
+#       # Redirect URIs (mode-dependent)
+#       redirect_uri_template:
+#         cloudflare: "https://{subdomain}.{domain}/oauth/callback"
+#         tailscale: "https://{subdomain}.{vm_hostname}.{tailnet}/oauth/callback"
+#
+#       scopes: ["openid", "profile", "email"]
+#
+#     # ForwardAuth middleware configuration
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#
+#     # Bypass SSO for these paths
+#     bypass_paths:
+#       - "/-/healthy"
+#       - "/-/ready"
+#       - "/metrics"
+#       - "/api/v1/write"  # Allow remote write without auth
+#
+#     # OAuth credentials written here
+#     credentials_path: "_state.apps.prometheus.oauth"
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Prometheus"
+#     icon: "activity"
+#     category: "Observability"
+#     description: "Metrics collection and alerting"
+#     docs_url: "https://prometheus.io/docs/"
+#     port: 9090
+#     nodeport: 30909
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     app_name:
+#       label: "App Name"
+#       description: "Kubernetes resource name"
+#       type: "string"
+#       default: "prometheus"
+#     app_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace"
+#       type: "string"
+#       default: "observability"
+#     image:
+#       label: "Container Image"
+#       description: "Docker image for Prometheus"
+#       type: "string"
+#       default: "prom/prometheus:v2.54.1"
+#     replicas:
+#       label: "Replicas"
+#       description: "Number of Prometheus replicas"
+#       type: "integer"
+#       default: 1
+#     container_port:
+#       label: "Container Port"
+#       description: "Prometheus HTTP port"
+#       type: "integer"
+#       default: 9090
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "choice"
+#       default: "NodePort"
+#       options: ["NodePort", "ClusterIP", "LoadBalancer"]
+#     nodeport:
+#       label: "NodePort"
+#       description: "External port for access via Tailscale IP"
+#       type: "integer"
+#       default: 30909
+#     service_account_name:
+#       label: "Service Account"
+#       description: "Kubernetes ServiceAccount for Prometheus pods"
+#       type: "string"
+#       default: "prometheus"
+#     fs_group:
+#       label: "FS Group"
+#       description: "Filesystem group ID for pod security context"
+#       type: "integer"
+#       default: 65534
+#     run_as_user:
+#       label: "Run As User"
+#       description: "User ID for pod security context"
+#       type: "integer"
+#       default: 65534
+#     run_as_group:
+#       label: "Run As Group"
+#       description: "Group ID for pod security context"
+#       type: "integer"
+#       default: 65534
+#     run_as_non_root:
+#       label: "Run As Non-Root"
+#       description: "Require non-root user in pod security context"
+#       type: "boolean"
+#       default: true
+#     config_file:
+#       label: "Config File Path"
+#       description: "Path to prometheus.yml inside the container"
+#       type: "string"
+#       default: "/etc/prometheus/prometheus.yml"
+#     tsdb_path:
+#       label: "TSDB Path"
+#       description: "Path for Prometheus time-series database storage"
+#       type: "string"
+#       default: "/prometheus"
+#     retention_time:
+#       label: "Retention Time"
+#       description: "How long to retain metrics data"
+#       type: "string"
+#       default: "15d"
+#     config_mount_path:
+#       label: "Config Mount Path"
+#       description: "Container path for Prometheus config volume"
+#       type: "string"
+#       default: "/etc/prometheus"
+#     data_mount_path:
+#       label: "Data Mount Path"
+#       description: "Container path for Prometheus data volume"
+#       type: "string"
+#       default: "/prometheus"
+#     configmap_name:
+#       label: "ConfigMap Name"
+#       description: "Name of the Kubernetes ConfigMap for Prometheus config"
+#       type: "string"
+#       default: "prometheus-config"
+#     cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "250m"
+#     memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "512Mi"
+#     cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "1000m"
+#     memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "2Gi"
+#     ready_path:
+#       label: "Readiness Check Path"
+#       description: "HTTP path for readiness probe"
+#       type: "string"
+#       default: "/-/ready"
+#     health_path:
+#       label: "Health Check Path"
+#       description: "HTTP path for liveness probe"
+#       type: "string"
+#       default: "/-/healthy"
+#     readiness_initial_delay:
+#       label: "Readiness Initial Delay"
+#       description: "Seconds before first readiness probe"
+#       type: "integer"
+#       default: 10
+#     readiness_period:
+#       label: "Readiness Period"
+#       description: "Seconds between readiness probes"
+#       type: "integer"
+#       default: 10
+#     liveness_initial_delay:
+#       label: "Liveness Initial Delay"
+#       description: "Seconds before first liveness probe"
+#       type: "integer"
+#       default: 30
+#     liveness_period:
+#       label: "Liveness Period"
+#       description: "Seconds between liveness probes"
+#       type: "integer"
+#       default: 30
+#     storage_class:
+#       label: "Storage Class"
+#       description: "StorageClass for PVCs"
+#       type: "string"
+#       default: "longhorn-single"
+#     data_storage_size:
+#       label: "Data Storage"
+#       description: "Persistent volume size for metrics data"
+#       type: "string"
+#       default: "10Gi"
+#     scrape_interval:
+#       label: "Scrape Interval"
+#       description: "Default interval between metric scrapes"
+#       type: "string"
+#       default: "15s"
+
+- name: Deploy Prometheus
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: prometheus
+    app_namespace: "observability"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/prometheus-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    container_port: 9090
+    health_path: "/-/healthy"
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    health_probe_timeout_seconds: 5
+
+  tasks:
+    # ========================================
+    # VERIFY PREREQUISITES
+    # ========================================
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: nodes_check.rc == 0
+
+    # ========================================
+    # RENDER J2 TEMPLATES
+    # ========================================
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render RBAC template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/rbac.yaml.j2"
+        dest: "{{ render_dir }}/rbac.yaml"
+        mode: '0644'
+
+    - name: Render ConfigMap template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/configmap.yaml.j2"
+        dest: "{{ render_dir }}/configmap.yaml"
+        mode: '0644'
+
+    - name: Render StatefulSet template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/statefulset.yaml.j2"
+        dest: "{{ render_dir }}/statefulset.yaml"
+        mode: '0644'
+
+    - name: Render Service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    # ========================================
+    # APPLY MANIFESTS
+    # ========================================
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # Split-apply: protected kinds (Namespace, Secret, PVC, PushSecret) always use
+    # kubectl apply. Workloads use kubectl_action (which may be replace --force).
+    # This prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    # ========================================
+    # WAIT FOR READY
+    # ========================================
+    - name: Wait for StatefulSet to create pod
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pod -l app={{ app_name }} --no-headers
+      register: pod_exists
+      changed_when: false
+      retries: "{{ (app_start_timeout_seconds / retry_interval_seconds) | int }}"
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_exists.rc == 0 and pod_exists.stdout | length > 0
+
+    - name: Wait for pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app={{ app_name }}
+        --timeout={{ app_start_timeout_seconds }}s
+      register: pod_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: pod_wait.rc == 0
+
+    # ========================================
+    # DISPLAY STATUS
+    # ========================================
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prometheus Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ image | default('prom/prometheus:v2.54.1') }}"
+          - "Access URL: http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ nodeport | default(30909) }}"
+          - "Internal URL: http://{{ app_name }}.{{ app_namespace }}.svc:{{ container_port }}"
+          - "=========================================="
+
+    # ========================================
+    # CLEANUP
+    # ========================================
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent
+
+    # ========================================
+    # WRITE TO BWS._state
+    # ========================================
+    - name: Write Prometheus state to BWS
+      ansible.builtin.debug:
+        msg: "TODO: Call generic BWS writeback playbook with Prometheus state"
+      # This will be implemented when generic writeback playbook exists
+      # vars:
+      #   app_name: "prometheus"
+      #   app_state:
+      #     status: "ready"
+      #     url: "http://prometheus.observability.svc:9090"
+      #     nodeport: 30909

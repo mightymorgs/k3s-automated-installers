@@ -1,0 +1,142 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/server/01-install"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/server/01-install.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "server"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x", "1.34.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - k3s: "1.34.3"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2026-01-11"
+#         notes: "Tested on GCP e2-medium instance with stable channel"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["vm_provisioned", "network_configured"]
+#   provides: ["k3s_server_installed", "kubeconfig_available"]
+#   tags: ["k3s", "kubernetes", "installation", "golden-master"]
+#   estimated_duration: 300
+#   parallel_safe: false
+#   idempotent: true
+#   description: Install K3s server (control plane) on target VM
+
+- name: Install K3s Server
+  hosts: "{{ target_hosts | default('k3s_servers') }}"
+  gather_facts: true
+  become: true
+
+  vars:
+    k3s_install_script_url: https://get.k3s.io
+    k3s_install_script_path: /tmp/install-k3s.sh
+    k3s_channel: stable
+    kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+    k3s_disable_components:
+      - traefik  # We'll install our own
+    k3s_tls_san: "{{ ansible_default_ipv4.address }}"
+
+  tasks:
+    - name: Increase inotify limits for multi-app clusters
+      ansible.builtin.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        state: present
+        reload: true
+      loop:
+        - {key: "fs.inotify.max_user_instances", value: "1024"}
+        - {key: "fs.inotify.max_user_watches", value: "524288"}
+
+    - name: Check if K3s is already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+      changed_when: false
+
+    - name: Check if bundled traefik is still running (config drift)
+      ansible.builtin.command: k3s kubectl get deployment traefik -n kube-system
+      register: bundled_traefik_check
+      changed_when: false
+      failed_when: false
+      when: k3s_binary.stat.exists
+
+    - name: Set reinstall flag if k3s config has drifted
+      ansible.builtin.set_fact:
+        k3s_needs_install: "{{ not k3s_binary.stat.exists or (bundled_traefik_check.rc | default(1) == 0) }}"
+
+    - name: Download K3s installation script
+      ansible.builtin.get_url:
+        url: "{{ k3s_install_script_url }}"
+        dest: "{{ k3s_install_script_path }}"
+        mode: "0755"
+      when: k3s_needs_install
+
+    - name: Build K3s server arguments
+      ansible.builtin.set_fact:
+        k3s_server_args: >-
+          server
+          {% for component in k3s_disable_components %}
+          --disable {{ component }}
+          {% endfor %}
+          --write-kubeconfig-mode 644
+          --tls-san {{ k3s_tls_san }}
+
+    - name: Install K3s server
+      ansible.builtin.command:
+        cmd: "{{ k3s_install_script_path }}"
+      environment:
+        INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+        INSTALL_K3S_EXEC: "{{ k3s_server_args }}"
+      register: k3s_install
+      when: k3s_needs_install
+      changed_when: k3s_install.rc == 0
+
+    - name: Wait for K3s service to start
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+        enabled: true
+      register: k3s_service
+
+    - name: Ensure kubeconfig is readable
+      ansible.builtin.file:
+        path: "{{ kubeconfig_path }}"
+        mode: "0644"
+      when: k3s_service is succeeded
+
+    - name: Wait for K3s API to be ready
+      ansible.builtin.command:
+        cmd: k3s kubectl get nodes
+      register: k3s_nodes
+      retries: 30
+      delay: 10
+      until: k3s_nodes.rc == 0
+      changed_when: false
+
+    - name: Display K3s installation status
+      ansible.builtin.debug:
+        msg:
+          - "K3s installed successfully"
+          - "Kubeconfig: {{ kubeconfig_path }}"
+          - "Nodes: {{ k3s_nodes.stdout_lines | default([]) }}"

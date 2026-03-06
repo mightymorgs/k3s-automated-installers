@@ -1,0 +1,171 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/plex/06-deploy-exporter"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/plex/config/06-deploy-exporter.yml"
+#     category: "apps"
+#     subsystem: "plex"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["plex_deployed", "prometheus_deployed"]
+#   provides: ["plex_exporter_deployed"]
+#   tags: ["plex", "prometheus", "exporter", "monitoring", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Plex Media Server exporter sidecar container to the Plex StatefulSet
+#     for Prometheus metrics scraping. Uses X-Plex-Token for authentication.
+#     Exposes metrics on port 9594 and adds prometheus.io annotations for
+#     automatic discovery.
+#   requires_apps: ["plex", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.plex.api_key"
+#         purpose: "X-Plex-Token for exporter authentication"
+
+- name: Deploy Plex Media Server exporter sidecar
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    plex_namespace: "plex"
+    app_namespace: "{{ plex_namespace }}"
+    statefulset_name: plex
+    exporter_image: "ghcr.io/axsuul/plex-media-server-exporter:latest"
+    exporter_port: 9594
+    sidecar_container_name: plex-exporter
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== VALIDATE PREREQUISITES ==========
+    - name: Fail if plex_api_key not provided
+      ansible.builtin.fail:
+        msg: "plex_api_key (X-Plex-Token) must be provided via extra-vars (from BWS inventory)"
+      when: plex_api_key is not defined or plex_api_key | length == 0
+
+    - name: Check if Plex StatefulSet exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset {{ statefulset_name }}
+          -n {{ app_namespace }} --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: sts_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if StatefulSet not deployed
+      ansible.builtin.debug:
+        msg: "Plex StatefulSet not deployed - skipping exporter sidecar"
+      when: sts_check.rc != 0 or sts_check.stdout | length == 0
+
+    - name: End play if StatefulSet not available
+      ansible.builtin.meta: end_play
+      when: sts_check.rc != 0 or sts_check.stdout | length == 0
+
+    # ========== CHECK IF SIDECAR ALREADY EXISTS ==========
+    - name: Get current container names in StatefulSet
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset {{ statefulset_name }}
+          -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: container_names
+      changed_when: false
+
+    - name: Set sidecar existence fact
+      ansible.builtin.set_fact:
+        sidecar_exists: "{{ sidecar_container_name in container_names.stdout.split() }}"
+
+    # ========== PATCH STATEFULSET WITH EXPORTER SIDECAR ==========
+    # The Plex exporter connects to the Plex server on localhost:32400 using
+    # the X-Plex-Token for authentication and exposes Prometheus metrics.
+    - name: Add plex-exporter sidecar container to StatefulSet
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset {{ statefulset_name }}
+          -n {{ app_namespace }} --type json
+          -p '[{"op": "add", "path": "/spec/template/spec/containers/-", "value": {
+            "name": "{{ sidecar_container_name }}",
+            "image": "{{ exporter_image }}",
+            "ports": [{"containerPort": {{ exporter_port }}, "name": "metrics", "protocol": "TCP"}],
+            "env": [
+              {"name": "PLEX_SERVER", "value": "http://localhost:32400"},
+              {"name": "PLEX_TOKEN", "value": "{{ plex_api_key }}"},
+              {"name": "PORT", "value": "{{ exporter_port }}"}
+            ],
+            "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "64Mi"}}
+          }}]'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: patch_result
+      changed_when: "'patched' in patch_result.stdout"
+      when: not sidecar_exists
+
+    # ========== ADD PROMETHEUS ANNOTATIONS ==========
+    - name: Add Prometheus scrape annotations
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch statefulset {{ statefulset_name }}
+          -n {{ app_namespace }} --type merge
+          -p '{"spec": {"template": {"metadata": {"annotations": {
+            "prometheus.io/scrape": "true",
+            "prometheus.io/port": "{{ exporter_port }}",
+            "prometheus.io/path": "/metrics"
+          }}}}}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: annotation_result
+      changed_when: "'patched' in annotation_result.stdout"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for StatefulSet rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status statefulset/{{ statefulset_name }}
+          -n {{ app_namespace }} --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not sidecar_exists
+
+    # ========== VERIFY SIDECAR IS RUNNING ==========
+    - name: Verify exporter container is present after rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get statefulset {{ statefulset_name }}
+          -n {{ app_namespace }}
+          -o jsonpath='{.spec.template.spec.containers[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: verify_containers
+      changed_when: false
+
+    - name: Set verification fact
+      ansible.builtin.set_fact:
+        sidecar_verified: "{{ sidecar_container_name in verify_containers.stdout.split() }}"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display exporter deployment result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Plex Media Server Exporter Sidecar Deployment"
+          - "=========================================="
+          - "StatefulSet: {{ app_namespace }}/{{ statefulset_name }}"
+          - "Exporter: {{ exporter_image }}"
+          - "Plex Server: http://localhost:32400"
+          - "Metrics Port: {{ exporter_port }}"
+          - "Sidecar: {{ 'deployed' if not sidecar_exists else 'already exists' }}"
+          - "Verified: {{ sidecar_verified }}"
+          - "Prometheus Annotations: scrape=true, port={{ exporter_port }}"
+          - "=========================================="

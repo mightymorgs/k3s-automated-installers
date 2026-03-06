@@ -1,0 +1,27 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  dashboard-ingressroute.yaml:
+    summary: 'K8s IngressRoute: dashboard-ingressroute.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  middlewares.yaml:
+    summary: 'K8s Middleware: middlewares.yaml'
+    source: inferred
+    confidence: medium
+  servertransports.yaml:
+    summary: 'K8s ServersTransport: servertransports.yaml'
+    source: inferred
+    confidence: medium
+  tlsoptions.yaml:
+    summary: 'K8s TLSOption: tlsoptions.yaml'
+    source: inferred
+    confidence: medium
+  values.yaml:
+    summary: 'Manifest: values.yaml'
+    source: inferred
+    confidence: medium

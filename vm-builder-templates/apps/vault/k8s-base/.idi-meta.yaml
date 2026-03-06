@@ -1,0 +1,39 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  configmap.yaml:
+    summary: 'K8s ConfigMap: configmap.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium
+  service.yaml:
+    summary: 'K8s Service: service.yaml'
+    source: inferred
+    confidence: medium
+  statefulset.yaml:
+    summary: 'K8s StatefulSet: statefulset.yaml'
+    source: inferred
+    confidence: medium
+  vault-configmap.yaml:
+    summary: 'K8s ConfigMap: vault-configmap.yaml'
+    source: inferred
+    confidence: medium
+  vault-server-statefulset.yaml:
+    summary: 'K8s StatefulSet: vault-server-statefulset.yaml'
+    source: inferred
+    confidence: medium
+  vault-service.yaml:
+    summary: 'K8s Service: vault-service.yaml'
+    source: inferred
+    confidence: medium
+  vault-serviceaccount.yaml:
+    summary: 'K8s ServiceAccount: vault-serviceaccount.yaml'
+    source: inferred
+    confidence: medium

@@ -1,0 +1,251 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/operations/datasource-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "grafana.datasources.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/operations/datasource-create.yml"
+#     category: "platform"
+#     subsystem: "grafana"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "grafana"
+#       supported_versions: ["10.x", "11.x"]
+#       version_range: ">=10.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - grafana: "11.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Grafana API schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_grafana_operations"
+#   dependencies: ["grafana_deployed", "grafana_admin_token_available"]
+#   provides: ["grafana_datasource_created"]
+#   tags: ["grafana", "datasources", "observability", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a datasource in Grafana. This operation is idempotent -
+#     if a datasource with the same name exists, it will be skipped.
+#     Supports all datasource types (prometheus, loki, elasticsearch, etc.).
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_token"
+#         purpose: "Grafana API admin token for authentication"
+#       - path: "_state.apps.grafana.url"
+#         purpose: "Grafana base URL"
+#
+#     writes:
+#       - path: "_state.apps.grafana.datasources.{datasource_name}.id"
+#         example: 1
+#       - path: "_state.apps.grafana.datasources.{datasource_name}.uid"
+#         example: "prometheus-1"
+#       - path: "_state.apps.grafana.datasources.{datasource_name}.type"
+#         example: "prometheus"
+
+- name: Grafana - Create Datasource
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    grafana_base_url: "{{ grafana_url }}"
+    grafana_api_base: "{{ grafana_base_url }}/api"
+    endpoint: "/datasources"
+
+    # Required fields (must be provided by caller)
+    # name: Datasource name (required)
+    # type: Datasource type e.g. prometheus, loki, elasticsearch (required)
+    # access: Access mode - proxy or direct (required)
+
+    # Optional fields with sensible defaults
+    url: "{{ url_input | default('') }}"
+    is_default: "{{ is_default_input | default(false) }}"
+    database: "{{ database_input | default(omit) }}"
+    basic_auth: "{{ basic_auth_input | default(false) }}"
+    basic_auth_user: "{{ basic_auth_user_input | default(omit) }}"
+    json_data: "{{ json_data_input | default({}) }}"
+    secure_json_data: "{{ secure_json_data_input | default({}) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - name is defined and name | length > 0
+          - type is defined and type | length > 0
+          - access is defined and access in ['proxy', 'direct']
+        fail_msg: "Required inputs missing: name, type, access (proxy/direct)"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Grafana admin token
+      ansible.builtin.set_fact:
+        grafana_admin_token: >-
+          {{
+            inventory._state.apps.grafana.admin_token | default(grafana_token)
+          }}
+      no_log: true
+
+    - name: Override base URL from inventory if available
+      ansible.builtin.set_fact:
+        grafana_base_url: "{{ inventory._state.apps.grafana.url }}"
+        grafana_api_base: "{{ inventory._state.apps.grafana.url }}/api"
+      when: inventory._state.apps.grafana.url is defined
+
+    # ===== STEP 3: Check for Existing Datasource (Idempotency) =====
+    - name: Check if datasource already exists by name
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/datasources/name/{{ name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200, 404]
+        validate_certs: false
+      register: existing_datasource
+      no_log: false
+
+    - name: Set existing datasource fact
+      ansible.builtin.set_fact:
+        datasource_exists: "{{ existing_datasource.status == 200 }}"
+        existing_datasource_data: "{{ existing_datasource.json if existing_datasource.status == 200 else {} }}"
+
+    - name: Skip creation if datasource exists
+      ansible.builtin.debug:
+        msg: "Datasource '{{ name }}' already exists with ID {{ existing_datasource_data.id }}"
+      when: datasource_exists
+
+    # ===== STEP 4: Build Datasource Payload =====
+    - name: Build datasource creation payload
+      ansible.builtin.set_fact:
+        datasource_payload:
+          name: "{{ name }}"
+          type: "{{ type }}"
+          access: "{{ access }}"
+          url: "{{ url if url | length > 0 else omit }}"
+          isDefault: "{{ is_default }}"
+          database: "{{ database | default(omit) }}"
+          basicAuth: "{{ basic_auth }}"
+          basicAuthUser: "{{ basic_auth_user | default(omit) }}"
+          jsonData: "{{ json_data if json_data | length > 0 else omit }}"
+          secureJsonData: "{{ secure_json_data if secure_json_data | length > 0 else omit }}"
+      when: not datasource_exists
+      no_log: true
+
+    # ===== STEP 5: Create Datasource =====
+    - name: Create datasource in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ datasource_payload }}"
+        status_code: [200, 201]
+        validate_certs: false
+      register: create_result
+      no_log: true
+      when: not datasource_exists
+
+    - name: Set datasource result from creation or existing
+      ansible.builtin.set_fact:
+        datasource_id: >-
+          {{ existing_datasource_data.id if datasource_exists else create_result.json.datasource.id }}
+        datasource_uid: >-
+          {{ existing_datasource_data.uid if datasource_exists else create_result.json.datasource.uid }}
+      no_log: false
+
+    # ===== STEP 6: Test Datasource Connection =====
+    - name: Test datasource connection
+      ansible.builtin.uri:
+        url: "{{ grafana_api_base }}/datasources/uid/{{ datasource_uid }}/health"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ grafana_admin_token }}"
+        status_code: [200, 400, 502]
+        validate_certs: false
+      register: health_check
+      failed_when: false
+      no_log: false
+
+    - name: Report datasource health status
+      ansible.builtin.debug:
+        msg: >-
+          Datasource health: {{ health_check.json.status | default('unknown') }}
+          {% if health_check.json.message is defined %} - {{ health_check.json.message }}{% endif %}
+      when: health_check.json is defined
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Derive datasource key name for BWS writeback
+      ansible.builtin.set_fact:
+        datasource_key: "{{ name | lower | regex_replace('[^a-z0-9-]', '-') }}"
+      no_log: false
+
+    - name: Update BWS inventory with datasource info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge datasource info into _state.apps.grafana.datasources
+        UPDATED=$(echo "$CURRENT" | jq --arg ds "{{ datasource_key }}" \
+          --argjson ds_id {{ datasource_id }} \
+          --arg ds_uid "{{ datasource_uid }}" \
+          --arg ds_type "{{ type }}" \
+          '
+          if ._state.apps.grafana == null then ._state.apps.grafana = {} else . end |
+          if ._state.apps.grafana.datasources == null then ._state.apps.grafana.datasources = {} else . end |
+          if ._state.apps.grafana.datasources[$ds] == null then ._state.apps.grafana.datasources[$ds] = {} else . end |
+          ._state.apps.grafana.datasources[$ds].id = $ds_id |
+          ._state.apps.grafana.datasources[$ds].uid = $ds_uid |
+          ._state.apps.grafana.datasources[$ds].type = $ds_type
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: not datasource_exists
+
+    # ===== STEP 8: Output Result =====
+    - name: Display datasource creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if datasource_exists else 'created' }}"
+          datasource_id: "{{ datasource_id }}"
+          datasource_uid: "{{ datasource_uid }}"
+          name: "{{ name }}"
+          type: "{{ type }}"
+          health: "{{ health_check.json.status | default('not_checked') }}"

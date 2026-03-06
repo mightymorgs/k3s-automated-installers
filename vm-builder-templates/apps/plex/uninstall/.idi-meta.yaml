@@ -1,0 +1,7 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-remove.yml:
+    summary: 'Manifest: 01-remove.yml'
+    source: inferred
+    confidence: medium

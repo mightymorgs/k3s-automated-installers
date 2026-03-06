@@ -1,0 +1,433 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/02-configure-repo-sync"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/config/01-configure-repo-sync.yml"
+#     category: "apps"
+#     subsystem: "awx"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["awx_operator_deployed", "awx_instance_running"]
+#   provides: ["awx_repo_configured", "awx_project_synced", "awx_inventory_created"]
+#   tags: ["awx", "configuration", "git", "repository"]
+#   idempotent: true
+#   estimated_duration: 120
+#   parallel_safe: false
+#   description: Configure AWX repository sync and create initial inventory and job templates
+- name: Configure AWX Repository Sync
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    awx_namespace: "awx"
+    # awx_url: from BWS _state via Phase 4 extra-vars
+    awx_api_url: "{{ awx_url }}/api/v2"
+    awx_username: admin
+    repo_url: "{{ awx_repo_url }}"
+    repo_branch: "{{ awx_repo_branch }}"
+    project_name: media-stack-repo
+    inventory_name: k3s-cluster
+    organization_id: 1  # Default organization
+    bws_awx_admin_password_key: awx/admin_password
+    bws_github_ssh_key: github/deploy_key_private
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+  tasks:
+    # ========================================
+    # CHECK IF AWX IS DEPLOYED
+    # ========================================
+    - name: Check if AWX is deployed
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ awx_namespace }} -l app.kubernetes.io/name=awx
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: awx_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set AWX availability fact
+      ansible.builtin.set_fact:
+        awx_available: "{{ awx_check.rc == 0 and awx_check.stdout | length > 0 }}"
+
+    - name: Skip if AWX not deployed
+      ansible.builtin.debug:
+        msg: "AWX not deployed - skipping configuration"
+      when: not awx_available
+
+    - name: End play if AWX not available
+      ansible.builtin.meta: end_play
+      when: not awx_available
+
+    - name: Display AWX configuration information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Configuring AWX Repository Sync
+          - ==========================================
+          - 'AWX API: {{ awx_api_url }}'
+          - 'Repository: {{ repo_url }}'
+          - 'Branch: {{ repo_branch }}'
+          - 'Project: {{ project_name }}'
+          - 'Inventory: {{ inventory_name }}'
+          - ==========================================
+    - name: Check if BWS CLI is available
+      ansible.builtin.command: which bws
+      register: bws_check
+      failed_when: false
+      changed_when: false
+    - name: Retrieve AWX admin password from BWS
+      ansible.builtin.command:
+        cmd: bws secret get "{{ bws_awx_admin_password_key }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_password
+      changed_when: false
+      no_log: true
+      when: bws_check.rc == 0
+    - name: Parse AWX admin password
+      ansible.builtin.set_fact:
+        awx_admin_password: '{{ (bws_password.stdout | from_json).value }}'
+      no_log: true
+      when: bws_check.rc == 0
+    - name: Fail if password not available
+      ansible.builtin.fail:
+        msg: AWX admin password not found in BWS. Please run 01-deploy-operator.yml
+          first.
+      when: [bws_check.rc == 0, awx_admin_password is not defined]
+    - name: Wait for AWX API to be accessible
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/ping/'
+        method: GET
+        status_code: 200
+        validate_certs: false
+      register: awx_ping
+      until: awx_ping.status == 200
+      retries: 30
+      delay: 10
+    - name: Display AWX API status
+      ansible.builtin.debug:
+        msg:
+          - AWX API is accessible
+          - "Version: {{ awx_ping.json.version | default('unknown') }}"
+          - 'Instance: {{ awx_ping.json.instances | default([]) | length }} instance(s)'
+    - name: Get AWX API token
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/tokens/'
+        method: POST
+        user: '{{ awx_username }}'
+        password: '{{ awx_admin_password }}'
+        force_basic_auth: true
+        body_format: json
+        body:
+          description: Ansible automation token
+          scope: write
+        status_code: [201]
+        validate_certs: false
+      register: awx_token
+      no_log: true
+    - name: Set AWX API token fact
+      ansible.builtin.set_fact:
+        awx_api_token: '{{ awx_token.json.token }}'
+      no_log: true
+    - name: Check if SSH credential already exists
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/credentials/?name=GitHub%20SSH%20Deploy%20Key'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: existing_credential
+    - name: Retrieve GitHub SSH deploy key from BWS
+      ansible.builtin.command:
+        cmd: bws secret get "{{ bws_github_ssh_key }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_ssh_key
+      changed_when: false
+      no_log: true
+      when: [bws_check.rc == 0, existing_credential.json.count == 0]
+    - name: Parse GitHub SSH key
+      ansible.builtin.set_fact:
+        github_ssh_key: '{{ (bws_ssh_key.stdout | from_json).value }}'
+      no_log: true
+      when: [bws_check.rc == 0, existing_credential.json.count == 0]
+    - name: Create SSH credential for GitHub
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/credentials/'
+        method: POST
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        body_format: json
+        body:
+          name: GitHub SSH Deploy Key
+          description: SSH key for accessing media-stack repository
+          organization: '{{ organization_id }}'
+          credential_type: 2  # Source Control credential type
+          inputs:
+            username: git
+            ssh_key_data: '{{ github_ssh_key }}'
+        status_code: [201]
+        validate_certs: false
+      register: credential_create
+      no_log: true
+      when: [existing_credential.json.count == 0, github_ssh_key is defined]
+    - name: Set credential ID
+      ansible.builtin.set_fact:
+        credential_id: >-
+          {{
+            credential_create.json.id if credential_create is not skipped
+            else existing_credential.json.results[0].id
+          }}
+    - name: Display credential status
+      ansible.builtin.debug:
+        msg: >-
+          GitHub SSH credential {{ 'created' if credential_create is not skipped else 'already exists' }}
+          (ID: >-
+            {{ credential_id }})
+    - name: Check if project already exists
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/projects/?name={{ project_name | urlencode }}'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: existing_project
+    - name: Create AWX project for media-stack repository
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/projects/'
+        method: POST
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        body_format: json
+        body:
+          name: '{{ project_name }}'
+          description: Media Stack Infrastructure Repository
+          organization: '{{ organization_id }}'
+          scm_type: git
+          scm_url: '{{ repo_url }}'
+          scm_branch: '{{ repo_branch }}'
+          scm_clean: true
+          scm_delete_on_update: false
+          scm_update_on_launch: true
+          scm_update_cache_timeout: 0
+          credential: '{{ credential_id }}'
+        status_code: [201]
+        validate_certs: false
+      register: project_create
+      when: existing_project.json.count == 0
+    - name: Set project ID
+      ansible.builtin.set_fact:
+        project_id: >-
+          {{ project_create.json.id if project_create is not skipped else existing_project.json.results[0].id }}
+    - name: Display project status
+      ansible.builtin.debug:
+        msg: >-
+          Project '{{ project_name }}' {{ 'created' if project_create is not skipped else 'already exists' }}
+          (ID: >-
+            {{ project_id }})
+    - name: Trigger initial project sync
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/projects/{{ project_id }}/update/'
+        method: POST
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        body_format: json
+        body: {}
+        status_code: [202]
+        validate_certs: false
+      register: project_sync
+    - name: Wait for project sync to complete
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/project_updates/{{ project_sync.json.id }}/'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: sync_status
+      until: sync_status.json.status in ['successful', 'failed', 'error', 'canceled']
+      retries: 60
+      delay: 5
+    - name: Display project sync status
+      ansible.builtin.debug:
+        msg:
+          - Project sync {{ sync_status.json.status }}
+          - 'Started: {{ sync_status.json.started }}'
+          - 'Finished: {{ sync_status.json.finished }}'
+    - name: Fail if project sync failed
+      ansible.builtin.fail:
+        msg: Project sync failed. Check AWX logs for details.
+      when: sync_status.json.status != 'successful'
+    - name: Check if inventory already exists
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/inventories/?name={{ inventory_name | urlencode
+          }}'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: existing_inventory
+    - name: Create AWX inventory for K3s cluster
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/inventories/'
+        method: POST
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        body_format: json
+        body:
+          name: '{{ inventory_name }}'
+          description: K3s cluster localhost inventory
+          organization: '{{ organization_id }}'
+          variables: |
+            ---
+            ansible_connection: local
+            ansible_python_interpreter: /usr/bin/python3
+        status_code: [201]
+        validate_certs: false
+      register: inventory_create
+      when: existing_inventory.json.count == 0
+    - name: Set inventory ID
+      ansible.builtin.set_fact:
+        inventory_id: >-
+          {{ inventory_create.json.id if inventory_create is not skipped else existing_inventory.json.results[0].id }}
+    - name: Display inventory status
+      ansible.builtin.debug:
+        msg: >-
+          Inventory '{{ inventory_name }}' {{ 'created' if inventory_create is not skipped else 'already exists' }}
+          (ID: >-
+            {{ inventory_id }})
+    - name: Check if localhost host already exists in inventory
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/inventories/{{ inventory_id }}/hosts/?name=localhost'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: existing_host
+    - name: Add localhost to inventory
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/inventories/{{ inventory_id }}/hosts/'
+        method: POST
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        body_format: json
+        body:
+          name: localhost
+          description: Local Kubernetes control plane
+          enabled: true
+          variables: |
+            ---
+            ansible_connection: local
+            ansible_python_interpreter: /usr/bin/python3
+        status_code: [201]
+        validate_certs: false
+      register: host_create
+      when: existing_host.json.count == 0
+    - name: Display host status
+      ansible.builtin.debug:
+        msg: Host 'localhost' {{ 'added' if host_create is not skipped else 'already exists' }}
+          in inventory
+    - name: Check if example job template already exists
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/job_templates/?name=Example%3A%20K3s%20Status%20Check'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: existing_template
+    - name: Create example job template
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/job_templates/'
+        method: POST
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        body_format: json
+        body:
+          name: 'Example: K3s Status Check'
+          description: Example job template to verify AWX can run playbooks
+          job_type: run
+          inventory: '{{ inventory_id }}'
+          project: '{{ project_id }}'
+          playbook: apps/awx/config/06-verify-cluster.yml
+          verbosity: 1
+          extra_vars: |
+            ---
+            target_hosts: localhost
+        status_code: [201]
+        validate_certs: false
+      register: template_create
+      when: existing_template.json.count == 0
+      failed_when: false
+    - name: Display job template status
+      ansible.builtin.debug:
+        msg: >-
+          Job template 'Example: >-
+            K3s Status Check' {{ 'created' if template_create is not skipped else 'already exists' }}
+    - name: Get all projects
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/projects/'
+        method: GET
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [200]
+      register: all_projects
+    - name: Display final configuration summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - AWX Configuration Complete!
+          - ==========================================
+          - ''
+          - 'Projects: {{ all_projects.json.count }} project(s)'
+          - '  - {{ project_name }}: Synced from {{ repo_url }}'
+          - '    Status: {{ sync_status.json.status }}'
+          - '    Branch: {{ repo_branch }}'
+          - ''
+          - 'Inventories: 1 inventory'
+          - '  - {{ inventory_name }}: K3s cluster (localhost)'
+          - ''
+          - 'Job Templates: 1 template'
+          - '  - Example: K3s Status Check'
+          - ''
+          - ==========================================
+          - Next Steps
+          - ==========================================
+          - ''
+          - '1. Access AWX UI:'
+          - '   kubectl port-forward svc/awx-service -n awx 8081:80'
+          - '   http://localhost:8081'
+          - ''
+          - 2. Navigate to Resources → Projects to view synced playbooks
+          - ''
+          - '3. Create additional Job Templates for:'
+          - '   - Application deployments'
+          - '   - Backup operations'
+          - '   - Cluster maintenance'
+          - ''
+          - 4. Set up Workflows for complex multi-step operations
+          - ''
+          - 5. Configure notifications (Slack, email, webhooks)
+          - ''
+          - 'Documentation:'
+          - '  - AWX README: apps/awx/k8s-base/README.md'
+          - '  - Architecture: docs/ARCHITECTURE.md'
+          - ''
+          - ==========================================
+    - name: Revoke API token
+      ansible.builtin.uri:
+        url: '{{ awx_api_url }}/tokens/{{ awx_token.json.id }}/'
+        method: DELETE
+        headers:
+          Authorization: Bearer {{ awx_api_token }}
+        validate_certs: false
+        status_code: [204]
+      no_log: true

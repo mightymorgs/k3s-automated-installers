@@ -1,0 +1,11 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  smb-pv.yaml.j2:
+    summary: 'Jinja2 template: smb-pv.yaml.j2'
+    source: inferred
+    confidence: medium
+  smb-pvc.yaml.j2:
+    summary: 'Jinja2 template: smb-pvc.yaml.j2'
+    source: inferred
+    confidence: medium

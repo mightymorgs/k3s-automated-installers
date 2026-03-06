@@ -1,0 +1,24 @@
+---
+# qBittorrent Service (J2 template)
+# Defaults match k8s-standalone/base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('qbittorrent') }}
+  namespace: {{ app_namespace | default('media-stack') }}
+  labels:
+    app: {{ app_name | default('qbittorrent') }}
+    app.kubernetes.io/name: {{ app_name | default('qbittorrent') }}
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('qbittorrent') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(8081) }}
+      targetPort: {{ container_port | default(8081) }}
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30081) }}
+{% endif %}
+      protocol: TCP

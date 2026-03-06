@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: longhorn-config
+  namespace: longhorn
+  labels:
+    app.kubernetes.io/name: longhorn
+data:
+  # Configuration will be populated by ansible
+  APP_URL: "https://longhorn.example.com"

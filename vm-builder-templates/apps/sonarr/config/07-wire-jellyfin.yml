@@ -1,0 +1,142 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/sonarr/07-wire-jellyfin"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/sonarr/config/07-wire-jellyfin.yml"
+#     category: "apps"
+#     subsystem: "sonarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["sonarr_deployed", "jellyfin_deployed"]
+#   provides: ["sonarr_jellyfin_wired"]
+#   tags: ["sonarr", "jellyfin", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Register Jellyfin as notification connection in Sonarr for library refresh on episode import
+#   requires_apps: ["sonarr", "jellyfin"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.sonarr.api_key"
+#       - path: "_state.apps.jellyfin.api_key"
+
+- name: Wire Jellyfin into Sonarr
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    jellyfin_namespace: "jellyfin"
+    sonarr_namespace: "media-stack"
+    app_namespace: "{{ sonarr_namespace }}"
+    # sonarr_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF JELLYFIN NOT INSTALLED ==========
+    - name: Skip if jellyfin is not installed on this VM
+      when: jellyfin_api_key is not defined
+      block:
+        - name: "jellyfin not installed — skipping sonarr <-> jellyfin wiring"
+          ansible.builtin.debug:
+            msg: "jellyfin is not installed on this VM (no jellyfin_api_key in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if sonarr_api_key not provided
+      ansible.builtin.fail:
+        msg: "sonarr_api_key must be provided via extra-vars (from BWS inventory)"
+      when: sonarr_api_key is not defined or sonarr_api_key | length == 0
+
+    - name: Fail if jellyfin_api_key not provided
+      ansible.builtin.fail:
+        msg: "jellyfin_api_key must be provided via extra-vars (from BWS inventory)"
+      when: jellyfin_api_key is not defined or jellyfin_api_key | length == 0
+
+    # ========== VERIFY SONARR API ==========
+    - name: Verify Sonarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Sonarr API not accessible
+      ansible.builtin.fail:
+        msg: "Sonarr API not accessible at {{ sonarr_url }} (status: {{ api_status.status | default('no response') }}). App is installed but API unreachable."
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== CHECK EXISTING NOTIFICATIONS ==========
+    - name: Get existing notifications
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/notification"
+        method: GET
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        status_code: [200]
+      register: existing_notifications
+
+    - name: Check if Jellyfin notification already exists
+      ansible.builtin.set_fact:
+        jellyfin_notification_exists: "{{ (existing_notifications.json | selectattr('name', 'equalto', 'Jellyfin') | list | length) > 0 }}"
+
+    # ========== ADD JELLYFIN NOTIFICATION ==========
+    # Sonarr uses the "Emby" implementation for both Emby and Jellyfin servers
+    - name: Add Jellyfin as notification connection
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/notification"
+        method: POST
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Jellyfin"
+          implementation: "Emby"
+          configContract: "MediaBrowserSettings"
+          onDownload: true
+          onUpgrade: true
+          onRename: true
+          onSeriesAdd: false
+          onSeriesDelete: false
+          fields:
+            - name: "host"
+              value: "{{ jellyfin_service_name }}.{{ jellyfin_namespace }}.svc.cluster.local"
+            - name: "port"
+              value: "{{ jellyfin_service_port }}"
+            - name: "apiKey"
+              value: "{{ jellyfin_api_key }}"
+            - name: "useSsl"
+              value: false
+            - name: "sendNotifications"
+              value: true
+            - name: "updateLibrary"
+              value: true
+        status_code: [200, 201]
+        return_content: true
+      register: add_jellyfin_result
+      when: not jellyfin_notification_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Sonarr <-> Jellyfin Wiring Complete"
+          - "=========================================="
+          - "Notification: Jellyfin ({{ 'added' if (not jellyfin_notification_exists and add_jellyfin_result is defined and add_jellyfin_result.status | default(0) in [200, 201]) else ('exists' if jellyfin_notification_exists else 'FAILED') }})"
+          - "Events: onDownload, onUpgrade, onRename"
+          - "Library update: enabled"
+          - "=========================================="

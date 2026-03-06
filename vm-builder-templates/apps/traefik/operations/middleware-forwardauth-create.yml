@@ -1,0 +1,288 @@
+---
+# playbook_metadata:
+#   id: "atomic/traefik/middleware/forwardauth/create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   operation_id: "traefik.middleware.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/operations/middleware-forwardauth-create.yml"
+#     category: "platform"
+#     subsystem: "traefik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "traefik"
+#       supported_versions: ["2.10.x", "2.11.x", "3.0.x", "3.1.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       traefik: ">=2.10.0"
+#       authentik: ">=2024.0.0"
+#       k3s: ">=1.28.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - traefik: "3.1.x"
+#         authentik: "2025.1.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "ForwardAuth middleware for Authentik SSO integration"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["traefik_installed", "authentik_deployed"]
+#   provides: ["forwardauth_middleware_created"]
+#   tags: ["traefik", "middleware", "forwardauth", "authentik", "sso", "phase5"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a Traefik ForwardAuth middleware for Authentik SSO integration.
+#     Configures authentication delegation to Authentik's outpost endpoint
+#     with proper header forwarding for user identity.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "ingress.mode"
+#         purpose: "Determine ingress mode for auth URL construction"
+#       - path: "ingress.domain"
+#         purpose: "Cloudflare domain for auth URL"
+#       - path: "_state.tailscale.tailnet"
+#         purpose: "Tailscale tailnet for auth URL"
+#
+#     writes:
+#       - path: "_state.sso.forwardauth_middleware"
+#         example: "authentik-forwardauth"
+#       - path: "_state.sso.forwardauth_namespace"
+#         example: "authentik"
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     required:
+#       - name: auth_url
+#         description: "URL of the Authentik ForwardAuth endpoint"
+#     optional:
+#       - name: middleware_name
+#         description: "Name of the middleware (default: authentik-forwardauth)"
+#       - name: namespace
+#         description: "Namespace for the middleware (default: authentik)"
+#       - name: trust_forward_header
+#         description: "Trust X-Forwarded-* headers (default: true)"
+#       - name: auth_response_headers
+#         description: "Headers to copy from auth response to upstream"
+#       - name: auth_request_headers
+#         description: "Headers to copy from request to auth service"
+
+- name: Traefik - Create ForwardAuth Middleware
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    # Authentication URL (required if not using BWS)
+    auth_url: "{{ auth_url | default(omit) }}"
+
+    # Optional parameters with defaults
+    middleware_name: "authentik-forwardauth"
+    namespace: "authentik"
+    trust_forward_header: "{{ trust_forward_header | default(true) }}"
+
+    # Authentik standard response headers
+    auth_response_headers: "{{ auth_response_headers | default([
+      'X-authentik-username',
+      'X-authentik-groups',
+      'X-authentik-email',
+      'X-authentik-name',
+      'X-authentik-uid',
+      'X-authentik-jwt',
+      'X-authentik-meta-jwks',
+      'X-authentik-meta-outpost',
+      'X-authentik-meta-provider',
+      'X-authentik-meta-app',
+      'X-authentik-meta-version'
+    ]) }}"
+
+    # Optional request headers to forward
+    auth_request_headers: "{{ auth_request_headers | default([]) }}"
+
+    # BWS integration
+    bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') | default('', true) }}"
+    inventory_secret_name: "{{ bws_inventory_secret | default('', true) }}"
+
+    # Kubeconfig
+    k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+
+  tasks:
+    # ========== 1. DETERMINE AUTH URL ==========
+    - name: Check if auth_url is provided directly
+      when: auth_url is defined and auth_url != omit and auth_url | length > 0
+      ansible.builtin.set_fact:
+        final_auth_url: "{{ auth_url }}"
+
+    - name: Get auth URL from BWS if not provided
+      when: >-
+        (auth_url is not defined or auth_url == omit or auth_url | length == 0) and
+        bws_access_token | length > 0 and
+        inventory_secret_name | length > 0
+      block:
+        - name: Fetch inventory from BWS
+          ansible.builtin.shell: |
+            bws secret get {{ inventory_secret_name }} --output json
+          environment:
+            BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+          register: inventory_raw
+          changed_when: false
+          no_log: true
+
+        - name: Parse inventory
+          ansible.builtin.set_fact:
+            inventory: "{{ (inventory_raw.stdout | from_json).value | from_json }}"
+          no_log: true
+
+        - name: Extract ingress configuration
+          ansible.builtin.set_fact:
+            ingress_mode: "{{ inventory.ingress.mode }}"
+            ingress_domain: "{{ inventory.ingress.domain | default('') }}"
+            tailnet: "{{ inventory._state.tailscale.tailnet | default('') }}"
+
+        - name: Construct auth URL for Cloudflare mode
+          when: ingress_mode == 'cloudflare'
+          ansible.builtin.set_fact:
+            final_auth_url: "https://{{ ingress_domain }}/outpost.goauthentik.io/auth/traefik"
+
+        - name: Construct auth URL for Tailscale mode
+          when: ingress_mode == 'tailscale'
+          ansible.builtin.set_fact:
+            final_auth_url: "https://authentik.{{ vm_hostname }}.{{ tailnet }}/outpost.goauthentik.io/auth/traefik"
+
+    # ========== 2. VALIDATE AUTH URL ==========
+    - name: Validate auth_url is set
+      ansible.builtin.assert:
+        that:
+          - final_auth_url is defined
+          - final_auth_url | length > 0
+        fail_msg: >-
+          auth_url is required. Provide it directly or ensure BWS_ACCESS_TOKEN
+          and BWS_INVENTORY_SECRET environment variables are set.
+
+    - name: Display ForwardAuth configuration
+      ansible.builtin.debug:
+        msg:
+          - "Middleware Name: {{ middleware_name }}"
+          - "Namespace: {{ namespace }}"
+          - "Auth URL: {{ final_auth_url }}"
+          - "Trust Forward Headers: {{ trust_forward_header }}"
+
+    # ========== 3. ENSURE NAMESPACE EXISTS ==========
+    - name: Check if namespace exists
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: Namespace
+        name: "{{ namespace }}"
+      register: namespace_check
+
+    - name: Create namespace if it doesn't exist
+      kubernetes.core.k8s:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ namespace }}"
+      when: namespace_check.resources | length == 0
+
+    # ========== 4. CREATE FORWARDAUTH MIDDLEWARE CRD ==========
+    - name: Create ForwardAuth middleware
+      kubernetes.core.k8s:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: Middleware
+          metadata:
+            name: "{{ middleware_name }}"
+            namespace: "{{ namespace }}"
+            labels:
+              app.kubernetes.io/name: "{{ middleware_name }}"
+              app.kubernetes.io/component: forwardauth-middleware
+              app.kubernetes.io/managed-by: ansible
+              generated-by: idi
+          spec:
+            forwardAuth:
+              address: "{{ final_auth_url }}"
+              trustForwardHeader: "{{ trust_forward_header }}"
+              authResponseHeaders: "{{ auth_response_headers }}"
+              authRequestHeaders: "{{ auth_request_headers if auth_request_headers | length > 0 else omit }}"
+      register: middleware_result
+
+    # ========== 5. UPDATE BWS STATE (if enabled) ==========
+    - name: Update BWS state with middleware info
+      when: >-
+        bws_access_token | length > 0 and
+        inventory_secret_name | length > 0 and
+        inventory is defined
+      block:
+        - name: Build updated state
+          ansible.builtin.set_fact:
+            updated_state: >-
+              {{
+                inventory | combine({
+                  '_state': inventory._state | default({}) | combine({
+                    'sso': inventory._state.sso | default({}) | combine({
+                      'forwardauth_middleware': middleware_name,
+                      'forwardauth_namespace': namespace,
+                      'forwardauth_auth_url': final_auth_url
+                    }, recursive=True)
+                  }, recursive=True)
+                }, recursive=True)
+              }}
+          no_log: true
+
+        - name: Write updated state to BWS
+          ansible.builtin.shell: |
+            echo '{{ updated_state | to_json }}' | \
+              bws secret edit {{ inventory_secret_name }} --value -
+          environment:
+            BWS_ACCESS_TOKEN: "{{ bws_access_token }}"
+          no_log: true
+          changed_when: true
+
+    # ========== 6. VERIFICATION ==========
+    - name: Verify ForwardAuth middleware was created
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: Middleware
+        api_version: traefik.io/v1alpha1
+        name: "{{ middleware_name }}"
+        namespace: "{{ namespace }}"
+      register: verification
+      failed_when: verification.resources | length == 0
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "ForwardAuth Middleware Created Successfully"
+          - "=========================================="
+          - "Name: {{ middleware_name }}"
+          - "Namespace: {{ namespace }}"
+          - "Auth URL: {{ final_auth_url }}"
+          - "Trust Forward Headers: {{ trust_forward_header }}"
+          - ""
+          - "Response Headers Forwarded:"
+          - "{{ auth_response_headers | to_nice_yaml }}"
+          - ""
+          - "Usage in IngressRoute:"
+          - "  spec:"
+          - "    routes:"
+          - "      - middlewares:"
+          - "          - name: {{ middleware_name }}"
+          - "            namespace: {{ namespace }}"
+          - "=========================================="

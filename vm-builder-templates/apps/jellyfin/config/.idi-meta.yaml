@@ -1,0 +1,49 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure Jellyfin network settings for Tailscale mode. Enables remote
+      access and trusts pod/Tailscale CIDR ranges as known proxies. Tailscale provides
+      the authentication layer.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ jellyfin_url }}/System/Info/Public'
+    - '{{ jellyfin_url }}/System/Info/Public'
+  05-configure-libraries.yml:
+    summary: Configure Jellyfin media libraries for TV Shows, Movies, and Music
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ jellyfin_url }}/System/Info/Public'
+    - '{{ jellyfin_url }}/Library/VirtualFolders'
+    - '{{ jellyfin_url }}/Library/VirtualFolders?name={{ ''TV Shows'' | urlencode
+      }}&collectionType=tvshows&paths={{ ''/media/tv'' | urlencode }}&refreshLibrary=false'
+    - '{{ jellyfin_url }}/Library/VirtualFolders?name={{ ''Movies'' | urlencode }}&collectionType=movies&paths={{
+      ''/media/movies'' | urlencode }}&refreshLibrary=false'
+    - '{{ jellyfin_url }}/Library/VirtualFolders?name={{ ''Music'' | urlencode }}&collectionType=music&paths={{
+      ''/media/music'' | urlencode }}&refreshLibrary=false'
+    - '{{ jellyfin_url }}/Library/Refresh'
+    - '{{ jellyfin_url }}/Library/VirtualFolders'
+  06-enable-metrics.yml:
+    summary: Enable Prometheus metrics scraping for Jellyfin. Sets the JELLYFIN_EnableMetrics=true
+      environment variable to activate the built-in metrics endpoint on port 8096,
+      then adds pod-level Prometheus scrape annotations so Prometheus auto-discovers
+      and scrapes the /metrics endpoint. No sidecar containers needed.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+  07-create-external-secret.yml:
+    summary: Create an ExternalSecret CRD in the jellyfin namespace that pulls the
+      Jellyfin API key from Vault via the ClusterSecretStore vault-backend. Creates
+      a K8s Secret 'jellyfin-secrets' with key 'api-key'.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - external-secrets
+    - vault
+depends_on_apps:
+- external-secrets
+- prometheus
+- vault

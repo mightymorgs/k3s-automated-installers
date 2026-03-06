@@ -1,0 +1,22 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-awx-config.yml:
+    summary: Verify that AWX is properly configured. Checks that the API is accessible,
+      projects exist and are synced, inventories have expected hosts, credentials
+      are valid, job templates are properly configured, and optionally verifies recent
+      job runs completed successfully. Provides a comprehensive health check.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_base }}/ping/'
+    - '{{ awx_api_base }}/me/'
+    - '{{ awx_api_base }}/projects/?page_size=100'
+    - '{{ awx_api_base }}/projects/?name={{ item | urlencode }}'
+    - '{{ awx_api_base }}/inventories/?page_size=100'
+    - '{{ awx_api_base }}/inventories/?name={{ item | urlencode }}'
+    - '{{ awx_api_base }}/credentials/?page_size=100'
+    - '{{ awx_api_base }}/credentials/?name={{ item | urlencode }}'
+    - '{{ awx_api_base }}/job_templates/?page_size=100'
+    - '{{ awx_api_base }}/job_templates/?name={{ item | urlencode }}'
+    - '{{ awx_api_base }}/jobs/?page_size=50&order_by=-finished'

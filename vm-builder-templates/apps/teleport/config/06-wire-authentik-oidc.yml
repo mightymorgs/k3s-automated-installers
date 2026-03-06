@@ -1,0 +1,165 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/teleport/06-wire-authentik-oidc"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/teleport/config/06-wire-authentik-oidc.yml"
+#     category: "platform"
+#     subsystem: "teleport"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["teleport_deployed", "authentik_deployed"]
+#   provides: ["teleport_sso_configured"]
+#   tags: ["teleport", "authentik", "sso", "oidc", "phase5"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Teleport OIDC SSO connector backed by Authentik.
+#     Creates an OIDC connector resource via tctl that maps the
+#     Authentik admins group to the Teleport admin role. Uses kubectl
+#     exec to run tctl inside the Teleport pod.
+#   requires_apps: ["teleport", "authentik"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.authentik.teleport_client_secret"
+#         purpose: "OIDC client secret for the Teleport OAuth application in Authentik"
+
+- name: Configure Teleport OIDC SSO via Authentik
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    teleport_namespace: "teleport"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+    # Tailnet domain for constructing URLs
+    tailnet_domain: "{{ tailnet | default('example.ts.net') }}"
+    # OIDC connector configuration
+    oidc_connector_name: authentik
+    oidc_client_id: "teleport"
+    oidc_issuer_url: "https://authentik.{{ tailnet_domain }}/application/o/teleport/"
+    oidc_redirect_url: "https://teleport.{{ tailnet_domain }}:443/v1/webapi/oidc/callback"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if authentik_teleport_client_secret not provided
+      ansible.builtin.fail:
+        msg: >-
+          authentik_teleport_client_secret must be provided via extra-vars.
+          This is the OIDC client secret from the Teleport OAuth application
+          created in Authentik.
+      when: authentik_teleport_client_secret is not defined or authentik_teleport_client_secret | length == 0
+
+    # ========== CHECK IF TELEPORT IS DEPLOYED ==========
+    - name: Check if Teleport pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ teleport_namespace }} -l app=teleport --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: teleport_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Teleport not deployed
+      ansible.builtin.meta: end_play
+      when: teleport_check.rc != 0 or teleport_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Teleport pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ teleport_namespace }} \
+          -l app.kubernetes.io/name=teleport \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ teleport_namespace }} \
+          -l app=teleport \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ========== CHECK IF OIDC CONNECTOR ALREADY EXISTS ==========
+    - name: Check if OIDC connector already exists
+      ansible.builtin.shell: |
+        kubectl exec -n {{ teleport_namespace }} {{ app_pod.stdout }} -- \
+          tctl get oidc/{{ oidc_connector_name }} 2>/dev/null && echo "exists" || echo "not_found"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: oidc_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set OIDC connector existence fact
+      ansible.builtin.set_fact:
+        oidc_connector_exists: "{{ 'exists' in oidc_check.stdout }}"
+
+    - name: Note OIDC connector already configured
+      ansible.builtin.debug:
+        msg: "OIDC connector '{{ oidc_connector_name }}' already exists - skipping creation"
+      when: oidc_connector_exists
+
+    # ========== CREATE OIDC CONNECTOR ==========
+    - name: Create OIDC connector via tctl
+      ansible.builtin.shell: |
+        kubectl exec -n {{ teleport_namespace }} {{ app_pod.stdout }} -i -- \
+          tctl create -f <<'OIDCEOF'
+        kind: oidc
+        version: v3
+        metadata:
+          name: {{ oidc_connector_name }}
+        spec:
+          issuer_url: "{{ oidc_issuer_url }}"
+          client_id: "{{ oidc_client_id }}"
+          client_secret: "{{ authentik_teleport_client_secret }}"
+          redirect_url:
+            - "{{ oidc_redirect_url }}"
+          claims_to_roles:
+            - claim: "groups"
+              value: "admins"
+              roles:
+                - "admin"
+                - "access"
+                - "editor"
+        OIDCEOF
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: oidc_create
+      changed_when: oidc_create.rc == 0
+      when: not oidc_connector_exists
+      no_log: true
+
+    # ========== VERIFY CONNECTOR WAS CREATED ==========
+    - name: Verify OIDC connector exists after creation
+      ansible.builtin.shell: |
+        kubectl exec -n {{ teleport_namespace }} {{ app_pod.stdout }} -- \
+          tctl get oidc/{{ oidc_connector_name }} 2>/dev/null && echo "verified" || echo "missing"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: oidc_verify
+      changed_when: false
+      failed_when: false
+      when: not oidc_connector_exists
+
+    - name: Set verification status
+      ansible.builtin.set_fact:
+        oidc_verified: "{{ oidc_connector_exists or ('verified' in (oidc_verify.stdout | default(''))) }}"
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display SSO configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Teleport OIDC SSO Configuration"
+          - "=========================================="
+          - "Connector: {{ oidc_connector_name }} ({{ 'exists' if oidc_connector_exists else ('created' if oidc_verified else 'FAILED') }})"
+          - "Issuer: {{ oidc_issuer_url }}"
+          - "Client ID: {{ oidc_client_id }}"
+          - "Redirect: {{ oidc_redirect_url }}"
+          - "Group Mapping: admins -> [admin, access, editor]"
+          - "Status: {{ 'OK' if oidc_verified else 'Check tctl logs' }}"
+          - "=========================================="

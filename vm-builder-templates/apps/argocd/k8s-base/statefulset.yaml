@@ -1,0 +1,55 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: argocd
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd
+    app.kubernetes.io/component: server
+spec:
+  serviceName: argocd
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: argocd
+        app.kubernetes.io/component: server
+    spec:
+      containers:
+        - name: argocd
+          image: quay.io/argoproj/argocd:v2.13.3
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+          command: ["argocd-server"]
+          ports:
+            - containerPort: 443
+              name: http
+          envFrom:
+            - configMapRef:
+                name: argocd-config
+            - secretRef:
+                name: argocd-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 10Gi

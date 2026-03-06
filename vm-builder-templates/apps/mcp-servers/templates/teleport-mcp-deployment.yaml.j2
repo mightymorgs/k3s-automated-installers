@@ -1,0 +1,65 @@
+---
+# Teleport MCP Server Deployment (J2 template)
+# Defaults match k8s-base/teleport-mcp-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teleport-mcp
+  namespace: {{ mcp_namespace | default('mcp-servers') }}
+  labels:
+    app.kubernetes.io/name: teleport-mcp
+    app.kubernetes.io/component: ai-operations
+    app.kubernetes.io/part-of: golden-master
+spec:
+  replicas: {{ teleport_mcp_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: teleport-mcp
+      app.kubernetes.io/component: ai-operations
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teleport-mcp
+        app.kubernetes.io/component: ai-operations
+        app.kubernetes.io/part-of: golden-master
+    spec:
+      containers:
+        - name: teleport-mcp
+          image: {{ teleport_mcp_image | default('ghcr.io/mightymorgs/teleport-mcp:latest') }}
+          imagePullPolicy: {{ teleport_mcp_image_pull_policy | default('Always') }}
+          env:
+            - name: TELEPORT_PROXY
+              value: "{{ teleport_mcp_proxy }}"
+            - name: TELEPORT_IDENTITY_FILE
+              value: "{{ teleport_mcp_identity_path | default('/etc/teleport/identity') }}"
+          ports:
+            - name: http
+              containerPort: {{ teleport_mcp_port | default(8080) }}
+              protocol: TCP
+          resources:
+            requests:
+              memory: {{ teleport_mcp_memory_request | default('128Mi') }}
+              cpu: {{ teleport_mcp_cpu_request | default('100m') }}
+            limits:
+              memory: {{ teleport_mcp_memory_limit | default('256Mi') }}
+              cpu: {{ teleport_mcp_cpu_limit | default('500m') }}
+          volumeMounts:
+            - name: identity
+              mountPath: /etc/teleport
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ teleport_mcp_port | default(8080) }}
+            initialDelaySeconds: {{ teleport_mcp_liveness_initial_delay | default(10) }}
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ teleport_mcp_port | default(8080) }}
+            initialDelaySeconds: {{ teleport_mcp_readiness_initial_delay | default(5) }}
+            periodSeconds: 10
+      volumes:
+        - name: identity
+          secret:
+            secretName: {{ teleport_mcp_identity_secret | default('teleport-mcp-identity') }}

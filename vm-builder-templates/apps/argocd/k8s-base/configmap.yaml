@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-config
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd
+data:
+  # Configuration will be populated by ansible
+  APP_URL: "https://argocd.example.com"

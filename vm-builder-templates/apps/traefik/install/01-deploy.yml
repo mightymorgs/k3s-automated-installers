@@ -1,0 +1,432 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/traefik/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "traefik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "traefik"
+#       supported_versions: ["v3.3.x", "v3.x"]
+#       version_range: ">=3.0.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - traefik: "v3.3"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-02-19"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260219_traefik_j2"
+#   dependencies: ["k3s_server_installed"]
+#   provides: ["traefik_deployed", "traefik_namespace_ready", "ingress_controller_ready"]
+#   tags: ["traefik", "ingress", "reverse-proxy", "j2-template", "golden-master"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Traefik v3 ingress controller via J2 templates.
+#     Replaces K3s bundled Traefik with standalone kustomize-based install.
+#     Includes CRDs, RBAC, middlewares, TLS options, and dashboard.
+#     Accessible via NodePort 30080 (HTTP) / 30443 (HTTPS).
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.traefik.status"
+#         example: "ready"
+#       - path: "_state.apps.traefik.dashboard_url"
+#         example: "https://traefik.example.com/dashboard/"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: true
+#     subdomain: "traefik"
+#     service_name: "api@internal"
+#     service_port: null
+#     namespace: "traefik"
+#     mode_from_inventory: "ingress.mode"
+#     cloudflare:
+#       tunnel_name: "{client}-tunnel"
+#       domain_from_inventory: "ingress.domain"
+#       origin_cert:
+#         enabled: true
+#         api_token_path: "inventory/shared/secrets/cloudflare/apitoken"
+#         cert_validity_days: 3650
+#     tailscale:
+#       in_cluster: true
+#       cert:
+#         method: "tailscale-cert"
+#     paths:
+#       - path: "/dashboard"
+#         path_type: "Prefix"
+#       - path: "/api"
+#         path_type: "Prefix"
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: true
+#     provider: "authentik"
+#     forwardauth:
+#       enabled: true
+#       trust_forward_header: true
+#       auth_url_template:
+#         cloudflare: "https://{domain}/outpost.goauthentik.io/auth/traefik"
+#         tailscale: "https://authentik.{tailnet}.ts.net/outpost.goauthentik.io/auth/traefik"
+#     bypass_paths: []
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Traefik"
+#     icon: "globe"
+#     category: "Platform"
+#     description: "Cloud-native reverse proxy and ingress controller"
+#     docs_url: "https://doc.traefik.io/traefik/"
+#     port: 8000
+#     nodeport: 30080
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     traefik_image:
+#       label: "Traefik Image"
+#       description: "Docker image for Traefik"
+#       type: "string"
+#       default: "traefik:v3.3"
+#     traefik_replicas:
+#       label: "Replicas"
+#       description: "Number of Traefik replicas"
+#       type: "integer"
+#       default: 1
+#     domain:
+#       label: "Domain"
+#       description: "Base domain for dashboard and routing"
+#       type: "string"
+#       required: true
+#     log_level:
+#       label: "Log Level"
+#       description: "Traefik log level"
+#       type: "string"
+#       default: "INFO"
+#     web_port:
+#       label: "HTTP Port"
+#       description: "Container port for HTTP entrypoint"
+#       type: "integer"
+#       default: 8000
+#     websecure_port:
+#       label: "HTTPS Port"
+#       description: "Container port for HTTPS entrypoint"
+#       type: "integer"
+#       default: 8443
+#     service_type:
+#       label: "Service Type"
+#       description: "Kubernetes service type"
+#       type: "string"
+#       default: "NodePort"
+#     traefik_cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "100m"
+#     traefik_memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "128Mi"
+#     traefik_cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "1000m"
+#     traefik_memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "512Mi"
+#     web_nodeport:
+#       label: "HTTP NodePort"
+#       description: "NodePort for HTTP traffic"
+#       type: "integer"
+#       default: 30080
+#     websecure_nodeport:
+#       label: "HTTPS NodePort"
+#       description: "NodePort for HTTPS traffic"
+#       type: "integer"
+#       default: 30443
+
+- name: Deploy Traefik
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: true
+  become: false
+
+  vars:
+    app_name: traefik
+    app_namespace: "traefik"
+    templates_dir: "{{ playbook_dir }}/../templates"
+    render_dir: "/tmp/traefik-manifests"
+    kubectl_action: "{{ 'replace --force' if install_mode | default('rebuild') == 'full' else 'apply' }}"
+    traefik_version: "v3.3.3"
+
+    # Global timeout constants
+    app_start_timeout_seconds: 600
+    retry_interval_seconds: 10
+    crds_url: "https://raw.githubusercontent.com/traefik/traefik/{{ traefik_version }}/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml"
+
+  tasks:
+    # ========== 1. VERIFY PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify K3s cluster is accessible
+      ansible.builtin.command: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      retries: 5
+      delay: "{{ retry_interval_seconds }}"
+      until: nodes_check.rc == 0
+
+    - name: Check for K3s bundled Traefik
+      ansible.builtin.shell: |
+        kubectl get deployment traefik -n kube-system 2>/dev/null && echo "BUNDLED_EXISTS" || echo "NOT_FOUND"
+      register: bundled_check
+      changed_when: false
+
+    - name: Remove K3s bundled Traefik if still present
+      when: "'BUNDLED_EXISTS' in bundled_check.stdout"
+      block:
+        - name: Delete K3s HelmChart CRs for traefik (prevents k3s from re-deploying)
+          ansible.builtin.shell: |
+            kubectl delete helmchart traefik -n kube-system --ignore-not-found
+            kubectl delete helmchart traefik-crd -n kube-system --ignore-not-found
+          changed_when: true
+
+        - name: Delete bundled traefik deployment and service (frees ports 30080/30443)
+          ansible.builtin.shell: |
+            kubectl delete deployment traefik -n kube-system --ignore-not-found
+            kubectl delete service traefik -n kube-system --ignore-not-found
+          changed_when: true
+
+        - name: Wait for bundled traefik pods to terminate
+          ansible.builtin.command: >-
+            kubectl -n kube-system wait --for=delete pod
+            -l app.kubernetes.io/name=traefik
+            --timeout=60s
+          changed_when: false
+          failed_when: false
+
+    # ========== 2. INSTALL TRAEFIK CRDS ==========
+    - name: Download Traefik CRD definitions
+      ansible.builtin.get_url:
+        url: "{{ crds_url }}"
+        dest: "/tmp/traefik-crds.yaml"
+        mode: '0644'
+
+    - name: Apply Traefik CRDs
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/traefik-crds.yaml
+      register: crds_apply
+      changed_when: "'created' in crds_apply.stdout or 'configured' in crds_apply.stdout"
+
+    - name: Wait for CRDs to be established
+      ansible.builtin.command: >-
+        kubectl wait --for=condition=established
+        crd/ingressroutes.traefik.io
+        crd/middlewares.traefik.io
+        crd/tlsoptions.traefik.io
+        crd/serverstransports.traefik.io
+        --timeout=60s
+      changed_when: false
+
+    # ========== 3. CREATE NAMESPACE ==========
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name=traefik
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 4. RENDER J2 TEMPLATES ==========
+    - name: Create render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render serviceaccount template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/serviceaccount.yaml.j2"
+        dest: "{{ render_dir }}/serviceaccount.yaml"
+        mode: '0644'
+
+    - name: Render RBAC template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/rbac.yaml.j2"
+        dest: "{{ render_dir }}/rbac.yaml"
+        mode: '0644'
+
+    - name: Render deployment template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/deployment.yaml.j2"
+        dest: "{{ render_dir }}/deployment.yaml"
+        mode: '0644'
+
+    - name: Render service template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/service.yaml.j2"
+        dest: "{{ render_dir }}/service.yaml"
+        mode: '0644'
+
+    - name: Render middlewares template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/middlewares.yaml.j2"
+        dest: "{{ render_dir }}/middlewares.yaml"
+        mode: '0644'
+
+    - name: Render TLS options template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/tlsoptions.yaml.j2"
+        dest: "{{ render_dir }}/tlsoptions.yaml"
+        mode: '0644'
+
+    - name: Render server transports template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/servertransports.yaml.j2"
+        dest: "{{ render_dir }}/servertransports.yaml"
+        mode: '0644'
+
+    - name: Render dashboard ingressroute template
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/dashboard-ingressroute.yaml.j2"
+        dest: "{{ render_dir }}/dashboard-ingressroute.yaml"
+        mode: '0644'
+
+    # ========== 5. APPLY RENDERED MANIFESTS ==========
+    # Split-apply: protected kinds always use kubectl apply (never replace --force).
+    # Prevents namespace cascade deletion and secret rotation on rebuild.
+    - name: Apply protected resources (Namespace, Secret, PVC, PushSecret)
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              kubectl apply -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: protected_apply
+      changed_when: "'created' in protected_apply.stdout or 'configured' in protected_apply.stdout"
+
+    - name: Apply workload resources
+      ansible.builtin.shell: |
+        for f in {{ render_dir }}/*.yaml; do
+          kind=$(grep -m1 '^kind:' "$f" 2>/dev/null | awk '{print $2}')
+          case "$kind" in
+            Namespace|Secret|PersistentVolumeClaim|PushSecret|ClusterRole|ClusterRoleBinding)
+              ;;  # already applied above
+            *)
+              kubectl {{ kubectl_action }} -f "$f" 2>&1 && echo "[APPLIED] $f"
+              ;;
+          esac
+        done
+      register: workload_apply
+      changed_when: "'created' in workload_apply.stdout or 'configured' in workload_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg:
+          - "Protected: {{ protected_apply.stdout_lines | default([]) }}"
+          - "Workloads: {{ workload_apply.stdout_lines | default([]) }}"
+
+    # ========== 6. WAIT FOR TRAEFIK ==========
+    - name: Wait for Traefik pod to be ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} wait
+        --for=condition=ready pod
+        -l app=traefik
+        --timeout={{ app_start_timeout_seconds }}s
+      register: traefik_wait
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: traefik_wait.rc == 0
+
+    # ========== 7. VERIFY HEALTH ==========
+    - name: Get ready pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app=traefik
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: traefik_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: traefik_pod.rc == 0 and traefik_pod.stdout != ''
+
+    - name: Test Traefik ping endpoint (auto-detect curl/wget)
+      ansible.builtin.command: >-
+        kubectl exec -n {{ app_namespace }} {{ traefik_pod.stdout }} --
+        /bin/sh -c "command -v curl >/dev/null
+        && curl -sf --max-time 5 http://127.0.0.1:8000/ping
+        || wget -q -O - --timeout=5 http://127.0.0.1:8000/ping"
+      register: ping_check
+      changed_when: false
+      failed_when: ping_check.rc != 0
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: ping_check.rc == 0
+
+    # ========== 8. DISPLAY STATUS ==========
+    - name: Get Tailscale IP for access URL
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Traefik Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Image: {{ traefik_image | default('traefik:v3.3') }}"
+          - "CRDs: {{ traefik_version }}"
+          - "HTTP:  http://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ web_nodeport | default(30080) }}"
+          - "HTTPS: https://{{ tailscale_ip.stdout | default(ansible_hostname) }}:{{ websecure_nodeport | default(30443) }}"
+          - "Dashboard: https://{{ traefik_hostname | default(\"traefik\") }}.{{ domain | default(\"example.local\") }}/dashboard/"
+          - "Ping: {{ 'OK' if ping_check.rc == 0 else 'Pending' }}"
+          - "=========================================="
+
+    # ========== 9. CLEANUP ==========
+    - name: Clean up render directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: absent
+
+    - name: Clean up CRDs download
+      ansible.builtin.file:
+        path: "/tmp/traefik-crds.yaml"
+        state: absent

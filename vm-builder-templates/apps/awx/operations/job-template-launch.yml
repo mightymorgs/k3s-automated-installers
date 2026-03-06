@@ -1,0 +1,332 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/operations/job-template-launch"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "awx.job_templates.launch"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/operations/job-template-launch.yml"
+#     category: "platform"
+#     subsystem: "awx"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["23.x", "24.x"]
+#       version_range: ">=23.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - awx: "24.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from AWX API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_awx_operations"
+#   dependencies: ["awx_deployed", "awx_job_template_created"]
+#   provides: ["awx_job_launched"]
+#   tags: ["awx", "job", "launch", "execution", "automation", "operations"]
+#   estimated_duration: 300
+#   parallel_safe: true
+#   idempotent: false
+#   description: >-
+#     Launch a job from an AWX job template with optional runtime overrides.
+#     Can optionally wait for job completion and return status. Supports
+#     extra vars, limit, tags, and other launch-time parameters.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.token"
+#         purpose: "AWX API token for authentication"
+#       - path: "_state.apps.awx.job_templates.{template_name}.id"
+#         purpose: "Job template ID to launch"
+#
+#     writes:
+#       - path: "_state.apps.awx.jobs.{job_id}.status"
+#         example: "successful"
+#       - path: "_state.apps.awx.jobs.{job_id}.template_name"
+#         example: "deploy-app"
+#       - path: "_state.apps.awx.job_templates.{template_name}.last_job_id"
+#         example: 142
+
+- name: AWX - Launch Job from Template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    awx_base_url: "{{ awx_url }}"
+    awx_api_base: "{{ awx_base_url }}/api/v2"
+
+    # Required fields - one of these must be provided
+    # job_template_name: Name of the job template to launch
+    # job_template_id: ID of the job template to launch (alternative to name)
+
+    # Optional launch overrides
+    launch_extra_vars: "{{ launch_extra_vars_input | default('') }}"
+    launch_inventory_id: "{{ launch_inventory_id_input | default(omit) }}"
+    launch_limit: "{{ launch_limit_input | default('') }}"
+    launch_job_tags: "{{ launch_job_tags_input | default('') }}"
+    launch_skip_tags: "{{ launch_skip_tags_input | default('') }}"
+    launch_job_type: "{{ launch_job_type_input | default(omit) }}"
+    launch_verbosity: "{{ launch_verbosity_input | default(omit) }}"
+    launch_diff_mode: "{{ launch_diff_mode_input | default(omit) }}"
+    launch_scm_branch: "{{ launch_scm_branch_input | default('') }}"
+
+    # Wait behavior
+    wait_for_completion: "{{ wait_for_completion_input | default(true) }}"
+    job_timeout_retries: "{{ job_timeout_retries_input | default(60) }}"
+    job_delay_seconds: "{{ job_delay_seconds_input | default(10) }}"
+    fail_on_job_failure: "{{ fail_on_job_failure_input | default(true) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate at least one identifier is provided
+      ansible.builtin.assert:
+        that:
+          - (job_template_name is defined and job_template_name | length > 0) or (job_template_id is defined)
+        fail_msg: "Required: Either job_template_name or job_template_id must be provided"
+        success_msg: "Job template identifier validated"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and AWX Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract AWX token
+      ansible.builtin.set_fact:
+        awx_token: "{{ inventory._state.apps.awx.token }}"
+      no_log: true
+
+    - name: Validate AWX token is available
+      ansible.builtin.assert:
+        that:
+          - awx_token | length > 0
+        fail_msg: "AWX token not found in BWS _state. Ensure AWX is configured."
+        success_msg: "AWX token retrieved from BWS _state"
+
+    # ===== STEP 4: Resolve Job Template ID =====
+    - name: Look up job template by name if ID not provided
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/?name={{ job_template_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: template_lookup
+      when: job_template_id is not defined
+      no_log: false
+
+    - name: Set job template ID from lookup
+      ansible.builtin.set_fact:
+        resolved_template_id: "{{ template_lookup.json.results[0].id }}"
+        resolved_template_name: "{{ template_lookup.json.results[0].name }}"
+      when: job_template_id is not defined and template_lookup.json.count > 0
+
+    - name: Use provided job template ID
+      ansible.builtin.set_fact:
+        resolved_template_id: "{{ job_template_id }}"
+        resolved_template_name: "{{ job_template_name | default('unknown') }}"
+      when: job_template_id is defined
+
+    - name: Validate job template was found
+      ansible.builtin.assert:
+        that:
+          - resolved_template_id is defined
+        fail_msg: "Job template '{{ job_template_name | default(job_template_id) }}' not found in AWX"
+        success_msg: "Job template found with ID: {{ resolved_template_id }}"
+
+    # ===== STEP 5: Build Launch Payload =====
+    - name: Initialize launch payload
+      ansible.builtin.set_fact:
+        launch_payload: {}
+
+    - name: Add extra_vars to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'extra_vars': launch_extra_vars}) }}"
+      when: launch_extra_vars | length > 0
+
+    - name: Add inventory override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'inventory': launch_inventory_id}) }}"
+      when: launch_inventory_id is defined
+
+    - name: Add limit override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'limit': launch_limit}) }}"
+      when: launch_limit | length > 0
+
+    - name: Add job_tags override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'job_tags': launch_job_tags}) }}"
+      when: launch_job_tags | length > 0
+
+    - name: Add skip_tags override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'skip_tags': launch_skip_tags}) }}"
+      when: launch_skip_tags | length > 0
+
+    - name: Add job_type override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'job_type': launch_job_type}) }}"
+      when: launch_job_type is defined
+
+    - name: Add verbosity override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'verbosity': launch_verbosity}) }}"
+      when: launch_verbosity is defined
+
+    - name: Add diff_mode override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'diff_mode': launch_diff_mode}) }}"
+      when: launch_diff_mode is defined
+
+    - name: Add scm_branch override to payload
+      ansible.builtin.set_fact:
+        launch_payload: "{{ launch_payload | combine({'scm_branch': launch_scm_branch}) }}"
+      when: launch_scm_branch | length > 0
+
+    # ===== STEP 6: Launch Job =====
+    - name: Launch job from template
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/job_templates/{{ resolved_template_id }}/launch/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: "{{ launch_payload }}"
+        status_code: [201]
+        validate_certs: false
+      register: launch_result
+      no_log: false
+
+    - name: Record launched job ID
+      ansible.builtin.set_fact:
+        launched_job_id: "{{ launch_result.json.id }}"
+
+    - name: Display job launched
+      ansible.builtin.debug:
+        msg: >-
+          Job launched from template '{{ resolved_template_name }}'
+          (job ID: {{ launched_job_id }})
+
+    # ===== STEP 7: Wait for Job Completion (Optional) =====
+    - name: Wait for job to complete
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/jobs/{{ launched_job_id }}/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: job_status
+      until: job_status.json.status in ['successful', 'failed', 'error', 'canceled']
+      retries: "{{ job_timeout_retries }}"
+      delay: "{{ job_delay_seconds }}"
+      when: wait_for_completion | bool
+      no_log: false
+
+    - name: Set final job status
+      ansible.builtin.set_fact:
+        final_job_status: "{{ job_status.json.status if wait_for_completion | bool else 'pending' }}"
+        job_failed: "{{ job_status.json.failed | default(false) if wait_for_completion | bool else false }}"
+
+    - name: Fail if job failed and fail_on_job_failure is true
+      ansible.builtin.fail:
+        msg: >-
+          Job {{ launched_job_id }} failed for template '{{ resolved_template_name }}'.
+          Status: {{ final_job_status }}
+      when:
+        - wait_for_completion | bool
+        - fail_on_job_failure | bool
+        - final_job_status in ['failed', 'error']
+
+    # ===== STEP 8: Write Result to BWS._state =====
+    - name: Update BWS inventory with job status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.awx with job info
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg template_name "{{ resolved_template_name }}" \
+          --argjson template_id {{ resolved_template_id }} \
+          --argjson job_id {{ launched_job_id }} \
+          --arg status "{{ final_job_status }}" \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.awx == null then ._state.apps.awx = {} else . end |
+          if ._state.apps.awx.jobs == null then ._state.apps.awx.jobs = {} else . end |
+          if ._state.apps.awx.job_templates == null then ._state.apps.awx.job_templates = {} else . end |
+          if ._state.apps.awx.job_templates[$template_name] == null then ._state.apps.awx.job_templates[$template_name] = {} else . end |
+          ._state.apps.awx.jobs[($job_id | tostring)] = {
+            "template_name": $template_name,
+            "template_id": $template_id,
+            "status": $status,
+            "launched_at": $timestamp
+          } |
+          ._state.apps.awx.job_templates[$template_name].last_job_id = $job_id |
+          ._state.apps.awx.job_templates[$template_name].last_job_status = $status |
+          ._state.apps.awx.job_templates[$template_name].last_run = $timestamp
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 9: Output Result =====
+    - name: Display job launch result
+      ansible.builtin.debug:
+        msg:
+          job_id: "{{ launched_job_id }}"
+          template_name: "{{ resolved_template_name }}"
+          template_id: "{{ resolved_template_id }}"
+          status: "{{ final_job_status }}"
+          waited_for_completion: "{{ wait_for_completion }}"
+          message: >-
+            Job {{ launched_job_id }} {{ 'completed with status: ' + final_job_status if wait_for_completion | bool else 'launched (not waiting for completion)' }}
+          job_url: "{{ awx_base_url }}/#/jobs/playbook/{{ launched_job_id }}"

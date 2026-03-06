@@ -1,0 +1,329 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/traefik/verify/ingressroute"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "ingressroute_created"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/verify/01-verify-ingressroute.yml"
+#     category: "platform"
+#     subsystem: "traefik"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "traefik"
+#       supported_versions: ["2.10.x", "2.11.x", "3.0.x", "3.1.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       traefik: ">=2.10.0"
+#       k3s: ">=1.28.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - traefik: "3.1.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies IngressRoute exists and routes traffic correctly"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_phase5_verification"
+#   dependencies: ["traefik_deployed"]
+#   provides: ["ingressroute_verified"]
+#   tags: ["traefik", "ingressroute", "verification", "ingress", "phase5"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that a Traefik IngressRoute exists and is properly configured. Checks IngressRoute
+#     exists, TLS is configured with a valid certificate, the backend service exists, and the
+#     route responds to HTTP requests.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.{app}.ingress_url"
+#         purpose: "Get the expected URL for the IngressRoute"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - IngressRoute Created
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    app_name: "{{ app_name }}"
+    app_host: "{{ app_host }}"
+    app_namespace: "{{ app_namespace }}"
+    service_name: "{{ service_name }}"
+    service_port: "{{ service_port }}"
+    tls_secret: "{{ tls_secret | default(app_name + '-origin-cert') }}"
+    k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying IngressRoute"
+          - "=========================================="
+          - "Application: {{ app_name }}"
+          - "Hostname: {{ app_host }}"
+          - "Namespace: {{ app_namespace }}"
+          - "Service: {{ service_name }}:{{ service_port }}"
+          - "TLS Secret: {{ tls_secret }}"
+          - "=========================================="
+
+    # ========== 1. CHECK INGRESSROUTE EXISTS ==========
+    - name: Check IngressRoute exists
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        name: "{{ app_name }}-ingress"
+        namespace: "{{ app_namespace }}"
+      register: ingressroute_check
+      failed_when: false
+
+    - name: Assert IngressRoute exists
+      ansible.builtin.assert:
+        that:
+          - ingressroute_check.resources | length > 0
+        fail_msg: "IngressRoute {{ app_name }}-ingress not found in namespace {{ app_namespace }}"
+        success_msg: "IngressRoute {{ app_name }}-ingress exists"
+
+    - name: Record IngressRoute check result
+      ansible.builtin.set_fact:
+        ingressroute_exists: "{{ ingressroute_check.resources | length > 0 }}"
+        ingressroute_spec: "{{ ingressroute_check.resources[0].spec | default({}) }}"
+
+    # ========== 2. CHECK BACKEND SERVICE EXISTS ==========
+    - name: Check backend service exists
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: v1
+        kind: Service
+        name: "{{ service_name }}"
+        namespace: "{{ app_namespace }}"
+      register: service_check
+      failed_when: false
+
+    - name: Assert backend service exists
+      ansible.builtin.assert:
+        that:
+          - service_check.resources | length > 0
+        fail_msg: "Backend service {{ service_name }} not found in namespace {{ app_namespace }}"
+        success_msg: "Backend service {{ service_name }} exists"
+      when: service_check.resources is defined
+
+    - name: Check service has correct port
+      ansible.builtin.set_fact:
+        service_has_port: >-
+          {{
+            service_check.resources[0].spec.ports
+            | selectattr('port', 'equalto', service_port | int)
+            | list | length > 0
+          }}
+      when: service_check.resources | default([]) | length > 0
+
+    - name: Record service check result
+      ansible.builtin.set_fact:
+        service_exists: "{{ service_check.resources | default([]) | length > 0 }}"
+
+    # ========== 3. CHECK TLS CONFIGURATION ==========
+    - name: Check TLS is configured on IngressRoute
+      ansible.builtin.set_fact:
+        tls_configured: "{{ ingressroute_spec.tls is defined and ingressroute_spec.tls | length > 0 }}"
+      when: ingressroute_exists
+
+    - name: Extract TLS secret name from IngressRoute
+      ansible.builtin.set_fact:
+        configured_tls_secret: "{{ ingressroute_spec.tls.secretName | default('') }}"
+      when: tls_configured | default(false)
+
+    - name: Check TLS secret exists
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: v1
+        kind: Secret
+        name: "{{ tls_secret }}"
+        namespace: "{{ app_namespace }}"
+      register: tls_secret_check
+      failed_when: false
+      when: tls_configured | default(false)
+
+    - name: Assert TLS secret exists and has required keys
+      ansible.builtin.assert:
+        that:
+          - tls_secret_check.resources | length > 0
+          - "'tls.crt' in tls_secret_check.resources[0].data"
+          - "'tls.key' in tls_secret_check.resources[0].data"
+        fail_msg: "TLS secret {{ tls_secret }} not found or missing tls.crt/tls.key"
+        success_msg: "TLS secret {{ tls_secret }} exists with valid keys"
+      when: tls_configured | default(false) and tls_secret_check.resources is defined
+
+    - name: Record TLS check result
+      ansible.builtin.set_fact:
+        tls_secret_exists: >-
+          {{
+            tls_secret_check.resources | default([]) | length > 0 and
+            'tls.crt' in (tls_secret_check.resources[0].data | default({})) and
+            'tls.key' in (tls_secret_check.resources[0].data | default({}))
+          }}
+      when: tls_configured | default(false)
+
+    # ========== 4. CHECK ROUTE MATCH CONFIGURATION ==========
+    - name: Extract route configuration
+      ansible.builtin.set_fact:
+        route_config: "{{ ingressroute_spec.routes[0] | default({}) }}"
+      when: ingressroute_exists
+
+    - name: Check route has host match rule
+      ansible.builtin.set_fact:
+        route_has_host_match: >-
+          {{
+            route_config.match is defined and
+            'Host' in route_config.match
+          }}
+      when: ingressroute_exists
+
+    - name: Display route match rule
+      ansible.builtin.debug:
+        msg: "Route match rule: {{ route_config.match | default('Not configured') }}"
+      when: ingressroute_exists
+
+    # ========== 5. TEST ROUTE RESPONDS ==========
+    - name: Test route responds to HTTP request
+      ansible.builtin.uri:
+        url: "https://{{ app_host }}/"
+        method: GET
+        follow_redirects: safe
+        status_code: [200, 301, 302, 303, 307, 401, 403]
+        validate_certs: false
+        timeout: 30
+      register: route_response_check
+      failed_when: false
+
+    - name: Assert route responds (not 404/502/503/504)
+      ansible.builtin.assert:
+        that:
+          - route_response_check.status is defined
+          - route_response_check.status not in [404, 502, 503, 504]
+        fail_msg: >-
+          Route did not respond correctly. Status: {{ route_response_check.status | default('no response') }}.
+          This indicates routing or backend issues.
+        success_msg: "Route responds with status {{ route_response_check.status }}"
+      when: route_response_check.status is defined
+
+    - name: Record route response result
+      ansible.builtin.set_fact:
+        route_responds: >-
+          {{
+            route_response_check.status is defined and
+            route_response_check.status not in [404, 502, 503, 504]
+          }}
+
+    # ========== 6. TEST TLS CERTIFICATE VALIDITY ==========
+    - name: Test TLS certificate validity
+      ansible.builtin.shell: |
+        timeout 10 openssl s_client -connect {{ app_host }}:443 -servername {{ app_host }} \
+          </dev/null 2>/dev/null | \
+          openssl x509 -noout -dates 2>/dev/null
+      register: tls_validity_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert TLS certificate is valid
+      ansible.builtin.assert:
+        that:
+          - tls_validity_check.rc == 0
+        fail_msg: "TLS certificate validation failed for {{ app_host }}"
+        success_msg: "TLS certificate is valid"
+      when: tls_validity_check.rc is defined
+
+    - name: Extract certificate dates
+      ansible.builtin.set_fact:
+        cert_not_before: "{{ tls_validity_check.stdout | regex_search('notBefore=(.+)', '\\1') | first | default('unknown') }}"
+        cert_not_after: "{{ tls_validity_check.stdout | regex_search('notAfter=(.+)', '\\1') | first | default('unknown') }}"
+      when: tls_validity_check.rc == 0
+
+    - name: Record TLS validity result
+      ansible.builtin.set_fact:
+        tls_valid: "{{ tls_validity_check.rc | default(1) == 0 }}"
+
+    # ========== 7. VERIFICATION SUMMARY ==========
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          app_name: "{{ app_name }}"
+          app_host: "{{ app_host }}"
+          app_namespace: "{{ app_namespace }}"
+          service_name: "{{ service_name }}"
+          service_port: "{{ service_port }}"
+          checks:
+            ingressroute_exists: "{{ ingressroute_exists | default(false) }}"
+            service_exists: "{{ service_exists | default(false) }}"
+            tls_configured: "{{ tls_configured | default(false) }}"
+            tls_secret_exists: "{{ tls_secret_exists | default(false) }}"
+            route_responds: "{{ route_responds | default(false) }}"
+            tls_valid: "{{ tls_valid | default(false) }}"
+          certificate:
+            not_before: "{{ cert_not_before | default('N/A') }}"
+            not_after: "{{ cert_not_after | default('N/A') }}"
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            verification_results.checks.ingressroute_exists | bool and
+            verification_results.checks.service_exists | bool and
+            verification_results.checks.route_responds | bool and
+            verification_results.checks.tls_valid | bool
+          }}
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "IngressRoute Verification Summary"
+          - "=========================================="
+          - ""
+          - "Application: {{ app_name }}"
+          - "Hostname: {{ app_host }}"
+          - "Backend: {{ service_name }}:{{ service_port }}"
+          - ""
+          - "Checks:"
+          - "  IngressRoute Exists: {{ verification_results.checks.ingressroute_exists }}"
+          - "  Backend Service Exists: {{ verification_results.checks.service_exists }}"
+          - "  TLS Configured: {{ verification_results.checks.tls_configured }}"
+          - "  TLS Secret Exists: {{ verification_results.checks.tls_secret_exists }}"
+          - "  Route Responds: {{ verification_results.checks.route_responds }}"
+          - "  TLS Certificate Valid: {{ verification_results.checks.tls_valid }}"
+          - ""
+          - "Certificate Validity:"
+          - "  Not Before: {{ verification_results.certificate.not_before }}"
+          - "  Not After: {{ verification_results.certificate.not_after }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Fail if any checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          IngressRoute verification failed for {{ app_name }}.
+          See summary above for details.
+      when: not all_checks_passed
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "IngressRoute for {{ app_name }} is correctly configured - verification complete"
+      when: all_checks_passed

@@ -1,0 +1,226 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/operations/core-applications-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "authentik.core.applications.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/operations/core-applications-create.yml"
+#     category: "platform"
+#     subsystem: "authentik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "authentik"
+#       supported_versions: ["2023.x", "2024.x", "2025.x"]
+#       version_range: ">=2023.10.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - authentik: "2024.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from OpenAPI schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_authentik_operations"
+#   dependencies: ["authentik_deployed", "authentik_admin_token_available", "oauth2_provider_created"]
+#   provides: ["authentik_application_created"]
+#   tags: ["authentik", "applications", "core", "phase5", "sso"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create an application in Authentik and link it to an OAuth2 provider.
+#     This operation is idempotent - if an application with the same slug
+#     exists, it will be skipped. The application appears in the user portal
+#     and controls access to the linked provider.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.authentik.admin_token"
+#         purpose: "Authentik API admin token for authentication"
+#       - path: "_state.apps.{app_name}.oauth.provider_id"
+#         purpose: "OAuth2 provider ID to link to this application"
+#
+#     writes:
+#       - path: "_state.apps.{app_name}.oauth.application_id"
+#         example: 123
+#       - path: "_state.apps.{app_name}.oauth.application_slug"
+#         example: "grafana"
+
+- name: Authentik - Create Application
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    authentik_base_url: "{{ authentik_url }}"
+    authentik_api_base: "{{ authentik_base_url }}/api/v3"
+    endpoint: "/core/applications/"
+
+    # Required fields (must be provided by caller)
+    # name: Application display name (required)
+    # slug: URL-safe identifier for the application (required)
+
+    # Optional fields with sensible defaults
+    policy_engine_mode: "{{ policy_engine_mode_input | default('any') }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - name is defined and name | length > 0
+          - slug is defined and slug | length > 0
+        fail_msg: "Required inputs missing: name, slug"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract Authentik admin token
+      ansible.builtin.set_fact:
+        authentik_admin_token: "{{ inventory._state.apps.authentik.admin_token }}"
+      no_log: true
+
+    # ===== STEP 3: Check for Existing Application (Idempotency) =====
+    - name: Check if application already exists
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+        status_code: [200]
+      register: existing_apps
+      no_log: false
+
+    - name: Filter for existing application by slug
+      ansible.builtin.set_fact:
+        existing_app: >-
+          {{
+            existing_apps.json.results
+            | selectattr('slug', 'equalto', slug)
+            | list
+            | first
+            | default(none)
+          }}
+      no_log: false
+
+    - name: Skip creation if application exists
+      ansible.builtin.debug:
+        msg: "Application '{{ slug }}' already exists with ID {{ existing_app.pk }}"
+      when: existing_app is not none
+
+    # ===== STEP 4: Resolve Provider ID (if app_name provided) =====
+    - name: Get provider_id from BWS inventory if app_name provided
+      ansible.builtin.set_fact:
+        provider: "{{ inventory._state.apps[app_name].oauth.provider_id | default(provider_input | default(omit)) }}"
+      when: app_name is defined and existing_app is none
+      no_log: false
+
+    - name: Use provider_input if no app_name
+      ansible.builtin.set_fact:
+        provider: "{{ provider_input | default(omit) }}"
+      when: app_name is not defined and existing_app is none
+      no_log: false
+
+    # ===== STEP 5: Construct Launch URL =====
+    - name: Construct meta_launch_url if not provided
+      ansible.builtin.set_fact:
+        meta_launch_url: >-
+          {{
+            meta_launch_url_input | default(
+              'https://' ~ slug ~ '.' ~ inventory.ingress.domain
+            )
+          }}
+      when: existing_app is none
+      no_log: false
+
+    # ===== STEP 6: Create Application =====
+    - name: Create application in Authentik
+      ansible.builtin.uri:
+        url: "{{ authentik_api_base }}{{ endpoint }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ authentik_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ name }}"
+          slug: "{{ slug }}"
+          provider: "{{ provider | default(omit) }}"
+          backchannel_providers: "{{ backchannel_providers | default(omit) }}"
+          open_in_new_tab: "{{ open_in_new_tab | default(false) }}"
+          meta_launch_url: "{{ meta_launch_url }}"
+          meta_icon: "{{ meta_icon | default(omit) }}"
+          meta_description: "{{ meta_description | default(omit) }}"
+          meta_publisher: "{{ meta_publisher | default(omit) }}"
+          policy_engine_mode: "{{ policy_engine_mode }}"
+          group: "{{ group | default(omit) }}"
+        status_code: [200, 201]
+      register: app_result
+      no_log: true
+      when: existing_app is none
+
+    - name: Set application_id from result
+      ansible.builtin.set_fact:
+        application_id: "{{ existing_app.pk if existing_app is not none else app_result.json.pk }}"
+        application_slug: "{{ slug }}"
+      no_log: false
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Update BWS inventory with application details
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge application details into _state.apps.{app_name}.oauth
+        UPDATED=$(echo "$CURRENT" | jq --arg app "{{ app_name | default(slug) }}" \
+          --argjson application_id {{ application_id }} \
+          --arg application_slug "{{ application_slug }}" \
+          '
+          if ._state.apps[$app] == null then ._state.apps[$app] = {} else . end |
+          if ._state.apps[$app].oauth == null then ._state.apps[$app].oauth = {} else . end |
+          ._state.apps[$app].oauth.application_id = $application_id |
+          ._state.apps[$app].oauth.application_slug = $application_slug
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: app_name is defined or existing_app is none
+
+    # ===== STEP 8: Output Result =====
+    - name: Display application creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if existing_app is not none else 'created' }}"
+          application_id: "{{ application_id }}"
+          slug: "{{ application_slug }}"
+          name: "{{ name }}"
+          provider: "none"

@@ -1,0 +1,251 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/verification/07-generate-report"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/verification/07-generate-report.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "verification"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-10"
+#         notes: "Generates markdown and JSON reports from verification results"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["verification_tests_completed"]
+#   provides: ["verification_report_generated"]
+#   tags: ["k3s", "verification", "reporting"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Generate comprehensive verification report from all verification tests
+- name: Generate verification report
+  hosts: localhost
+  gather_facts: true
+  become: false
+  vars:
+    report_output_dir: /tmp
+    report_files:
+      - name: HTTPS Endpoints
+        path: /tmp/https-endpoints-verification.md
+        required: true
+      - name: Storage Persistence
+        path: /tmp/storage-verification.md
+        required: true
+      - name: Cloudflare Tunnel
+        path: /tmp/cloudflare-tunnel-verification.md
+        required: true
+    final_report_path: '{{ report_output_dir }}/phase6-verification-report.md'
+    json_report_path: '{{ report_output_dir }}/phase6-verification-report.json'
+  tasks:
+    - name: Display report generation information
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Generating Phase 6 Verification Report
+          - ==========================================
+          - 'Report Directory: {{ report_output_dir }}'
+          - 'Output: {{ final_report_path }}'
+          - ==========================================
+    - name: Check for verification result files
+      ansible.builtin.stat:
+        path: '{{ item.path }}'
+      register: report_file_stats
+      loop: '{{ report_files }}'
+      loop_control:
+        label: '{{ item.name }}'
+    - name: Identify missing required reports
+      ansible.builtin.set_fact:
+        missing_reports: >-
+          {{
+            report_file_stats.results
+            | selectattr('stat.exists', 'equalto', false)
+            | map(attribute='item')
+            | selectattr('required', 'equalto', true)
+            | list
+          }}
+    - name: Warn about missing reports
+      ansible.builtin.debug:
+        msg: "WARNING: Missing required reports: {{ missing_reports | map(attribute='name') | join(', ') }}"
+      when: missing_reports | length > 0
+    - name: Read verification result files
+      ansible.builtin.slurp:
+        path: '{{ item.path }}'
+      register: report_contents
+      loop: '{{ report_files }}'
+      loop_control:
+        label: '{{ item.name }}'
+      when: report_file_stats.results[index].stat.exists
+      vars:
+        index: '{{ loop.index0 }}'
+    - name: Parse report contents
+      ansible.builtin.set_fact:
+        parsed_reports: '{{ parsed_reports | default([]) + [report_item] }}'
+      vars:
+        report_item:
+          name: '{{ item.item.name }}'
+          content: '{{ item.content | b64decode }}'
+          status: PRESENT
+      loop: '{{ report_contents.results }}'
+      loop_control:
+        label: '{{ item.item.name }}'
+      when: not item.skipped | default(false)
+    - name: Determine overall verification status
+      ansible.builtin.set_fact:
+        overall_status: "{{ 'PASSED' if missing_reports | length == 0 else 'INCOMPLETE' }}"
+        verification_timestamp: '{{ ansible_date_time.iso8601 }}'
+    - name: Generate comprehensive markdown report
+      ansible.builtin.copy:
+        content: |
+          # Phase 6: End-to-End Verification Report
+          **Generated:** {{ verification_timestamp }}
+          **Overall Status:** {{ overall_status }}
+          ---
+
+          ## Executive Summary
+          This report consolidates the results of Phase 6 end-to-end verification tests for the Media Stack deployment.
+
+          ### Verification Components
+          {% for report in parsed_reports | default([]) %}
+          - OK {{ report.name }}
+          {% endfor %}
+          {% for missing in missing_reports %}
+          - FAIL {{ missing.name }} (MISSING)
+          {% endfor %}
+
+          ### Overall Status: {{ overall_status }}
+          {% if missing_reports | length > 0 %}
+          WARNING: Some verification tests did not complete or reports are missing.
+          {% endif %}
+          ---
+          {% for report in parsed_reports | default([]) %}
+          ## {{ report.name }}
+          {{ report.content }}
+          ---
+          {% endfor %}
+          {% if missing_reports | length > 0 %}
+          ## Missing Reports
+          The following verification reports were expected but not found:
+          {% for missing in missing_reports %}
+          - **{{ missing.name }}**: Expected at `{{ missing.path }}`
+          {% endfor %}
+          ---
+          {% endif %}
+
+          ## Verification Metadata
+          - **Execution Date:** {{ verification_timestamp }}
+          - **Hostname:** {{ ansible_hostname }}
+          - **OS:** {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - **Ansible Version:** {{ ansible_version.full }}
+          - **Report Generator:** phase6-verification-report
+          ---
+
+          ## Next Steps
+          {% if overall_status == 'PASSED' %}
+          OK All verification tests passed successfully.
+          - The Media Stack deployment is verified and operational
+          - All HTTPS endpoints are accessible
+          - Storage persistence is confirmed
+          - Cloudflare Tunnel is healthy
+          {% elif overall_status == 'INCOMPLETE' %}
+          WARNING Verification is incomplete. Please:
+          1. Review the missing reports listed above
+          2. Re-run the failed verification playbooks
+          3. Investigate any errors in the verification logs
+          4. Regenerate this report after resolving issues
+          {% else %}
+          FAIL Verification has failed. Please:
+          1. Review each verification section above
+          2. Address any failures or warnings
+          3. Re-run verification after fixes
+          4. Contact support if issues persist
+          {% endif %}
+          ---
+          *Report generated by Ansible playbook: atomic/platform/k3s/1.33/verification/07-generate-report.yml*
+        dest: '{{ final_report_path }}'
+        mode: '0644'
+    - name: Generate JSON report for programmatic access
+      ansible.builtin.copy:
+        content: |
+          {
+            "timestamp": "{{ verification_timestamp }}",
+            "overall_status": "{{ overall_status }}",
+            "hostname": "{{ ansible_hostname }}",
+            "os": {
+              "distribution": "{{ ansible_distribution }}",
+              "version": "{{ ansible_distribution_version }}"
+            },
+            "reports": [
+              {% for report in parsed_reports | default([]) %}
+              {
+                "name": "{{ report.name }}",
+                "status": "{{ report.status }}"
+              }{{ ',' if not loop.last else '' }}
+              {% endfor %}
+            ],
+            "missing_reports": [
+              {% for missing in missing_reports %}
+              {
+                "name": "{{ missing.name }}",
+                "path": "{{ missing.path }}",
+                "required": {{ missing.required | lower }}
+              }{{ ',' if not loop.last else '' }}
+              {% endfor %}
+            ],
+            "summary": {
+              "total_expected_reports": {{ report_files | length }},
+              "reports_generated": {{ (parsed_reports | default([])) | length }},
+              "missing_count": {{ missing_reports | length }}
+            }
+          }
+        dest: '{{ json_report_path }}'
+        mode: '0644'
+    - name: Display report summary
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Phase 6 Verification Report Generated
+          - ==========================================
+          - 'Overall Status: {{ overall_status }}'
+          - ''
+          - 'Reports Included:'
+          - >-
+            {{ (parsed_reports | default([]))
+            | map(attribute='name') | list | join(', ') }}
+          - >-
+            {{ 'Missing Reports: '
+            ~ (missing_reports | map(attribute='name') | list | join(', '))
+            if (missing_reports | length > 0) else '' }}
+          - ''
+          - 'Report Locations:'
+          - '  Markdown: {{ final_report_path }}'
+          - '  JSON: {{ json_report_path }}'
+          - ==========================================
+    - name: Fail if verification is incomplete
+      ansible.builtin.fail:
+        msg: >-
+          Verification incomplete. {{ missing_reports | length }} required report(s)
+          missing.
+          See {{ final_report_path }} for details.
+      when: missing_reports | length > 0

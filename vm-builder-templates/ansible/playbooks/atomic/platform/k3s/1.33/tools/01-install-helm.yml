@@ -1,0 +1,86 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/tools/01-install-helm"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/tools/01-install-helm.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "tools"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "helm"
+#       folder_version: "1.33"
+#       supported_versions: ["3.14.x", "3.15.x", "3.16.x"]
+#       version_range: ">=3.14.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - helm: "3.16.3"
+#         k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         kernel: "6.8.0-85"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Helm package manager for k3s cluster"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed"]
+#   provides: ["helm_installed"]
+#   tags: ["k3s", "helm", "package-manager"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: Install Helm package manager for Kubernetes
+- name: Install Helm package manager
+  hosts: "{{ target_hosts | default('k3s_masters') }}"
+  gather_facts: true
+  become: false
+  vars:
+    helm_version: 3.16.3
+  tasks:
+    - name: Check if Helm is already installed
+      ansible.builtin.command: helm version --short
+      register: helm_check
+      failed_when: false
+      changed_when: false
+    - name: Download Helm installation script
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+      when: helm_check.rc != 0
+    - name: Install Helm
+      ansible.builtin.command: /tmp/get_helm.sh
+      register: helm_install
+      changed_when: true
+      when: helm_check.rc != 0
+    - name: Clean up installation script
+      ansible.builtin.file:
+        path: /tmp/get_helm.sh
+        state: absent
+      when: helm_check.rc != 0
+    - name: Verify Helm installation
+      ansible.builtin.command: helm version --short
+      register: helm_version_check
+      changed_when: false
+    - name: Display Helm version
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Helm Installed Successfully
+          - ==========================================
+          - '{{ helm_version_check.stdout }}'
+          - ==========================================

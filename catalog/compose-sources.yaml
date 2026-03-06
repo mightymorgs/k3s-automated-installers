@@ -1,0 +1,32 @@
+---
+# Docker Compose source index for vm-builder scaffold.
+# Maps app names to compose file paths in well-known GitHub repos.
+# Files are fetched from GitHub raw content API (no full clone).
+sources:
+  linuxserver:
+    repo: "https://github.com/linuxserver/docker-compose"
+    type: github
+    app_mapping:
+      sonarr: "sonarr/docker-compose.yml"
+      radarr: "radarr/docker-compose.yml"
+      prowlarr: "prowlarr/docker-compose.yml"
+      sabnzbd: "sabnzbd/docker-compose.yml"
+      qbittorrent: "qbittorrent/docker-compose.yml"
+      jellyfin: "jellyfin/docker-compose.yml"
+
+  awesome-compose:
+    repo: "https://github.com/docker/awesome-compose"
+    type: github
+    app_mapping:
+      elasticsearch: "elasticsearch-logstash-kibana/compose.yaml"
+      prometheus: "prometheus-grafana/compose.yaml"
+      wordpress: "wordpress-mysql/compose.yaml"
+      nginx: "nginx-golang-mysql/compose.yaml"
+
+  bitnami:
+    repo: "https://github.com/bitnami/containers"
+    type: github
+    app_mapping:
+      airflow: "bitnami/airflow/docker-compose.yml"
+      wordpress: "bitnami/wordpress/docker-compose.yml"
+      redis: "bitnami/redis/docker-compose.yml"

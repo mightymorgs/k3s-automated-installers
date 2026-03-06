@@ -1,0 +1,80 @@
+---
+# ArgoCD StatefulSet (J2 template)
+# Defaults match k8s-base/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('argocd') }}
+  namespace: {{ app_namespace | default('argocd') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('argocd') }}
+    app.kubernetes.io/component: {{ app_component | default('server') }}
+spec:
+  serviceName: {{ app_name | default('argocd') }}
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ app_name | default('argocd') }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ app_name | default('argocd') }}
+        app.kubernetes.io/component: {{ app_component | default('server') }}
+    spec:
+      containers:
+        - name: {{ app_name | default('argocd') }}
+          image: {{ image | default('quay.io/argoproj/argocd:v2.13.3') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          command: ["argocd-server"]
+          args:
+            - --insecure
+            - --staticassets
+            - /shared/app
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ configmap_name | default('argocd-config') }}
+                optional: true
+            - secretRef:
+                name: {{ secret_name | default('argocd-secrets') }}
+                optional: true
+          volumeMounts:
+            - name: data
+              mountPath: {{ data_mount_path | default('/data') }}
+          resources:
+            requests:
+              cpu: {{ cpu_request | default('100m') }}
+              memory: {{ memory_request | default('256Mi') }}
+            limits:
+              cpu: {{ cpu_limit | default('2000m') }}
+              memory: {{ memory_limit | default('2Gi') }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ liveness_initial_delay | default(30) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ readiness_initial_delay | default(10) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: {{ app_name | default('argocd') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ data_storage_size | default('10Gi') }}

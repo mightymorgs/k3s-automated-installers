@@ -1,0 +1,332 @@
+---
+name: Phase 2 - GCP VM Provisioning
+on:
+  workflow_dispatch:
+    inputs:
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-gcp-latest)
+        required: true
+        type: string
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+    outputs:
+      vm_hostname: ${{ steps.vm_config.outputs.vm_hostname }}
+      vm_external_ip: ${{ steps.apply.outputs.external_ip }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/549570494604/locations/global/workloadIdentityPools/github-actions/providers/github'
+          service_account: 'github-actions-terraform@k8s-autodeploy.iam.gserviceaccount.com'
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Fetch VM inventory from BWS
+        id: vm_inventory
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          # Get secret ID
+          SECRET_ID=$(jq -r --arg k "$INVENTORY_KEY" \
+            '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$SECRET_ID" ]; then
+            echo "ERROR: Inventory not found: $INVENTORY_KEY"
+            exit 1
+          fi
+
+          # Fetch inventory
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Export as output
+          {
+            echo 'json<<EOF'
+            echo "$INVENTORY"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Extract VM config
+        id: vm_config
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+        run: |
+          # Parse inventory
+          VM_HOSTNAME=$(echo "$INVENTORY_JSON" | jq -r '.identity.hostname')
+          PROJECT_ID=$(echo "$INVENTORY_JSON" | jq -r '.gcp.project_id')
+          REGION=$(echo "$INVENTORY_JSON" | jq -r '.gcp.region')
+          ZONE=$(echo "$INVENTORY_JSON" | jq -r '.gcp.zone')
+          MACHINE_TYPE=$(echo "$INVENTORY_JSON" | jq -r '.gcp.machine_type')
+
+          {
+            echo "vm_hostname=$VM_HOSTNAME"
+            echo "project_id=$PROJECT_ID"
+            echo "region=$REGION"
+            echo "zone=$ZONE"
+            echo "machine_type=$MACHINE_TYPE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "VM Configuration:"
+          echo "  Hostname: $VM_HOSTNAME"
+          echo "  Project: $PROJECT_ID"
+          echo "  Region: $REGION"
+          echo "  Zone: $ZONE"
+          echo "  Machine: $MACHINE_TYPE"
+
+      - name: Extract SSH keypair from inventory
+        id: ssh_keypair
+        env:
+          INVENTORY_JSON: ${{ steps.vm_inventory.outputs.json }}
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          # Check for public_key_ref first (BWS reference pattern)
+          PUB_KEY_REF=$(echo "$INVENTORY_JSON" | jq -r '.ssh.keypair.public_key_ref // empty')
+
+          if [ -n "$PUB_KEY_REF" ]; then
+            # Fetch from BWS using reference
+            echo "Fetching SSH public key from BWS: $PUB_KEY_REF"
+            SECRET_ID=$(jq -r --arg k "$PUB_KEY_REF" '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+            PUB_KEY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+          else
+            # Fallback: Direct key in inventory
+            PUB_KEY=$(echo "$INVENTORY_JSON" | jq -r '.ssh.keypair.public_key // empty')
+          fi
+
+          # Private key (usually empty, handled by GitHub deploy keys)
+          PRIV_B64=$(echo "$INVENTORY_JSON" | jq -r '.ssh.keypair.private_key_b64 // empty')
+
+          echo "public_key=$PUB_KEY" >> "$GITHUB_OUTPUT"
+          echo "private_key_b64=$PRIV_B64" >> "$GITHUB_OUTPUT"
+          echo "✅ SSH keypair resolved from BWS"
+
+      - name: Generate ephemeral GitHub runner token
+        id: runner_token
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          # Fetch GitHub PAT from BWS
+          PAT_ID=$(jq -r '.[] | select(.key=="inventory/shared/secrets/github/pat") | .id' /tmp/bws_secrets.json)
+          GH_PAT=$(bws secret get "$PAT_ID" --output json | jq -r '.value')
+
+          # Generate ephemeral runner token (1 hour expiry)
+          TOKEN=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token \
+            | jq -r '.token')
+
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Setup GCP credentials
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          # TODO: Store GCP service account key in BWS
+          # For now, using gcloud auth from GitHub Actions
+          echo "GCP credentials will use GitHub Actions default"
+
+      - name: Initialize Terraform
+        working-directory: vm-builder/vm-builder-templates/infra/terraform/examples/gcp-test
+        run: |
+          terraform init
+
+      - name: Cleanup existing GitHub runner
+        env:
+          VM_HOSTNAME: ${{ steps.vm_config.outputs.vm_hostname }}
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          echo "Checking for existing GitHub runner: $VM_HOSTNAME"
+
+          # Fetch GitHub PAT from BWS
+          PAT_ID=$(jq -r '.[] | select(.key=="inventory/shared/secrets/github/pat") | .id' /tmp/bws_secrets.json)
+          GH_PAT=$(bws secret get "$PAT_ID" --output json | jq -r '.value')
+
+          # Get runner ID if it exists
+          RUNNER_ID=$(curl -s \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+            | jq -r --arg name "$VM_HOSTNAME" '.runners[] | select(.name==$name) | .id')
+
+          if [ -n "$RUNNER_ID" ]; then
+            echo "Deleting existing runner: $VM_HOSTNAME (ID: $RUNNER_ID)"
+            curl -s -X DELETE \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners/$RUNNER_ID"
+            echo "✅ Stale runner removed"
+          else
+            echo "No existing runner found - ready for fresh deployment"
+          fi
+
+      - name: Cleanup existing resources (idempotent deploy)
+        env:
+          VM_NAME: ${{ steps.vm_config.outputs.vm_hostname }}
+          PROJECT_ID: ${{ steps.vm_config.outputs.project_id }}
+          ZONE: ${{ steps.vm_config.outputs.zone }}
+        run: |
+          echo "Cleaning up any existing GCP resources for idempotent deployment..."
+
+          # Delete existing firewall rule if it exists
+          if gcloud compute firewall-rules describe "${VM_NAME}-allow-ssh" --project="$PROJECT_ID" &>/dev/null; then
+            echo "Deleting existing firewall rule: ${VM_NAME}-allow-ssh"
+            gcloud compute firewall-rules delete "${VM_NAME}-allow-ssh" --project="$PROJECT_ID" --quiet
+          fi
+
+          # Delete existing VM if it exists
+          if gcloud compute instances describe "$VM_NAME" --zone="$ZONE" --project="$PROJECT_ID" &>/dev/null; then
+            echo "Deleting existing VM: $VM_NAME"
+            gcloud compute instances delete "$VM_NAME" --zone="$ZONE" --project="$PROJECT_ID" --quiet
+          fi
+
+          # Delete existing static IP if it exists
+          if gcloud compute addresses describe "${VM_NAME}-external-ip" --region="${ZONE%-*}" --project="$PROJECT_ID" &>/dev/null; then
+            echo "Deleting existing static IP: ${VM_NAME}-external-ip"
+            gcloud compute addresses delete "${VM_NAME}-external-ip" --region="${ZONE%-*}" --project="$PROJECT_ID" --quiet
+          fi
+
+          echo "✅ Cleanup complete - ready for fresh deployment"
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: vm-builder/vm-builder-templates/infra/terraform/examples/gcp-test
+        env:
+          TF_VAR_project_id: ${{ steps.vm_config.outputs.project_id }}
+          TF_VAR_vm_name: ${{ steps.vm_config.outputs.vm_hostname }}
+          TF_VAR_region: ${{ steps.vm_config.outputs.region }}
+          TF_VAR_zone: ${{ steps.vm_config.outputs.zone }}
+          TF_VAR_machine_type: ${{ steps.vm_config.outputs.machine_type }}
+          TF_VAR_runner_token: ${{ steps.runner_token.outputs.token }}
+          TF_VAR_ssh_private_key_b64: ${{ steps.ssh_keypair.outputs.private_key_b64 }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: |
+          # Create tfvars dynamically with SSH key from BWS
+          cat > auto.tfvars <<EOF
+          project_id          = "$TF_VAR_project_id"
+          vm_name             = "$TF_VAR_vm_name"
+          region              = "$TF_VAR_region"
+          zone                = "$TF_VAR_zone"
+          ssh_authorized_keys = ["${{ steps.ssh_keypair.outputs.public_key }}"]
+          EOF
+
+          terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        id: apply
+        working-directory: vm-builder/vm-builder-templates/infra/terraform/examples/gcp-test
+        env:
+          TF_VAR_project_id: ${{ steps.vm_config.outputs.project_id }}
+          TF_VAR_vm_name: ${{ steps.vm_config.outputs.vm_hostname }}
+          TF_VAR_region: ${{ steps.vm_config.outputs.region }}
+          TF_VAR_zone: ${{ steps.vm_config.outputs.zone }}
+          TF_VAR_machine_type: ${{ steps.vm_config.outputs.machine_type }}
+          TF_VAR_runner_token: ${{ steps.runner_token.outputs.token }}
+          TF_VAR_ssh_private_key_b64: ${{ steps.ssh_keypair.outputs.private_key_b64 }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: |
+          terraform apply tfplan
+
+          # Get outputs
+          EXTERNAL_IP=$(terraform output -raw external_ip)
+          echo "external_ip=$EXTERNAL_IP" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "✅ VM provisioned successfully"
+          echo "   Hostname: $TF_VAR_vm_name"
+          echo "   External IP: $EXTERNAL_IP"
+          echo "   SSH: ssh ubuntu@$EXTERNAL_IP"
+
+      - name: Wait for GitHub runner to register
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+          VM_HOSTNAME: ${{ steps.vm_config.outputs.vm_hostname }}
+        run: |
+          echo "Waiting for GitHub runner to register..."
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+
+          # Fetch GitHub PAT from BWS for API calls
+          PAT_ID=$(jq -r '.[] | select(.key=="inventory/shared/secrets/github/pat") | .id' /tmp/bws_secrets.json)
+          GH_PAT=$(bws secret get "$PAT_ID" --output json | jq -r '.value')
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            # Check if runner is registered and online
+            RUNNER_STATUS=$(curl -s \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+              | jq -r --arg name "$VM_HOSTNAME" '.runners[] | select(.name==$name) | .status')
+
+            if [ "$RUNNER_STATUS" = "online" ]; then
+              echo "✅ GitHub runner '$VM_HOSTNAME' is online!"
+              break
+            elif [ -n "$RUNNER_STATUS" ]; then
+              echo "Runner found but status is: $RUNNER_STATUS"
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - waiting for runner registration..."
+            sleep 10
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "⚠️ Runner did not come online within timeout"
+            echo "VM is provisioned but runner may still be starting up"
+            echo "Check: https://github.com/${{ github.repository }}/settings/actions/runners"
+            # Don't fail - VM is provisioned, runner just needs more time
+          fi
+
+      - name: Cleanup on failure
+        if: failure()
+        working-directory: vm-builder/vm-builder-templates/infra/terraform/examples/gcp-test
+        env:
+          TF_VAR_project_id: ${{ steps.vm_config.outputs.project_id }}
+          TF_VAR_vm_name: ${{ steps.vm_config.outputs.vm_hostname }}
+          TF_VAR_region: ${{ steps.vm_config.outputs.region }}
+          TF_VAR_zone: ${{ steps.vm_config.outputs.zone }}
+          TF_VAR_machine_type: ${{ steps.vm_config.outputs.machine_type }}
+          TF_VAR_runner_token: ${{ steps.runner_token.outputs.token }}
+          TF_VAR_ssh_private_key_b64: ${{ steps.ssh_keypair.outputs.private_key_b64 }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: |
+          echo "Cleaning up resources after failure..."
+          # Create tfvars for destroy
+          cat > auto.tfvars <<EOF
+          project_id          = "$TF_VAR_project_id"
+          vm_name             = "$TF_VAR_vm_name"
+          region              = "$TF_VAR_region"
+          zone                = "$TF_VAR_zone"
+          ssh_authorized_keys = ["${{ steps.ssh_keypair.outputs.public_key }}"]
+          EOF
+
+          terraform destroy -auto-approve || true
+          echo "✅ Cleanup completed"
+
+  # Phase 2.5: Bootstrap VM to golden master state
+  # Runs on the self-hosted runner we just provisioned
+  call-phase2-5:
+    needs: provision
+    uses: ./.github/workflows/phase2.5-vm-self-bootstrap.yml
+    with:
+      vm_hostname: ${{ needs.provision.outputs.vm_hostname }}
+      inventory_key: ${{ inputs.inventory_key }}
+    secrets: inherit

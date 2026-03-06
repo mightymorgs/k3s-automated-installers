@@ -1,0 +1,150 @@
+---
+# Shared pre-task: ensure Vault is unsealed before config playbooks run.
+#
+# Include at the top of any vault config playbook that makes API calls:
+#   - name: Ensure Vault is unsealed
+#     ansible.builtin.include_tasks: tasks/ensure-unsealed.yml
+#
+# Required variables (from the including playbook or extra-vars):
+#   vault_api_url           - NodePort URL (e.g. http://127.0.0.1:30820)
+#   vault_namespace         - K8s namespace (from BWS extra-vars)
+#   kubeconfig_path         - Path to kubeconfig file (from BWS extra-vars)
+#   inventory_secret_name   - BWS inventory key (for unseal key retrieval)
+#
+# Sets facts:
+#   vault_is_unsealed       - true after successful unseal check/operation
+
+- name: Check Vault seal status
+  ansible.builtin.uri:
+    url: "{{ vault_api_url }}/v1/sys/seal-status"
+    method: GET
+    status_code: [200, 503]
+    return_content: true
+  register: _unseal_check
+  retries: 6
+  delay: 10
+  until: _unseal_check.status in [200, 503]
+  failed_when: false
+
+- name: Set seal state facts
+  ansible.builtin.set_fact:
+    _vault_initialized: "{{ _unseal_check.json.initialized | default(false) }}"
+    _vault_sealed: "{{ _unseal_check.json.sealed | default(true) }}"
+
+- name: Display Vault seal state
+  ansible.builtin.debug:
+    msg: "Vault seal-status: initialized={{ _vault_initialized }}, sealed={{ _vault_sealed }}"
+
+- name: Fail if Vault not reachable
+  ansible.builtin.fail:
+    msg: >-
+      Vault API not reachable at {{ vault_api_url }}.
+      Status: {{ _unseal_check.status | default('no response') }}.
+      Ensure Vault is deployed before running config playbooks.
+  when: _unseal_check.status is not defined
+
+- name: Fail if Vault not initialized
+  ansible.builtin.fail:
+    msg: >-
+      Vault is not initialized. Run 00-init-unseal.yml first.
+  when: not _vault_initialized | bool
+
+- name: Unseal Vault if sealed
+  when: _vault_sealed | bool
+  block:
+    - name: Verify BWS_ACCESS_TOKEN is set for unseal
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN must be set to retrieve unseal key"
+
+    - name: Verify inventory_secret_name is provided
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name is defined
+          - inventory_secret_name | length > 0
+        fail_msg: "inventory_secret_name must be provided via -e to retrieve unseal key"
+
+    - name: Get BWS inventory secret ID for unseal key
+      ansible.builtin.shell: |
+        bws secret list --output json | \
+          jq -r --arg k "{{ inventory_secret_name }}" '.[] | select(.key==$k) | .id'
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: _unseal_bws_id
+      changed_when: false
+      no_log: true
+
+    - name: Fail if BWS inventory secret not found
+      ansible.builtin.assert:
+        that:
+          - _unseal_bws_id.stdout | length > 0
+        fail_msg: >-
+          BWS inventory secret '{{ inventory_secret_name }}' not found.
+          Cannot retrieve unseal key.
+
+    - name: Retrieve BWS inventory value
+      ansible.builtin.shell: |
+        bws secret get "{{ _unseal_bws_id.stdout }}" --output json | jq -r '.value'
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: _unseal_bws_value
+      changed_when: false
+      no_log: true
+
+    - name: Parse unseal key from inventory
+      ansible.builtin.set_fact:
+        _vault_unseal_key: "{{ (_unseal_bws_value.stdout | from_json)._state.vault.unseal_key }}"
+      no_log: true
+
+    - name: Fail if unseal key not found in inventory
+      ansible.builtin.assert:
+        that:
+          - _vault_unseal_key is defined
+          - _vault_unseal_key | length > 0
+        fail_msg: >-
+          Unseal key not found at _state.vault.unseal_key in BWS inventory.
+          Run 00-init-unseal.yml to initialize and store the unseal key.
+
+    - name: Get Vault pod name for unseal
+      ansible.builtin.shell: >-
+        kubectl -n {{ vault_namespace }} get pod
+        -l app.kubernetes.io/name=vault
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null ||
+        kubectl -n {{ vault_namespace }} get pod
+        -l app=vault
+        -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _unseal_pod
+      changed_when: false
+
+    - name: Run vault operator unseal
+      ansible.builtin.shell: |
+        kubectl exec -n {{ vault_namespace }} {{ _unseal_pod.stdout }} -- \
+          vault operator unseal "{{ _vault_unseal_key }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _unseal_result
+      no_log: true
+
+    - name: Wait for Vault to be ready after unseal
+      ansible.builtin.uri:
+        url: "{{ vault_api_url }}/v1/sys/seal-status"
+        method: GET
+        status_code: [200]
+        return_content: true
+      register: _unseal_verify
+      retries: 6
+      delay: 5
+      until: >-
+        _unseal_verify.status == 200 and
+        not _unseal_verify.json.sealed | default(true)
+
+    - name: Display unseal result
+      ansible.builtin.debug:
+        msg: "Vault unsealed successfully (was sealed after pod restart)"
+
+- name: Set vault_is_unsealed fact
+  ansible.builtin.set_fact:
+    vault_is_unsealed: true

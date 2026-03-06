@@ -1,0 +1,19 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  00-render-manifests.yml:
+    summary: Render External Secrets Operator manifests from J2 templates using BWS
+      inventory variables
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ playbook_dir }}/../../../../../templates/k8s/platform/external-secrets/service.yaml.j2'
+    wiring:
+      reads_from:
+      - app: vault
+        field: url
+      writes_to:
+      - app: external_secrets
+        field: status
+      - app: external_secrets
+        field: url

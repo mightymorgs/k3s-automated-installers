@@ -1,0 +1,23 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  awx-instance.yaml:
+    summary: 'K8s AWX: awx-instance.yaml'
+    source: inferred
+    confidence: medium
+  awx-operator.yaml:
+    summary: 'K8s ConfigMap: awx-operator.yaml'
+    source: inferred
+    confidence: medium
+  awx-postgres-pvc.yaml:
+    summary: 'K8s PersistentVolumeClaim: awx-postgres-pvc.yaml'
+    source: inferred
+    confidence: medium
+  kustomization.yaml:
+    summary: 'Kustomization: kustomization.yaml'
+    source: inferred
+    confidence: medium
+  namespace.yaml:
+    summary: 'K8s Namespace: namespace.yaml'
+    source: inferred
+    confidence: medium

@@ -1,0 +1,18 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-tunnel.yml:
+    summary: Configure Cloudflare Tunnel for private network access
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{
+      tunnel_name }}'
+    - '{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel'
+    - '{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{
+      tunnel_id }}/token'
+    - '{{ cloudflare_api_url }}/accounts/{{ cloudflare_account_id }}/teamnet/routes'
+    references_services:
+    - cloudflare-api
+depends_on_apps:
+- cloudflare-api

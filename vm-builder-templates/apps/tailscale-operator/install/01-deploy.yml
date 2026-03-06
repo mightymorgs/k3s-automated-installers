@@ -1,0 +1,301 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/tailscale-operator/01-deploy"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/tailscale-operator/install/01-deploy.yml"
+#     category: "apps"
+#     subsystem: "tailscale-operator"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "tailscale-operator"
+#       supported_versions: ["1.78.x+"]
+#       version_range: ">=1.78.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       tailscale: ">=1.78.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - tailscale_operator: "latest"
+#         os: "ubuntu-24.04"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-02-04"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260204_j2_vertical_slice"
+#   dependencies: ["k3s_server_installed", "tailscale_installed"]
+#   provides: ["tailscale_operator_deployed"]
+#   tags: ["tailscale", "operator", "networking", "golden-master"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Deploy Tailscale Kubernetes operator via official static manifests.
+#     Downloads operator.yaml from tailscale/tailscale GitHub repo,
+#     injects OAuth credentials, and applies with kubectl.
+#     Enables per-service MagicDNS names (subdomain.tailnet.ts.net).
+#   namespace: "tailscale"
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "tailscale.oauth_client_id_key"
+#         purpose: "Pointer to Tailscale OAuth client ID"
+#       - path: "tailscale.oauth_client_secret_key"
+#         purpose: "Pointer to Tailscale OAuth client secret"
+#     writes:
+#       - path: "_state.apps.tailscale-operator.status"
+#         example: "ready"
+#
+#   # ========== INGRESS CONFIGURATION (v3.2) ==========
+#   ingress:
+#     enabled: false
+#
+#   # ========== SSO CONFIGURATION (v3.2) ==========
+#   sso:
+#     enabled: false
+#
+#   # ========== UI METADATA ==========
+#   ui:
+#     display_name: "Tailscale Operator"
+#     icon: "network"
+#     category: "Networking"
+#     description: "Kubernetes operator for Tailscale mesh networking"
+#     docs_url: "https://tailscale.com/kb/1236/kubernetes-operator"
+#     port: null
+#     nodeport: null
+#
+#   # ========== CONFIGURABLE VARIABLES ==========
+#   vars:
+#     tailscale_operator_image:
+#       label: "Operator Image"
+#       description: "Tailscale operator container image"
+#       type: "string"
+#       default: "tailscale/k8s-operator:latest"
+#     tailscale_proxy_image:
+#       label: "Proxy Image"
+#       description: "Tailscale proxy sidecar container image"
+#       type: "string"
+#       default: "tailscale/tailscale:latest"
+#     tailscale_namespace:
+#       label: "Namespace"
+#       description: "Kubernetes namespace for operator"
+#       type: "string"
+#       default: "tailscale"
+#     tailscale_operator_hostname:
+#       label: "Operator Hostname"
+#       description: "Tailscale hostname for the operator"
+#       type: "string"
+#       default: "tailscale-operator"
+#     tailscale_operator_secret_name:
+#       label: "OAuth Secret Name"
+#       description: "K8s Secret name containing OAuth credentials"
+#       type: "string"
+#       default: "operator-oauth"
+#     tailscale_operator_log_level:
+#       label: "Log Level"
+#       description: "Operator logging verbosity"
+#       type: "string"
+#       default: "info"
+#     tailscale_proxy_tags:
+#       label: "Proxy Tags"
+#       description: "Tailscale ACL tags for proxy nodes"
+#       type: "string"
+#       default: "tag:k8s-operator"
+#     tailscale_apiserver_proxy:
+#       label: "API Server Proxy"
+#       description: "Enable API server proxy mode"
+#       type: "string"
+#       default: "false"
+#     tailscale_operator_cpu_request:
+#       label: "CPU Request"
+#       description: "Minimum CPU allocation"
+#       type: "string"
+#       default: "100m"
+#     tailscale_operator_cpu_limit:
+#       label: "CPU Limit"
+#       description: "Maximum CPU allocation"
+#       type: "string"
+#       default: "500m"
+#     tailscale_operator_memory_request:
+#       label: "Memory Request"
+#       description: "Minimum memory allocation"
+#       type: "string"
+#       default: "128Mi"
+#     tailscale_operator_memory_limit:
+#       label: "Memory Limit"
+#       description: "Maximum memory allocation"
+#       type: "string"
+#       default: "256Mi"
+#     tailscale_operator_metrics_port:
+#       label: "Metrics Port"
+#       description: "Prometheus metrics endpoint port"
+#       type: "integer"
+#       default: "9090"
+#     tailscale_oauth_client_id:
+#       label: "OAuth Client ID"
+#       description: "Tailscale OAuth client ID for operator authentication"
+#       type: "secret"
+#       default: "(from BWS)"
+#     tailscale_oauth_client_secret:
+#       label: "OAuth Client Secret"
+#       description: "Tailscale OAuth client secret for operator authentication"
+#       type: "secret"
+#       default: "(from BWS)"
+
+- name: Deploy Tailscale Kubernetes Operator
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: tailscale-operator
+    app_namespace: tailscale
+    manifest_url: "https://raw.githubusercontent.com/tailscale/tailscale/main/cmd/k8s-operator/deploy/manifests/operator.yaml"
+    manifest_path: "/tmp/tailscale-operator.yaml"
+
+  tasks:
+    # ========== 1. PREREQUISITES ==========
+    - name: Verify kubectl is available
+      ansible.builtin.command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+
+    - name: Verify Tailscale is running on host
+      ansible.builtin.command: tailscale status --self
+      register: ts_status
+      changed_when: false
+
+    # ========== 2. READ OAUTH CREDENTIALS FROM BWS ==========
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ inventory_secret_name | default('inventory/' + (vm_hostname | default(''))) }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    - name: Extract OAuth pointer keys
+      ansible.builtin.set_fact:
+        oauth_client_id_key: "{{ inventory.tailscale.oauth_client_id_key }}"
+        oauth_client_secret_key: "{{ inventory.tailscale.oauth_client_secret_key }}"
+
+    - name: Resolve OAuth client ID from pointer
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ oauth_client_id_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: client_id_raw
+      changed_when: false
+      no_log: true
+
+    - name: Resolve OAuth client secret from pointer
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ oauth_client_secret_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: client_secret_raw
+      changed_when: false
+      no_log: true
+
+    - name: Set OAuth credentials
+      ansible.builtin.set_fact:
+        ts_oauth_client_id: "{{ client_id_raw.stdout | trim }}"
+        ts_oauth_client_secret: "{{ client_secret_raw.stdout | trim }}"
+      no_log: true
+
+    - name: Verify OAuth credentials exist
+      ansible.builtin.assert:
+        that:
+          - ts_oauth_client_id is defined
+          - ts_oauth_client_id | length > 0
+          - ts_oauth_client_secret is defined
+          - ts_oauth_client_secret | length > 0
+        fail_msg: >-
+          Tailscale OAuth client credentials not found in BWS.
+          Ensure inventory/shared/secrets/tailscale/oauthclientid and
+          inventory/shared/secrets/tailscale/oauthclientsecret are populated.
+          Create an OAuth client at https://login.tailscale.com/admin/settings/oauth
+
+    # ========== 3. ENSURE NAMESPACE EXISTS ==========
+    - name: Ensure namespace exists
+      ansible.builtin.shell: |
+        kubectl create namespace {{ app_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_apply
+      changed_when: "'created' in ns_apply.stdout or 'configured' in ns_apply.stdout"
+
+    - name: Label namespace
+      ansible.builtin.command: >-
+        kubectl label namespace {{ app_namespace }}
+        app.kubernetes.io/name={{ app_name }}
+        app.kubernetes.io/part-of=golden-master
+        --overwrite
+      changed_when: false
+
+    # ========== 4. DOWNLOAD AND APPLY STATIC MANIFESTS ==========
+    - name: Download official Tailscale operator manifest
+      ansible.builtin.get_url:
+        url: "{{ manifest_url }}"
+        dest: "{{ manifest_path }}"
+        mode: '0644'
+        force: true
+
+    - name: Inject OAuth credentials and proxy tags into manifest
+      ansible.builtin.shell: |
+        set -eu
+        sed -i \
+          -e "s|client_id: # SET CLIENT ID HERE|client_id: \"{{ ts_oauth_client_id }}\"|" \
+          -e "s|client_secret: # SET CLIENT SECRET HERE|client_secret: \"{{ ts_oauth_client_secret }}\"|" \
+          -e 's|value: "tag:k8s"|value: "tag:k8s-operator"|' \
+          "{{ manifest_path }}"
+      no_log: true
+
+    - name: Apply Tailscale operator manifest
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ manifest_path }}
+      register: manifest_apply
+      changed_when: "'created' in manifest_apply.stdout or 'configured' in manifest_apply.stdout"
+
+    - name: Display applied resources
+      ansible.builtin.debug:
+        msg: "{{ manifest_apply.stdout_lines }}"
+
+    # ========== 4. WAIT FOR OPERATOR ==========
+    - name: Wait for operator deployment to be available
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} rollout status
+        deployment/operator
+        --timeout=120s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: operator_wait
+      changed_when: false
+
+    # ========== 5. CLEANUP AND STATUS ==========
+    - name: Clean up downloaded manifest
+      ansible.builtin.file:
+        path: "{{ manifest_path }}"
+        state: absent
+
+    - name: Display deployment status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Tailscale Operator Deployed Successfully"
+          - "=========================================="
+          - "Namespace: {{ app_namespace }}"
+          - "Method: Static manifests (no Helm)"
+          - "=========================================="

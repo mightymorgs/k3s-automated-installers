@@ -1,0 +1,8 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-longhorn-storage.yml:
+    summary: Verify Longhorn storage system health. Checks system pods, volumes, backups,
+      and overall cluster health. Returns comprehensive status report.
+    source: inferred
+    confidence: medium

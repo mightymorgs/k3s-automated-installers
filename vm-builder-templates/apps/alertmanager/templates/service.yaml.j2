@@ -1,0 +1,22 @@
+---
+# Alertmanager Service (J2 template)
+# Defaults match k8s-base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('alertmanager') }}
+  namespace: {{ app_namespace | default('alertmanager') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('alertmanager') }}
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app.kubernetes.io/name: {{ app_name | default('alertmanager') }}
+  ports:
+    - name: http
+      port: {{ container_port | default(9093) }}
+      targetPort: http
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30903) }}
+{% endif %}
+      protocol: TCP

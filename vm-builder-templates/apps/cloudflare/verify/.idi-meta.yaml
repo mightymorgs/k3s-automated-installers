@@ -1,0 +1,12 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-verify-origin-cert.yml:
+    summary: Verify that a Cloudflare origin certificate exists and is properly stored
+      in Kubernetes. Checks certificate exists in Cloudflare, TLS secret exists in
+      K8s with valid keys, certificate is not expired, and certificate matches the
+      expected hostname.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - https://api.cloudflare.com/client/v4/certificates?hostname={{ hostname }}

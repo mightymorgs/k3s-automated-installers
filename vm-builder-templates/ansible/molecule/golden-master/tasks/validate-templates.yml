@@ -1,0 +1,127 @@
+---
+# Molecule validation: J2 templates
+#
+# Rules checked:
+#   - consistent-labels (WARNING): Templates use app.kubernetes.io/ labels
+#   - secret-naming (WARNING): Secret name uses app_name + '-credentials' or secret_name variable
+
+# ============================================================
+# DISCOVER J2 TEMPLATES
+# ============================================================
+
+- name: "Find J2 templates for {{ app_path | basename }}"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/templates"
+    patterns: "*.j2"
+    file_type: file
+  register: j2_templates
+
+- name: "Skip — no J2 templates for {{ app_path | basename }}"
+  ansible.builtin.debug:
+    msg: "No J2 templates found — skipping template validation"
+  when: j2_templates.files | length == 0
+
+- name: "Validate J2 templates for {{ app_path | basename }}"
+  when: j2_templates.files | length > 0
+  block:
+
+    - name: "Read J2 templates for {{ app_path | basename }}"
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      register: template_contents
+      loop: "{{ j2_templates.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    # ================================================================
+    # RULE: consistent-labels (WARNING)
+    #
+    # J2 templates must use standard app.kubernetes.io/ labels.
+    # At minimum: app.kubernetes.io/name.
+    # These labels enable consistent kubectl queries, kube-linter
+    # checks, and label-based pod selection in install/verify playbooks.
+    # ================================================================
+
+    - name: "WARNING [consistent-labels] {{ app_path | basename }}"
+      ansible.builtin.assert:
+        that:
+          - "'app.kubernetes.io/name' in (item.content | b64decode)"
+        fail_msg: >-
+          {{ item.source | basename }} does not use app.kubernetes.io/name label.
+          All K8s manifests must include standard app.kubernetes.io/ labels
+          for consistent kubectl queries and pod selection.
+        success_msg: "PASS: {{ item.source | basename }}"
+      loop: "{{ template_contents.results }}"
+      loop_control:
+        label: "{{ item.source | basename }}"
+      register: rule_consistent_labels
+      failed_when: false
+
+    - name: "Record consistent-labels results"
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+            'app': app_path | basename,
+            'rule': 'consistent-labels',
+            'category': 'templates',
+            'severity': 'warning',
+            'files_checked': template_contents.results | length,
+            'failures': rule_consistent_labels.results
+              | selectattr('failed', 'equalto', true)
+              | list | length,
+            'passed': rule_consistent_labels.results
+              | selectattr('failed', 'equalto', false)
+              | list | length == rule_consistent_labels.results | length
+          }] }}
+
+    # ================================================================
+    # RULE: secret-naming (WARNING)
+    #
+    # K8s Secret name should follow the convention:
+    #   {{ app_name }}-credentials   (or use secret_name variable)
+    # Override with secret_name variable only for operator-managed apps.
+    #
+    # Only applies to templates that define a Secret resource.
+    # ================================================================
+
+    # Check secret templates for naming convention (only templates containing "kind: Secret")
+    - name: "Check secret templates for naming convention"
+      ansible.builtin.assert:
+        that:
+          - "'credentials' in (item.content | b64decode) or 'secret_name' in (item.content | b64decode)"
+        fail_msg: >-
+          {{ item.source | basename }} defines a Secret but does not follow
+          the naming convention (app_name + '-credentials') and does not use
+          the secret_name variable. Use {{ '{{' }} app_name {{ '}}' }}-credentials
+          or {{ '{{' }} secret_name {{ '}}' }} for operator-managed apps.
+        success_msg: "PASS: {{ item.source | basename }}"
+      loop: "{{ template_contents.results }}"
+      loop_control:
+        label: "{{ item.source | basename }}"
+      when: "'kind: Secret' in (item.content | b64decode)"
+      register: rule_secret_naming
+      failed_when: false
+
+    - name: "Record secret-naming results"
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+            'app': app_path | basename,
+            'rule': 'secret-naming',
+            'category': 'templates',
+            'severity': 'warning',
+            'files_checked': template_contents.results
+              | selectattr('content', 'defined')
+              | map(attribute='content')
+              | map('b64decode')
+              | select('search', 'kind: Secret')
+              | list | length,
+            'failures': (rule_secret_naming.results | default([]))
+              | selectattr('failed', 'defined')
+              | selectattr('failed', 'equalto', true)
+              | list | length,
+            'passed': (rule_secret_naming.results | default([]))
+              | selectattr('failed', 'defined')
+              | selectattr('failed', 'equalto', true)
+              | list | length == 0
+          }] }}

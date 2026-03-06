@@ -1,0 +1,130 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/traefik/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "traefik"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["traefik_deployed"]
+#   provides: ["traefik_api_configured"]
+#   tags: ["traefik", "api", "dashboard", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable the Traefik dashboard in insecure mode for Tailscale Ingress.
+#     Sets TRAEFIK_API_INSECURE=true via kubectl set env so that the
+#     dashboard API listens on port 8080 without its own auth layer.
+#     Tailscale provides the authentication layer.
+#   requires_apps: ["traefik"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.traefik.configured"
+#         example: true
+
+- name: Configure Traefik dashboard for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    traefik_namespace: "traefik"
+    app_namespace: "{{ traefik_namespace }}"
+  tasks:
+    # ========== CHECK IF TRAEFIK IS DEPLOYED ==========
+    - name: Check if Traefik pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app.kubernetes.io/name=traefik --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: traefik_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Traefik not deployed
+      ansible.builtin.debug:
+        msg: "Traefik not deployed - skipping API configuration"
+      when: traefik_pod_check.rc != 0 or traefik_pod_check.stdout | length == 0
+
+    - name: End play if Traefik not available
+      ansible.builtin.meta: end_play
+      when: traefik_pod_check.rc != 0 or traefik_pod_check.stdout | length == 0
+
+    # ========== ENABLE DASHBOARD IN INSECURE MODE VIA ENV VARS ==========
+    # Traefik reads TRAEFIK_API_INSECURE as equivalent to --api.insecure=true.
+    # The deployment template already sets --api.dashboard=true, so we only
+    # need to flip insecure mode on.  Setting TRAEFIK_API_DASHBOARD=true is
+    # included for explicitness in case the CLI arg is ever removed.
+    - name: Enable Traefik dashboard insecure mode via environment variables
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env deployment/traefik -n {{ app_namespace }}
+          TRAEFIK_API_DASHBOARD=true
+          TRAEFIK_API_INSECURE=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: env_patch_result
+      changed_when: "'updated' in env_patch_result.stdout"
+
+    # ========== WAIT FOR ROLLOUT ==========
+    - name: Wait for Traefik rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/traefik -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== VERIFY TRAEFIK POD IS HEALTHY ==========
+    # The dashboard listens on port 8080 internally but is not exposed as a
+    # NodePort.  We verify the pod came back healthy after the rollout by
+    # checking the ping endpoint on the web entrypoint (port 8000).
+    - name: Get Traefik pod name after rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pod -n {{ app_namespace }}
+          -l app.kubernetes.io/name=traefik
+          -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: _traefik_pod_result
+      changed_when: false
+
+    - name: Verify Traefik ping endpoint after rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl exec -n {{ app_namespace }} {{ _traefik_pod_result.stdout }}
+          -- wget -q -O - http://127.0.0.1:8000/ping
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: ping_check
+      retries: 10
+      delay: 6
+      until: ping_check.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if Traefik not healthy after rollout
+      ansible.builtin.fail:
+        msg: "Traefik not healthy after rollout (ping rc: {{ ping_check.rc | default('unknown') }})"
+      when: ping_check.rc is not defined or ping_check.rc != 0
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Traefik API Configuration Complete"
+          - "=========================================="
+          - "Dashboard Enabled: true"
+          - "Insecure Mode: true (Tailscale is auth layer)"
+          - "Dashboard Port: 8080 (internal, not exposed as NodePort)"
+          - "Health Check: ping endpoint OK"
+          - "=========================================="

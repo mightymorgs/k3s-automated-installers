@@ -1,0 +1,26 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Enable anonymous access for Kibana in Tailscale mode. Patches the Kibana
+      deployment to disable xpack security so users on the tailnet can access dashboards
+      without logging in. Tailscale provides the authentication layer.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ kibana_url }}/api/status'
+  05-wire-elastic.yml:
+    summary: Configure Kibana to connect to Elasticsearch. Kibana uses the ELASTICSEARCH_HOSTS
+      environment variable (or kibana.yml config) to locate Elasticsearch. This playbook
+      patches the Kibana deployment to set the correct internal K8s DNS URL for Elasticsearch,
+      then waits for rollout and verifies connectivity.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ kibana_url }}/api/status'
+    requires_apps:
+    - elastic
+    references_services:
+    - elastic
+depends_on_apps:
+- elastic

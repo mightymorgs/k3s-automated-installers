@@ -1,0 +1,23 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-create-origin-certs.yml:
+    summary: Create Cloudflare origin certificates for all installed Cloudflare-mode
+      apps. Uses BWS cache for credential resolution, REGISTRY_PATH for app discovery,
+      per-app ingress mode overrides, and stores certs in each app's own namespace.
+    source: inferred
+    confidence: medium
+  01-create-origin-certs.yml.j2:
+    summary: 'Jinja2 template: 01-create-origin-certs.yml.j2'
+    source: inferred
+    confidence: medium
+  02-configure-tunnel-and-dns.yml:
+    summary: Configure Cloudflare Tunnel ingress rules and create DNS CNAME records
+      dynamically from registry.json + installed apps. Routes all traffic through
+      Traefik. Includes auth.{domain} for authentik.
+    source: inferred
+    confidence: medium
+  02-configure-tunnel-and-dns.yml.j2:
+    summary: 'Jinja2 template: 02-configure-tunnel-and-dns.yml.j2'
+    source: inferred
+    confidence: medium

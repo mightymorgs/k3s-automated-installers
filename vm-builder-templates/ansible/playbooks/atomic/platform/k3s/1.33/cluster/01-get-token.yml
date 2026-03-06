@@ -1,0 +1,78 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/cluster/01-get-token"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/cluster/01-get-token.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "cluster"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         kernel: "6.8.0-85"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Tested on homelab k3s cluster"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_installed"]
+#   provides: ["k3s_token"]
+#   tags: ["k3s", "cluster", "token"]
+#   estimated_duration: 10
+#   parallel_safe: false
+#   idempotent: true
+#   description: Extract K3s join token from master node
+- name: Extract K3s join token from master node
+  hosts: k3s_masters
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Ensure K3s server is running
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+        enabled: true
+    - name: Wait for K3s node-token file to exist
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 60
+    - name: Read K3s join token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_raw
+    - name: Parse K3s token
+      ansible.builtin.set_fact:
+        k3s_join_token: '{{ k3s_token_raw.content | b64decode | trim }}'
+    - name: Display token extraction confirmation
+      ansible.builtin.debug:
+        msg:
+          - K3s join token extracted successfully
+          - 'Master URL: https://{{ ansible_default_ipv4.address }}:6443'
+          - 'Token length: {{ k3s_join_token | length }} characters'
+    - name: Share token with localhost for worker nodes
+      ansible.builtin.set_fact:
+        k3s_master_url: https://{{ ansible_default_ipv4.address }}:6443
+        k3s_master_token: '{{ k3s_join_token }}'
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true

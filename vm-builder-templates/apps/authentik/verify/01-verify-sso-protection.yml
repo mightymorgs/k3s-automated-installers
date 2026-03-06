@@ -1,0 +1,290 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/authentik/verify/sso-protection"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "webapp_protected_by_sso"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/authentik/verify/01-verify-sso-protection.yml"
+#     category: "platform"
+#     subsystem: "authentik"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "authentik"
+#       supported_versions: ["2024.x", "2025.x"]
+#       version_range: ">=2024.0.0"
+#
+#     requires:
+#       authentik: ">=2024.0.0"
+#       traefik: ">=2.10.0"
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - authentik: "2025.1.x"
+#         traefik: "3.1.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies webapp is protected by Authentik SSO"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_phase5_verification"
+#   dependencies: ["authentik_deployed", "traefik_deployed"]
+#   provides: ["sso_protection_verified"]
+#   tags: ["authentik", "sso", "verification", "forwardauth", "phase5"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that a web application is protected by Authentik SSO. Checks OAuth provider exists,
+#     application exists, ForwardAuth middleware is configured, and unauthenticated requests
+#     redirect to Authentik for authentication.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.sso.forwardauth_configured"
+#         purpose: "Check if ForwardAuth middleware was configured"
+#       - path: "_state.sso.protected_apps"
+#         purpose: "List of apps that should be protected"
+#       - path: "_state.sso.auth_url"
+#         purpose: "ForwardAuth URL for Authentik"
+#       - path: "_state.apps.authentik.url"
+#         purpose: "Authentik base URL for API calls"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - Web App Protected by SSO
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    app_name: "{{ app_name }}"
+    app_host: "{{ app_host }}"
+    app_namespace: "{{ app_namespace }}"
+    # authentik_url: from BWS _state via Phase 4 extra-vars
+    authentik_url: "{{ authentik_url }}"
+    authentik_token: "{{ authentik_token }}"
+    k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+    client: "homelab"
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying SSO Protection"
+          - "=========================================="
+          - "Application: {{ app_name }}"
+          - "Hostname: {{ app_host }}"
+          - "Namespace: {{ app_namespace }}"
+          - "Client: {{ client }}"
+          - "=========================================="
+
+    # ========== 1. CHECK OAUTH PROVIDER IN AUTHENTIK ==========
+    - name: Check OAuth provider exists in Authentik
+      ansible.builtin.uri:
+        url: "{{ authentik_url }}/api/v3/providers/oauth2/?name={{ app_name }}-{{ client }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ authentik_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: provider_check
+      failed_when: false
+
+    - name: Assert OAuth provider exists
+      ansible.builtin.assert:
+        that:
+          - provider_check.status == 200
+          - provider_check.json.results | length > 0
+        fail_msg: "OAuth provider for {{ app_name }}-{{ client }} not found in Authentik"
+        success_msg: "OAuth provider {{ app_name }}-{{ client }} exists"
+      when: provider_check.status == 200
+
+    - name: Record provider check result
+      ansible.builtin.set_fact:
+        provider_exists: "{{ provider_check.status == 200 and provider_check.json.results | length > 0 }}"
+
+    # ========== 2. CHECK APPLICATION IN AUTHENTIK ==========
+    - name: Check application exists in Authentik
+      ansible.builtin.uri:
+        url: "{{ authentik_url }}/api/v3/core/applications/?slug={{ app_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ authentik_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: application_check
+      failed_when: false
+
+    - name: Assert application exists
+      ansible.builtin.assert:
+        that:
+          - application_check.status == 200
+          - application_check.json.results | length > 0
+        fail_msg: "Application {{ app_name }} not found in Authentik"
+        success_msg: "Application {{ app_name }} exists in Authentik"
+      when: application_check.status == 200
+
+    - name: Record application check result
+      ansible.builtin.set_fact:
+        application_exists: "{{ application_check.status == 200 and application_check.json.results | length > 0 }}"
+
+    # ========== 3. CHECK FORWARDAUTH MIDDLEWARE IN CLUSTER ==========
+    - name: Check ForwardAuth middleware exists
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: traefik.io/v1alpha1
+        kind: Middleware
+        name: authentik-forwardauth
+        namespace: authentik
+      register: middleware_check
+      failed_when: false
+
+    - name: Assert ForwardAuth middleware exists
+      ansible.builtin.assert:
+        that:
+          - middleware_check.resources | length > 0
+        fail_msg: "ForwardAuth middleware 'authentik-forwardauth' not found in authentik namespace"
+        success_msg: "ForwardAuth middleware exists"
+      when: middleware_check.resources is defined
+
+    - name: Record middleware check result
+      ansible.builtin.set_fact:
+        middleware_exists: "{{ middleware_check.resources | default([]) | length > 0 }}"
+
+    # ========== 4. CHECK INGRESSROUTE HAS MIDDLEWARE ATTACHED ==========
+    - name: Check IngressRoute has ForwardAuth middleware
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        name: "{{ app_name }}-ingress"
+        namespace: "{{ app_namespace }}"
+      register: ingressroute_check
+      failed_when: false
+
+    - name: Extract middleware configuration from IngressRoute
+      ansible.builtin.set_fact:
+        ingressroute_middlewares: >-
+          {{
+            ingressroute_check.resources[0].spec.routes[0].middlewares | default([])
+            | map(attribute='name') | list
+          }}
+      when: ingressroute_check.resources | default([]) | length > 0
+
+    - name: Assert IngressRoute has ForwardAuth middleware attached
+      ansible.builtin.assert:
+        that:
+          - "'authentik-forwardauth' in ingressroute_middlewares"
+        fail_msg: "IngressRoute {{ app_name }}-ingress does not have authentik-forwardauth middleware attached"
+        success_msg: "IngressRoute has ForwardAuth middleware attached"
+      when: ingressroute_check.resources | default([]) | length > 0
+
+    - name: Record IngressRoute check result
+      ansible.builtin.set_fact:
+        ingressroute_protected: >-
+          {{
+            ingressroute_check.resources | default([]) | length > 0 and
+            'authentik-forwardauth' in (ingressroute_middlewares | default([]))
+          }}
+
+    # ========== 5. TEST HTTP REDIRECT BEHAVIOR ==========
+    - name: Test unauthenticated request redirects to Authentik
+      ansible.builtin.uri:
+        url: "https://{{ app_host }}/"
+        method: GET
+        follow_redirects: none
+        status_code: [302, 301, 303, 307]
+        validate_certs: false
+      register: redirect_check
+      failed_when: false
+
+    - name: Assert redirect location contains Authentik
+      ansible.builtin.assert:
+        that:
+          - redirect_check.status in [301, 302, 303, 307]
+          - "'authentik' in redirect_check.location | default('') | lower"
+        fail_msg: >-
+          Unauthenticated request did not redirect to Authentik.
+          Status: {{ redirect_check.status }}, Location: {{ redirect_check.location | default('none') }}
+        success_msg: "Unauthenticated requests correctly redirect to Authentik"
+      when: redirect_check.status is defined
+
+    - name: Record redirect check result
+      ansible.builtin.set_fact:
+        redirect_works: >-
+          {{
+            redirect_check.status | default(0) in [301, 302, 303, 307] and
+            'authentik' in (redirect_check.location | default('') | lower)
+          }}
+
+    # ========== 6. VERIFICATION SUMMARY ==========
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          app_name: "{{ app_name }}"
+          app_host: "{{ app_host }}"
+          app_namespace: "{{ app_namespace }}"
+          checks:
+            oauth_provider_exists: "{{ provider_exists | default(false) }}"
+            application_exists: "{{ application_exists | default(false) }}"
+            middleware_exists: "{{ middleware_exists | default(false) }}"
+            ingressroute_protected: "{{ ingressroute_protected | default(false) }}"
+            redirect_works: "{{ redirect_works | default(false) }}"
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            verification_results.checks.oauth_provider_exists | bool and
+            verification_results.checks.application_exists | bool and
+            verification_results.checks.middleware_exists | bool and
+            verification_results.checks.ingressroute_protected | bool and
+            verification_results.checks.redirect_works | bool
+          }}
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "SSO Protection Verification Summary"
+          - "=========================================="
+          - ""
+          - "Application: {{ app_name }}"
+          - "Hostname: {{ app_host }}"
+          - ""
+          - "Checks:"
+          - "  OAuth Provider Exists: {{ verification_results.checks.oauth_provider_exists }}"
+          - "  Application Exists: {{ verification_results.checks.application_exists }}"
+          - "  ForwardAuth Middleware Exists: {{ verification_results.checks.middleware_exists }}"
+          - "  IngressRoute Protected: {{ verification_results.checks.ingressroute_protected }}"
+          - "  Redirect to Authentik Works: {{ verification_results.checks.redirect_works }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Fail if any checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          SSO protection verification failed for {{ app_name }}.
+          See summary above for details.
+      when: not all_checks_passed
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "{{ app_name }} is protected by SSO - verification complete"
+      when: all_checks_passed

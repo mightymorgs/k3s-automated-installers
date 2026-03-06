@@ -1,0 +1,17 @@
+---
+# Claudebox Workspace PVC (J2 template)
+# Defaults match install/01-deploy.yml inline definitions
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ pvc_name | default('claudebox-workspace') }}
+  namespace: {{ app_namespace | default('ai-tools') }}
+  labels:
+    app: {{ app_name | default('claudebox') }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ storage_class | default('longhorn') }}
+  resources:
+    requests:
+      storage: {{ storage_size | default('20Gi') }}

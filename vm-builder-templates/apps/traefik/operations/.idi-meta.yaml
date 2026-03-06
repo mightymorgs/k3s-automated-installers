@@ -1,0 +1,15 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  ingressroute-create.yml:
+    summary: Create a Traefik IngressRoute CRD for exposing applications via HTTPS.
+      Supports HTTP/HTTPS entrypoints, TLS termination with secrets, and middleware
+      references for SSO integration.
+    source: inferred
+    confidence: medium
+  middleware-forwardauth-create.yml:
+    summary: Create a Traefik ForwardAuth middleware for Authentik SSO integration.
+      Configures authentication delegation to Authentik's outpost endpoint with proper
+      header forwarding for user identity.
+    source: inferred
+    confidence: medium

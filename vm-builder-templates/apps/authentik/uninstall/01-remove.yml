@@ -1,0 +1,141 @@
+---
+- name: Uninstall Authentik
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: authentik
+    app_namespace: "authentik"
+    delete_pvc: false
+
+  tasks:
+    - name: Check namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+      register: ns_check
+
+    - name: Skip if namespace does not exist
+      ansible.builtin.meta: end_play
+      when: ns_check.resources | length == 0
+
+    # Delete ForwardAuth middleware (Traefik CRD)
+    - name: Delete ForwardAuth Middleware
+      kubernetes.core.k8s:
+        api_version: traefik.io/v1alpha1
+        kind: Middleware
+        name: authentik-forwardauth
+        namespace: "{{ app_namespace }}"
+        state: absent
+      failed_when: false
+
+    # Delete IngressRoute (Traefik CRD)
+    - name: Delete IngressRoute
+      kubernetes.core.k8s:
+        api_version: traefik.io/v1alpha1
+        kind: IngressRoute
+        name: authentik-ingressroute
+        namespace: "{{ app_namespace }}"
+        state: absent
+      failed_when: false
+
+    - name: Delete Deployment authentik-worker
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: authentik-worker
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete Deployment authentik-redis
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: authentik-redis
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete StatefulSet authentik-server
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: authentik-server
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete StatefulSet authentik-postgres
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: authentik-postgres
+        namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete Services
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Service
+        name: "{{ item }}"
+        namespace: "{{ app_namespace }}"
+        state: absent
+      loop:
+        - authentik
+        - authentik-server
+        - authentik-postgres
+        - authentik-redis
+
+    - name: Delete Secret authentik-secrets
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Secret
+        name: authentik-secrets
+        namespace: "{{ app_namespace }}"
+        state: absent
+
+    - name: Delete ConfigMap authentik-blueprints
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: ConfigMap
+        name: authentik-blueprints
+        namespace: "{{ app_namespace }}"
+        state: absent
+
+    - name: Delete PVCs for authentik
+      when: delete_pvc | bool
+      block:
+        - name: Find all PVCs in authentik namespace
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ app_namespace }}"
+          register: app_pvcs
+
+        - name: Remove PVCs
+          kubernetes.core.k8s:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            name: "{{ item.metadata.name }}"
+            namespace: "{{ app_namespace }}"
+            state: absent
+          loop: "{{ app_pvcs.resources }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+    - name: Verify removal
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: authentik-server
+        namespace: "{{ app_namespace }}"
+      register: verify
+      failed_when: verify.resources | length > 0

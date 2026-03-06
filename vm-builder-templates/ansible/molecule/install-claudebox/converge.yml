@@ -1,0 +1,20 @@
+---
+- name: "Create Kind cluster"
+  ansible.builtin.import_playbook: ../shared/create-kind.yml
+
+- name: "Prepare namespaces"
+  ansible.builtin.import_playbook: ../shared/prepare-namespaces.yml
+
+- name: "Ensure claudebox namespace"
+  hosts: localhost
+  gather_facts: false
+  environment:
+    KUBECONFIG: /tmp/molecule-kubeconfig
+  tasks:
+    - name: Create claudebox namespace
+      ansible.builtin.shell: >-
+        kubectl create namespace ai-tools --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+- name: "Deploy claudebox"
+  ansible.builtin.import_playbook: ../../../apps/claudebox/install/01-deploy.yml

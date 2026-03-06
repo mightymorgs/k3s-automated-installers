@@ -1,0 +1,25 @@
+---
+# Kibana Service (J2 template)
+# Defaults match k8s-base/kibana-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: {{ app_namespace | default('elastic') }}
+  labels:
+    app: kibana
+    app.kubernetes.io/name: kibana
+    app.kubernetes.io/component: {{ app_component | default('observability') }}
+spec:
+  type: {{ kibana_service_type | default('ClusterIP') }}
+  selector:
+    app: kibana
+    app.kubernetes.io/name: kibana
+  ports:
+    - name: http
+      port: {{ kibana_port | default(5601) }}
+      targetPort: http
+{% if kibana_service_type | default('ClusterIP') == 'NodePort' %}
+      nodePort: {{ kibana_nodeport | default(30561) }}
+{% endif %}
+      protocol: TCP

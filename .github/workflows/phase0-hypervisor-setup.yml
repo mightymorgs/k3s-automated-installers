@@ -1,0 +1,305 @@
+---
+name: Phase 0 - Hypervisor QEMU/Libvirt Setup
+# Runs on the hypervisor's self-hosted runner (installed by bootstrap script).
+# Uses local Ansible connection — no SSH transport needed.
+# Pattern matches Phase 2.5 (vm-self-bootstrap).
+on:
+  workflow_dispatch:
+    inputs:
+      hypervisor_name:
+        description: Full hypervisor name (e.g., hv-auros15g-libvirt-office)
+        required: true
+        type: string
+      force_reinstall:
+        description: Force reinstall even if QEMU already installed
+        required: false
+        default: 'false'
+        type: string
+
+jobs:
+  setup:
+    # Route to the hypervisor's self-hosted runner via its name label
+    # (bootstrap registers runner with --labels "hypervisor,<short_name>,<full_name>,<platform>,<location>")
+    runs-on: [self-hosted, '${{ inputs.hypervisor_name }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify running on correct hypervisor
+        run: |
+          echo "Runner host: $(hostname)"
+          echo "Expected hypervisor: ${{ inputs.hypervisor_name }}"
+          echo "Runner user: $(whoami)"
+          echo "Sudo access: $(sudo -n true 2>/dev/null && echo 'yes' || echo 'no')"
+
+      - name: Install prerequisites (Ansible, jq)
+        run: |
+          if ! command -v ansible-playbook >/dev/null 2>&1; then
+            echo "Installing Ansible..."
+            sudo apt-get update -qq
+            sudo apt-get install -y software-properties-common
+            sudo add-apt-repository -y ppa:ansible/ansible
+            sudo apt-get update -qq
+            sudo apt-get install -y ansible
+          fi
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "Installing jq..."
+            sudo apt-get install -y jq
+          fi
+
+          echo "Tools ready:"
+          ansible --version | head -1
+          jq --version
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Fetch hypervisor inventory from BWS
+        id: hypervisor_config
+        run: |
+          set -euo pipefail
+          HYPERVISOR_KEY="inventory/hypervisors/${{ inputs.hypervisor_name }}"
+          SECRET_ID=$(jq -r --arg k "$HYPERVISOR_KEY" '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "null" ]; then
+            echo "ERROR: Hypervisor inventory not found at: $HYPERVISOR_KEY"
+            echo "Please run the bootstrap script on the hypervisor first"
+            exit 1
+          fi
+
+          HV_INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          echo "secret_id=$SECRET_ID" >> "$GITHUB_OUTPUT"
+
+          # Export full JSON for downstream steps
+          {
+            echo "json<<EOF"
+            echo "$HV_INVENTORY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write local Ansible inventory
+        run: |
+          cat > inventory.local.ini <<'EOF'
+          [hypervisor]
+          localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+          EOF
+          echo "Ansible inventory:"
+          cat inventory.local.ini
+
+      - name: Run Phase 0 atomic playbooks
+        env:
+          ANSIBLE_STDOUT_CALLBACK: default
+        run: |
+          set -euo pipefail
+
+          # All playbooks run locally with become (sudo) for privilege escalation
+          COMMON_ARGS="-i inventory.local.ini --become"
+
+          # shellcheck disable=SC2086
+          ansible-playbook $COMMON_ARGS \
+            vm-builder/vm-builder-templates/ansible/playbooks/atomic/hypervisor/qemu/01-install-packages.yml \
+            -e "force_reinstall=${{ inputs.force_reinstall }}"
+
+          # shellcheck disable=SC2086
+          ansible-playbook $COMMON_ARGS \
+            vm-builder/vm-builder-templates/ansible/playbooks/atomic/hypervisor/qemu/02-configure-storage-pools.yml
+
+          # Pass network_mode from inventory so the playbook can dynamically
+          # configure NAT vs bridge based on what interfaces actually exist
+          HV_JSON='${{ steps.hypervisor_config.outputs.json }}'
+          NET_MODE=$(echo "$HV_JSON" | jq -r '.network.mode // "nat"')
+
+          # shellcheck disable=SC2086
+          ansible-playbook $COMMON_ARGS \
+            vm-builder/vm-builder-templates/ansible/playbooks/atomic/hypervisor/qemu/03-configure-networking.yml \
+            -e "network_mode=${NET_MODE}"
+
+          # shellcheck disable=SC2086
+          ansible-playbook $COMMON_ARGS \
+            vm-builder/vm-builder-templates/ansible/playbooks/atomic/hypervisor/qemu/04-install-tools.yml
+
+          # shellcheck disable=SC2086
+          ansible-playbook $COMMON_ARGS \
+            vm-builder/vm-builder-templates/ansible/playbooks/atomic/hypervisor/qemu/04b-install-bws-ansible.yml
+
+          # shellcheck disable=SC2086
+          ansible-playbook $COMMON_ARGS \
+            vm-builder/vm-builder-templates/ansible/playbooks/atomic/hypervisor/qemu/05-verify-capabilities.yml
+
+      - name: Gather hypervisor hardware and software info
+        id: hw_info
+        run: |
+          set -euo pipefail
+
+          # Running locally on the hypervisor — no SSH needed
+          CPU_CORES=$(nproc 2>/dev/null || echo "unknown")
+          MEMORY_MB=$(free -m | awk '/Mem:/{print $2}' 2>/dev/null || echo "unknown")
+          DISK_GB=$(df -BG / | awk 'NR==2{print $2}' | tr -d 'G' 2>/dev/null || echo "unknown")
+          ARCH=$(uname -m 2>/dev/null || echo "unknown")
+          KERNEL=$(uname -r 2>/dev/null || echo "unknown")
+          OS_RELEASE=$(lsb_release -ds 2>/dev/null || grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' 2>/dev/null || echo "unknown")
+
+          # Tool versions installed by Phase 0 playbooks
+          QEMU_VER=$(qemu-system-x86_64 --version 2>/dev/null | head -1 || echo "not installed")
+          LIBVIRT_VER=$(libvirtd --version 2>/dev/null || echo "not installed")
+          TERRAFORM_VER=$(terraform version -json 2>/dev/null | jq -r '.terraform_version' || echo "not installed")
+          TERRAGRUNT_VER=$(terragrunt --version 2>/dev/null | head -1 || echo "not installed")
+          BWS_VER=$(bws --version 2>/dev/null || echo "not installed")
+          ANSIBLE_VER=$(ansible --version 2>/dev/null | head -1 || echo "not installed")
+          GH_VER=$(gh --version 2>/dev/null | head -1 || echo "not installed")
+          TAILSCALE_VER=$(tailscale version 2>/dev/null | head -1 || echo "not installed")
+
+          # KVM capability
+          KVM_OK=$(test -e /dev/kvm && echo true || echo false)
+
+          # Tailscale info (hypervisor may already have Tailscale from manual setup)
+          if command -v tailscale >/dev/null 2>&1 && tailscale status --json >/dev/null 2>&1; then
+            TS_IPV4=$(tailscale ip -4 2>/dev/null || echo "")
+            TS_IPV6=$(tailscale ip -6 2>/dev/null || echo "")
+            TS_STATUS_JSON=$(tailscale status --json 2>/dev/null || echo "{}")
+            TS_DEVICE_ID=$(echo "$TS_STATUS_JSON" | jq -r '.Self.ID // ""' 2>/dev/null || echo "")
+            TS_HOSTNAME=$(echo "$TS_STATUS_JSON" | jq -r '.Self.DNSName // ""' 2>/dev/null || echo "")
+          else
+            TS_IPV4=""
+            TS_IPV6=""
+            TS_DEVICE_ID=""
+            TS_HOSTNAME=""
+          fi
+
+          # Storage pools
+          STORAGE_POOLS=$(sudo virsh pool-list --all 2>/dev/null | tail -n+3 | awk 'NF{print $1}' | tr '\n' ',' | sed 's/,$//' || echo "none")
+
+          # Network interfaces
+          DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}' || echo "unknown")
+          DEFAULT_IP=$(ip -4 addr show dev "${DEFAULT_IFACE}" 2>/dev/null | awk '/inet /{print $2}' | head -1 || echo "unknown")
+          PHYSICAL_IFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -Ev '^(lo|veth|virbr|docker|br-|tailscale|tun)' | tr '\n' ',' | sed 's/,$//' || echo "unknown")
+          BRIDGES=$(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ',' | sed 's/,$//' || echo "none")
+          LIBVIRT_NETS=$(sudo virsh net-list --all 2>/dev/null | tail -n+3 | awk 'NF{print $1"(" $2 ")"}' | tr '\n' ',' | sed 's/,$//' || echo "none")
+          NETWORK_MODE=$(echo '${{ steps.hypervisor_config.outputs.json }}' | jq -r '.network.mode // "nat"')
+
+          # Write all outputs
+          {
+            echo "cpu_cores=$CPU_CORES"
+            echo "memory_mb=$MEMORY_MB"
+            echo "disk_gb=$DISK_GB"
+            echo "arch=$ARCH"
+            echo "kernel=$KERNEL"
+            echo "os_release=$OS_RELEASE"
+            echo "qemu_version=$QEMU_VER"
+            echo "libvirt_version=$LIBVIRT_VER"
+            echo "terraform_version=$TERRAFORM_VER"
+            echo "terragrunt_version=$TERRAGRUNT_VER"
+            echo "bws_version=$BWS_VER"
+            echo "ansible_version=$ANSIBLE_VER"
+            echo "gh_version=$GH_VER"
+            echo "kvm_available=$KVM_OK"
+            echo "storage_pools=$STORAGE_POOLS"
+            echo "default_iface=$DEFAULT_IFACE"
+            echo "default_ip=$DEFAULT_IP"
+            echo "physical_ifaces=$PHYSICAL_IFACES"
+            echo "bridges=$BRIDGES"
+            echo "libvirt_nets=$LIBVIRT_NETS"
+            echo "network_mode=$NETWORK_MODE"
+            echo "tailscale_version=$TAILSCALE_VER"
+            echo "tailscale_ipv4=$TS_IPV4"
+            echo "tailscale_ipv6=$TS_IPV6"
+            echo "tailscale_device_id=$TS_DEVICE_ID"
+            echo "tailscale_hostname=$TS_HOSTNAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update BWS hypervisor inventory with Phase 0 completion
+        run: |
+          set -euo pipefail
+          SECRET_ID="${{ steps.hypervisor_config.outputs.secret_id }}"
+
+          # Get current inventory
+          CURRENT_INV=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Build comprehensive state update with hardware + software + network + tailscale discovery
+          UPDATED_INV=$(echo "$CURRENT_INV" | jq \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg cpu "${{ steps.hw_info.outputs.cpu_cores }}" \
+            --arg mem "${{ steps.hw_info.outputs.memory_mb }}" \
+            --arg disk "${{ steps.hw_info.outputs.disk_gb }}" \
+            --arg arch "${{ steps.hw_info.outputs.arch }}" \
+            --arg kernel "${{ steps.hw_info.outputs.kernel }}" \
+            --arg os "${{ steps.hw_info.outputs.os_release }}" \
+            --arg qemu "${{ steps.hw_info.outputs.qemu_version }}" \
+            --arg libvirt "${{ steps.hw_info.outputs.libvirt_version }}" \
+            --arg terraform "${{ steps.hw_info.outputs.terraform_version }}" \
+            --arg terragrunt "${{ steps.hw_info.outputs.terragrunt_version }}" \
+            --arg bws_v "${{ steps.hw_info.outputs.bws_version }}" \
+            --arg ansible "${{ steps.hw_info.outputs.ansible_version }}" \
+            --arg gh "${{ steps.hw_info.outputs.gh_version }}" \
+            --arg kvm "${{ steps.hw_info.outputs.kvm_available }}" \
+            --arg pools "${{ steps.hw_info.outputs.storage_pools }}" \
+            --arg def_iface "${{ steps.hw_info.outputs.default_iface }}" \
+            --arg def_ip "${{ steps.hw_info.outputs.default_ip }}" \
+            --arg phys_ifaces "${{ steps.hw_info.outputs.physical_ifaces }}" \
+            --arg bridges "${{ steps.hw_info.outputs.bridges }}" \
+            --arg libvirt_nets "${{ steps.hw_info.outputs.libvirt_nets }}" \
+            --arg net_mode "${{ steps.hw_info.outputs.network_mode }}" \
+            --arg ts_ipv4 "${{ steps.hw_info.outputs.tailscale_ipv4 }}" \
+            --arg ts_ipv6 "${{ steps.hw_info.outputs.tailscale_ipv6 }}" \
+            --arg ts_device_id "${{ steps.hw_info.outputs.tailscale_device_id }}" \
+            --arg ts_hostname "${{ steps.hw_info.outputs.tailscale_hostname }}" \
+            --arg ts_ver "${{ steps.hw_info.outputs.tailscale_version }}" \
+            '
+            .hardware.cpu_cores = ($cpu | tonumber? // $cpu) |
+            .hardware.memory_mb = ($mem | tonumber? // $mem) |
+            .hardware.disk_gb = ($disk | tonumber? // $disk) |
+            .hardware.arch = $arch |
+            .hardware.kernel = $kernel |
+            .hardware.os = $os |
+            .hardware.kvm_available = ($kvm == "true") |
+            ._state.tools = {
+              qemu: $qemu,
+              libvirt: $libvirt,
+              terraform: $terraform,
+              terragrunt: $terragrunt,
+              bws: $bws_v,
+              ansible: $ansible,
+              gh: $gh,
+              tailscale: $ts_ver
+            } |
+            ._state.storage_pools = $pools |
+            ._state.network = {
+              default_interface: $def_iface,
+              default_ip: $def_ip,
+              physical_interfaces: ($phys_ifaces | split(",") | map(select(length > 0))),
+              bridges: ($bridges | split(",") | map(select(length > 0))),
+              libvirt_networks: ($libvirt_nets | split(",") | map(select(length > 0))),
+              configured_mode: $net_mode
+            } |
+            (if ($ts_ipv4 | length) > 0 then
+              ._state.tailscale = {
+                device_id: $ts_device_id,
+                ipv4: $ts_ipv4,
+                ipv6: $ts_ipv6,
+                hostname: $ts_hostname,
+                joined_at: $ts
+              }
+            else . end) |
+            ._state.phase0_completed_at = $ts |
+            .bootstrap.phase0_qemu_setup_completed = true |
+            .bootstrap.phase0_qemu_setup_timestamp = $ts |
+            .bootstrap.ready_for_phase2 = true
+            ')
+
+          # Write back to BWS
+          bws secret edit "$SECRET_ID" --value "$UPDATED_INV"
+
+          echo "Phase 0 complete - hypervisor ready for VM provisioning"
+          echo ""
+          echo "Hardware: ${{ steps.hw_info.outputs.cpu_cores }} cores, ${{ steps.hw_info.outputs.memory_mb }}MB RAM, ${{ steps.hw_info.outputs.disk_gb }}GB disk"
+          echo "KVM: ${{ steps.hw_info.outputs.kvm_available }}"
+          echo "QEMU: ${{ steps.hw_info.outputs.qemu_version }}"
+          echo "Terraform: ${{ steps.hw_info.outputs.terraform_version }}"
+          echo "Tailscale: ${{ steps.hw_info.outputs.tailscale_ipv4 }}"
+          echo "Network: mode=${{ steps.hw_info.outputs.network_mode }}, default=${{ steps.hw_info.outputs.default_iface }}, bridges=${{ steps.hw_info.outputs.bridges }}"

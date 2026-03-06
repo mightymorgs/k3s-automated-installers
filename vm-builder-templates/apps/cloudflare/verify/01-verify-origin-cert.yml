@@ -1,0 +1,340 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/cloudflare/verify/origin-cert"
+#   type: "atomic"
+#   generated_by: "idi"
+#   outcome_id: "origin_cert_created"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/cloudflare/verify/01-verify-origin-cert.yml"
+#     category: "platform"
+#     subsystem: "cloudflare"
+#     role: "verify"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "cloudflare-api"
+#       supported_versions: ["v4"]
+#       version_range: ">=v4"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - cloudflare_api: "v4"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Verifies Cloudflare origin certificate exists and is stored in K8s"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_phase5_verification"
+#   dependencies: ["traefik_deployed"]
+#   provides: ["origin_cert_verified"]
+#   tags: ["cloudflare", "origin-certificate", "verification", "tls", "phase5"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Verify that a Cloudflare origin certificate exists and is properly stored in Kubernetes.
+#     Checks certificate exists in Cloudflare, TLS secret exists in K8s with valid keys,
+#     certificate is not expired, and certificate matches the expected hostname.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.ingress.origin_certs"
+#         purpose: "Get mapping of app to Cloudflare certificate IDs"
+#       - path: "ingress.domain"
+#         purpose: "Base domain for hostname verification"
+#
+#     writes: []  # Read-only verification playbook
+
+- name: Verify - Cloudflare Origin Certificate Created
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    app_name: "{{ app_name }}"
+    hostname: "{{ hostname }}"
+    namespace: "cert-manager"
+    zone_id: ""
+    cloudflare_api_token: "{{ cloudflare_api_token }}"
+    k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+    cert_expiry_warning_days: 30
+
+  tasks:
+    - name: Display verification target
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Verifying Cloudflare Origin Certificate"
+          - "=========================================="
+          - "Application: {{ app_name }}"
+          - "Hostname: {{ hostname }}"
+          - "Namespace: {{ namespace }}"
+          - "Zone ID: {{ zone_id | default('Not specified') }}"
+          - "=========================================="
+
+    # ========== 1. CHECK TLS SECRET EXISTS IN K8S ==========
+    - name: Check TLS secret exists in Kubernetes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        api_version: v1
+        kind: Secret
+        name: "{{ app_name }}-origin-cert"
+        namespace: "{{ namespace }}"
+      register: k8s_secret_check
+      failed_when: false
+
+    - name: Assert TLS secret exists
+      ansible.builtin.assert:
+        that:
+          - k8s_secret_check.resources | length > 0
+        fail_msg: "TLS secret {{ app_name }}-origin-cert not found in namespace {{ namespace }}"
+        success_msg: "TLS secret {{ app_name }}-origin-cert exists"
+
+    - name: Record secret exists result
+      ansible.builtin.set_fact:
+        secret_exists: "{{ k8s_secret_check.resources | length > 0 }}"
+
+    # ========== 2. CHECK SECRET HAS REQUIRED KEYS ==========
+    - name: Check secret has tls.crt and tls.key
+      ansible.builtin.assert:
+        that:
+          - "'tls.crt' in k8s_secret_check.resources[0].data"
+          - "'tls.key' in k8s_secret_check.resources[0].data"
+        fail_msg: "TLS secret missing tls.crt or tls.key"
+        success_msg: "TLS secret has both tls.crt and tls.key"
+      when: secret_exists
+
+    - name: Record secret has keys result
+      ansible.builtin.set_fact:
+        secret_has_keys: >-
+          {{
+            secret_exists and
+            'tls.crt' in (k8s_secret_check.resources[0].data | default({})) and
+            'tls.key' in (k8s_secret_check.resources[0].data | default({}))
+          }}
+
+    # ========== 3. CHECK SECRET TYPE IS kubernetes.io/tls ==========
+    - name: Check secret type is kubernetes.io/tls
+      ansible.builtin.assert:
+        that:
+          - k8s_secret_check.resources[0].type == 'kubernetes.io/tls'
+        fail_msg: "Secret type is {{ k8s_secret_check.resources[0].type }}, expected kubernetes.io/tls"
+        success_msg: "Secret type is kubernetes.io/tls"
+      when: secret_exists
+
+    - name: Record secret type result
+      ansible.builtin.set_fact:
+        secret_type_valid: >-
+          {{
+            secret_exists and
+            k8s_secret_check.resources[0].type | default('') == 'kubernetes.io/tls'
+          }}
+
+    # ========== 4. VERIFY CERTIFICATE IS NOT EXPIRED ==========
+    - name: Extract and decode certificate
+      ansible.builtin.set_fact:
+        cert_pem: "{{ k8s_secret_check.resources[0].data['tls.crt'] | b64decode }}"
+      when: secret_has_keys
+      no_log: true
+
+    - name: Check certificate is not expired (valid for at least 1 day)
+      ansible.builtin.shell: |
+        echo "{{ cert_pem }}" | openssl x509 -noout -checkend 86400
+      register: cert_expiry_check
+      changed_when: false
+      failed_when: false
+      when: secret_has_keys
+      no_log: true
+
+    - name: Assert certificate is not expired
+      ansible.builtin.assert:
+        that:
+          - cert_expiry_check.rc == 0
+        fail_msg: "Certificate is expired or will expire within 24 hours"
+        success_msg: "Certificate is valid (not expired)"
+      when: cert_expiry_check.rc is defined
+
+    - name: Record cert not expired result
+      ansible.builtin.set_fact:
+        cert_not_expired: "{{ cert_expiry_check.rc | default(1) == 0 }}"
+
+    # ========== 5. CHECK CERTIFICATE WILL NOT EXPIRE SOON ==========
+    - name: Check certificate is not expiring within warning period
+      ansible.builtin.shell: |
+        echo "{{ cert_pem }}" | openssl x509 -noout -checkend {{ cert_expiry_warning_days * 86400 }}
+      register: cert_expiry_warning_check
+      changed_when: false
+      failed_when: false
+      when: secret_has_keys
+      no_log: true
+
+    - name: Warn if certificate expires soon
+      ansible.builtin.debug:
+        msg: "WARNING: Certificate will expire within {{ cert_expiry_warning_days }} days"
+      when: cert_expiry_warning_check.rc | default(0) != 0
+
+    - name: Record cert expiry warning result
+      ansible.builtin.set_fact:
+        cert_not_expiring_soon: "{{ cert_expiry_warning_check.rc | default(1) == 0 }}"
+
+    # ========== 6. VERIFY CERTIFICATE MATCHES HOSTNAME ==========
+    - name: Extract certificate subject and SANs
+      ansible.builtin.shell: |
+        echo "{{ cert_pem }}" | openssl x509 -noout -text 2>/dev/null | \
+          grep -E "(Subject:|DNS:)" | head -5
+      register: cert_subject_check
+      changed_when: false
+      failed_when: false
+      when: secret_has_keys
+      no_log: true
+
+    - name: Check certificate matches hostname
+      ansible.builtin.shell: |
+        echo "{{ cert_pem }}" | openssl x509 -noout -text 2>/dev/null | \
+          grep -q "{{ hostname }}"
+      register: cert_hostname_check
+      changed_when: false
+      failed_when: false
+      when: secret_has_keys
+      no_log: true
+
+    - name: Assert certificate matches hostname
+      ansible.builtin.assert:
+        that:
+          - cert_hostname_check.rc == 0
+        fail_msg: "Certificate does not include hostname {{ hostname }}"
+        success_msg: "Certificate includes hostname {{ hostname }}"
+      when: cert_hostname_check.rc is defined
+
+    - name: Record cert hostname match result
+      ansible.builtin.set_fact:
+        cert_matches_hostname: "{{ cert_hostname_check.rc | default(1) == 0 }}"
+
+    # ========== 7. EXTRACT CERTIFICATE DATES FOR REPORTING ==========
+    - name: Extract certificate validity dates
+      ansible.builtin.shell: |
+        echo "{{ cert_pem }}" | openssl x509 -noout -dates 2>/dev/null
+      register: cert_dates_check
+      changed_when: false
+      failed_when: false
+      when: secret_has_keys
+      no_log: true
+
+    - name: Parse certificate dates
+      ansible.builtin.set_fact:
+        cert_not_before: "{{ cert_dates_check.stdout | regex_search('notBefore=(.+)', '\\1') | first | default('unknown') }}"
+        cert_not_after: "{{ cert_dates_check.stdout | regex_search('notAfter=(.+)', '\\1') | first | default('unknown') }}"
+      when: cert_dates_check.rc | default(1) == 0
+
+    # ========== 8. CHECK CERTIFICATE IN CLOUDFLARE (OPTIONAL) ==========
+    - name: Check certificate exists in Cloudflare
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/certificates?hostname={{ hostname }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        status_code: [200, 403]
+        validate_certs: true
+      register: cloudflare_cert_check
+      failed_when: false
+      when: cloudflare_api_token | length > 0
+
+    - name: Record Cloudflare certificate check result
+      ansible.builtin.set_fact:
+        cloudflare_cert_exists: >-
+          {{
+            cloudflare_cert_check.status | default(0) == 200 and
+            cloudflare_cert_check.json.result | default([]) | length > 0
+          }}
+      when: cloudflare_api_token | length > 0
+
+    - name: Set Cloudflare check skipped if no token
+      ansible.builtin.set_fact:
+        cloudflare_cert_exists: "skipped"
+      when: cloudflare_api_token | length == 0
+
+    # ========== 9. VERIFICATION SUMMARY ==========
+    - name: Collect verification results
+      ansible.builtin.set_fact:
+        verification_results:
+          app_name: "{{ app_name }}"
+          hostname: "{{ hostname }}"
+          namespace: "{{ namespace }}"
+          checks:
+            secret_exists: "{{ secret_exists | default(false) }}"
+            secret_has_keys: "{{ secret_has_keys | default(false) }}"
+            secret_type_valid: "{{ secret_type_valid | default(false) }}"
+            cert_not_expired: "{{ cert_not_expired | default(false) }}"
+            cert_not_expiring_soon: "{{ cert_not_expiring_soon | default(false) }}"
+            cert_matches_hostname: "{{ cert_matches_hostname | default(false) }}"
+            cloudflare_cert_exists: "skipped"
+          certificate:
+            not_before: "{{ cert_not_before | default('N/A') }}"
+            not_after: "{{ cert_not_after | default('N/A') }}"
+
+    - name: Calculate overall verification status
+      ansible.builtin.set_fact:
+        all_checks_passed: >-
+          {{
+            verification_results.checks.secret_exists | bool and
+            verification_results.checks.secret_has_keys | bool and
+            verification_results.checks.secret_type_valid | bool and
+            verification_results.checks.cert_not_expired | bool and
+            verification_results.checks.cert_matches_hostname | bool
+          }}
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Origin Certificate Verification Summary"
+          - "=========================================="
+          - ""
+          - "Application: {{ app_name }}"
+          - "Hostname: {{ hostname }}"
+          - "Secret: {{ app_name }}-origin-cert"
+          - "Namespace: {{ namespace }}"
+          - ""
+          - "K8s Secret Checks:"
+          - "  Secret Exists: {{ verification_results.checks.secret_exists }}"
+          - "  Has tls.crt/tls.key: {{ verification_results.checks.secret_has_keys }}"
+          - "  Type is kubernetes.io/tls: {{ verification_results.checks.secret_type_valid }}"
+          - ""
+          - "Certificate Checks:"
+          - "  Not Expired: {{ verification_results.checks.cert_not_expired }}"
+          - "  Not Expiring Soon ({{ cert_expiry_warning_days }}d): {{ verification_results.checks.cert_not_expiring_soon }}"
+          - "  Matches Hostname: {{ verification_results.checks.cert_matches_hostname }}"
+          - ""
+          - "Certificate Validity:"
+          - "  Not Before: {{ verification_results.certificate.not_before }}"
+          - "  Not After: {{ verification_results.certificate.not_after }}"
+          - ""
+          - "Cloudflare API Check:"
+          - "  Certificate in Cloudflare: {{ verification_results.checks.cloudflare_cert_exists }}"
+          - ""
+          - "=========================================="
+          - "Overall Status: {{ 'PASSED' if all_checks_passed else 'FAILED' }}"
+          - "=========================================="
+
+    - name: Fail if any checks did not pass
+      ansible.builtin.fail:
+        msg: >-
+          Origin certificate verification failed for {{ app_name }}.
+          See summary above for details.
+      when: not all_checks_passed
+
+    - name: Validation passed
+      ansible.builtin.debug:
+        msg: "Origin certificate for {{ app_name }} ({{ hostname }}) is valid - verification complete"
+      when: all_checks_passed

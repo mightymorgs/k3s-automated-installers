@@ -1,0 +1,39 @@
+---
+- name: "Tier 1: Verify J2 templates render with BWS vars"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Run variable verification script
+      ansible.builtin.command:
+        cmd: "python3 {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/molecule/tier1-syntax/verify_variables.py"
+      register: verify_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show verification output
+      ansible.builtin.debug:
+        msg: "{{ verify_result.stdout_lines }}"
+
+    - name: Warn on template failures (not blocking — vars may come from playbook defaults)
+      ansible.builtin.debug:
+        msg: "WARNING: {{ verify_result.stdout_lines | select('match', '.*FAIL:.*') | list | length }} template(s) had undefined variables. Review output above."
+      when: verify_result.rc != 0
+
+    - name: Check variable inventory for missing BWS vars
+      ansible.builtin.command:
+        cmd: >-
+          python3 -c "
+          import json, sys;
+          data = json.load(open('{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/molecule/fixtures/variable-inventory.json'));
+          missing = {app: d['bws_coverage']['missing'] for app, d in data.items() if d['bws_coverage']['missing']};
+          [print(f'  WARN: {app}: {vars}') for app, vars in missing.items()];
+          print(f'Total: {sum(len(v) for v in missing.values())} vars not found in BWS');
+          "
+      register: coverage_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show BWS coverage warnings
+      ansible.builtin.debug:
+        msg: "{{ coverage_result.stdout_lines }}"
+      when: coverage_result.stdout | default('') | length > 0

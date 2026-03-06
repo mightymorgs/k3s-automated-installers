@@ -1,0 +1,54 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: longhorn
+  namespace: longhorn
+  labels:
+    app.kubernetes.io/name: longhorn
+    app.kubernetes.io/component: server
+spec:
+  serviceName: longhorn
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: longhorn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: longhorn
+        app.kubernetes.io/component: server
+    spec:
+      containers:
+        - name: longhorn
+          image: longhornio/longhorn-manager:v1.7.2
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+          ports:
+            - containerPort: 80
+              name: http
+          envFrom:
+            - configMapRef:
+                name: longhorn-config
+            - secretRef:
+                name: longhorn-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 10Gi

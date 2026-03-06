@@ -1,0 +1,221 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/longhorn/operations/snapshot-create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "longhorn.snapshots.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/longhorn/operations/snapshot-create.yml"
+#     category: "platform"
+#     subsystem: "longhorn"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "longhorn"
+#       supported_versions: ["v1.5.x", "v1.6.x", "v1.7.x"]
+#       version_range: ">=v1.5.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - longhorn: "v1.6.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from Longhorn CRD schema"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_longhorn_operations"
+#   dependencies: ["longhorn_volume_exists"]
+#   provides: ["longhorn_snapshot_created"]
+#   tags: ["longhorn", "storage", "snapshot", "crd", "operations", "point-in-time"]
+#   estimated_duration: 60
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a Longhorn Snapshot for an existing volume. Snapshots are local
+#     point-in-time copies stored within the Longhorn system. They are fast
+#     to create and can be used for quick rollbacks or as source for backups.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.longhorn.status"
+#         purpose: "Verify Longhorn is ready before creating snapshot"
+#
+#     writes:
+#       - path: "_state.apps.longhorn.snapshots.{snapshot_name}.status"
+#         example: "ready"
+#       - path: "_state.apps.longhorn.snapshots.{snapshot_name}.volume"
+#         example: "my-volume"
+
+- name: Longhorn - Create Snapshot
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    longhorn_namespace: "{{ longhorn_namespace_input | default('longhorn-system') }}"
+
+    # Required fields
+    # volume_name: Name of the volume to snapshot (required)
+
+    # Optional fields
+    snapshot_name: "{{ snapshot_name_input | default('') }}"
+    snapshot_labels: "{{ snapshot_labels_input | default({}) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate required inputs are provided
+      ansible.builtin.assert:
+        that:
+          - volume_name is defined and volume_name | length > 0
+        fail_msg: "Required input missing: volume_name is required"
+        success_msg: "All required inputs validated"
+
+    # ===== STEP 2: Check Longhorn System Readiness =====
+    - name: Verify Longhorn manager pods are running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ longhorn_namespace }}"
+        label_selectors:
+          - app=longhorn-manager
+      register: longhorn_manager_pods
+
+    - name: Assert Longhorn manager is ready
+      ansible.builtin.assert:
+        that:
+          - longhorn_manager_pods.resources | length > 0
+          - longhorn_manager_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+        fail_msg: "Longhorn manager is not running. Ensure Longhorn is deployed first."
+        success_msg: "Longhorn manager is running"
+
+    # ===== STEP 3: Verify Volume Exists =====
+    - name: Check if source volume exists
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Volume
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ volume_name }}"
+      register: source_volume
+
+    - name: Assert volume exists
+      ansible.builtin.assert:
+        that:
+          - source_volume.resources | length > 0
+        fail_msg: "Volume '{{ volume_name }}' does not exist"
+        success_msg: "Volume '{{ volume_name }}' found"
+
+    # ===== STEP 4: Generate Snapshot Name if Not Provided =====
+    - name: Generate snapshot name if not provided
+      ansible.builtin.set_fact:
+        effective_snapshot_name: >-
+          {{ snapshot_name if snapshot_name | length > 0 else
+             'snap-' + volume_name + '-' + lookup('password', '/dev/null length=8 chars=ascii_lowercase,digits') }}
+
+    # ===== STEP 5: Check for Existing Snapshot (Idempotency) =====
+    - name: Check if snapshot already exists
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Snapshot
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ effective_snapshot_name }}"
+      register: existing_snapshot
+
+    - name: Skip creation if snapshot exists
+      ansible.builtin.debug:
+        msg: >-
+          Snapshot '{{ effective_snapshot_name }}' already exists,
+          readyToUse: {{ existing_snapshot.resources[0].status.readyToUse | default(false) }}
+      when: existing_snapshot.resources | length > 0
+
+    # ===== STEP 6: Create Snapshot CRD =====
+    - name: Create Longhorn Snapshot
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: longhorn.io/v1beta2
+          kind: Snapshot
+          metadata:
+            name: "{{ effective_snapshot_name }}"
+            namespace: "{{ longhorn_namespace }}"
+            labels:
+              longhornvolume: "{{ volume_name }}"
+          spec:
+            volume: "{{ volume_name }}"
+            labels: "{{ snapshot_labels if snapshot_labels | length > 0 else omit }}"
+      register: snapshot_result
+      when: existing_snapshot.resources | length == 0
+
+    # ===== STEP 7: Wait for Snapshot to be Ready =====
+    - name: Wait for snapshot to be ready
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Snapshot
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ effective_snapshot_name }}"
+      register: snapshot_status
+      until: >-
+        snapshot_status.resources | length > 0 and
+        (snapshot_status.resources[0].status.readyToUse | default(false)) == true
+      retries: 30
+      delay: 5
+      when: existing_snapshot.resources | length == 0
+
+    # ===== STEP 8: Write Result to BWS._state (if configured) =====
+    - name: Update BWS inventory with snapshot info
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Merge snapshot info into _state.apps.longhorn.snapshots
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg snapshot "{{ effective_snapshot_name }}" \
+          --arg volume "{{ volume_name }}" \
+          '
+          if ._state.apps.longhorn == null then ._state.apps.longhorn = {} else . end |
+          if ._state.apps.longhorn.snapshots == null then ._state.apps.longhorn.snapshots = {} else . end |
+          ._state.apps.longhorn.snapshots[$snapshot] = {
+            "status": "ready",
+            "volume": $volume,
+            "created_at": now | strftime("%Y-%m-%dT%H:%M:%SZ")
+          }
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when:
+        - inventory_secret_name | length > 0
+        - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        - existing_snapshot.resources | length == 0
+
+    # ===== STEP 9: Output Result =====
+    - name: Get final snapshot status
+      kubernetes.core.k8s_info:
+        api_version: longhorn.io/v1beta2
+        kind: Snapshot
+        namespace: "{{ longhorn_namespace }}"
+        name: "{{ effective_snapshot_name }}"
+      register: final_snapshot_status
+
+    - name: Display snapshot creation result
+      ansible.builtin.debug:
+        msg:
+          status: "{{ 'existing' if existing_snapshot.resources | length > 0 else 'created' }}"
+          snapshot_name: "{{ effective_snapshot_name }}"
+          volume_name: "{{ volume_name }}"
+          ready_to_use: "{{ final_snapshot_status.resources[0].status.readyToUse | default(false) }}"
+          size: "{{ final_snapshot_status.resources[0].status.size | default('unknown') }}"
+          checksum: "{{ final_snapshot_status.resources[0].status.checksum | default('') }}"
+          namespace: "{{ longhorn_namespace }}"

@@ -1,0 +1,234 @@
+---
+# playbook_metadata:
+#   id: "atomic/traefik/ingressroute/create"
+#   type: "atomic"
+#   generated_by: "idi"
+#   operation_id: "traefik.ingressroute.create"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/traefik/operations/ingressroute-create.yml"
+#     category: "platform"
+#     subsystem: "traefik"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "traefik"
+#       supported_versions: ["2.10.x", "2.11.x", "3.0.x", "3.1.x"]
+#       version_range: ">=2.10.0"
+#
+#     requires:
+#       traefik: ">=2.10.0"
+#       k3s: ">=1.28.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - traefik: "3.1.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "Generic IngressRoute creation operation"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["traefik_installed"]
+#   provides: ["ingressroute_created"]
+#   tags: ["traefik", "ingressroute", "crd", "ingress", "phase5"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Create a Traefik IngressRoute CRD for exposing applications via HTTPS.
+#     Supports HTTP/HTTPS entrypoints, TLS termination with secrets, and
+#     middleware references for SSO integration.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes: []
+#
+#   # ========== OPERATION PARAMETERS ==========
+#   parameters:
+#     required:
+#       - name: app_name
+#         description: "Name of the IngressRoute resource"
+#       - name: namespace
+#         description: "Kubernetes namespace for the IngressRoute"
+#       - name: service_name
+#         description: "Backend Kubernetes Service name"
+#       - name: service_port
+#         description: "Backend Service port"
+#       - name: host
+#         description: "Hostname for routing (e.g., app.example.com)"
+#     optional:
+#       - name: tls_secret
+#         description: "Name of TLS Secret containing certificate"
+#       - name: middlewares
+#         description: "List of middleware references [{name: 'mw-name', namespace: 'ns'}]"
+#       - name: entrypoints
+#         description: "List of entrypoints (default: ['websecure'])"
+#       - name: match_rule
+#         description: "Custom match rule (overrides Host-based matching)"
+#       - name: path_prefix
+#         description: "Path prefix for routing (e.g., /api)"
+#       - name: cert_resolver
+#         description: "ACME cert resolver name (alternative to tls_secret)"
+
+- name: Traefik - Create IngressRoute
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    # Required parameters
+    app_name: "{{ app_name }}"
+    namespace: "{{ namespace }}"
+    service_name: "{{ service_name }}"
+    service_port: "{{ service_port }}"
+    host: "{{ host }}"
+
+    # Optional parameters with defaults
+    tls_secret: "{{ tls_secret | default(omit) }}"
+    cert_resolver: "{{ cert_resolver | default(omit) }}"
+    middlewares: "{{ middlewares | default([]) }}"
+    entrypoints: "{{ entrypoints | default(['websecure']) }}"
+    match_rule: "{{ match_rule | default(omit) }}"
+    path_prefix: ""
+
+    # Kubeconfig
+    k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+
+  tasks:
+    # ========== 1. VALIDATE REQUIRED PARAMETERS ==========
+    - name: Validate required parameters
+      ansible.builtin.assert:
+        that:
+          - app_name is defined and app_name | length > 0
+          - namespace is defined and namespace | length > 0
+          - service_name is defined and service_name | length > 0
+          - service_port is defined
+          - host is defined and host | length > 0
+        fail_msg: >-
+          Required parameters missing. Please provide:
+          app_name, namespace, service_name, service_port, host
+
+    # ========== 2. ENSURE NAMESPACE EXISTS ==========
+    - name: Check if namespace exists
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: Namespace
+        name: "{{ namespace }}"
+      register: namespace_check
+
+    - name: Create namespace if it doesn't exist
+      kubernetes.core.k8s:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ namespace }}"
+      when: namespace_check.resources | length == 0
+
+    # ========== 3. BUILD MATCH RULE ==========
+    - name: Build match rule
+      ansible.builtin.set_fact:
+        final_match_rule: >-
+          {{ match_rule | default('Host(`' + host + '`)' +
+            ('' if path_prefix == '' else ' && PathPrefix(`' + path_prefix + '`)')) }}
+
+    - name: Display match rule
+      ansible.builtin.debug:
+        msg: "Match rule: {{ final_match_rule }}"
+
+    # ========== 4. BUILD TLS CONFIGURATION ==========
+    - name: Build TLS configuration with secret
+      when: tls_secret is defined and tls_secret != omit
+      ansible.builtin.set_fact:
+        tls_config:
+          secretName: "{{ tls_secret }}"
+
+    - name: Build TLS configuration with cert resolver
+      when: cert_resolver is defined and cert_resolver != omit and (tls_secret is not defined or tls_secret == omit)
+      ansible.builtin.set_fact:
+        tls_config:
+          certResolver: "{{ cert_resolver }}"
+
+    - name: Build TLS configuration (minimal - for websecure)
+      when: >-
+        (tls_secret is not defined or tls_secret == omit) and
+        (cert_resolver is not defined or cert_resolver == omit) and
+        'websecure' in entrypoints
+      ansible.builtin.set_fact:
+        tls_config: {}
+
+    # ========== 5. BUILD MIDDLEWARES LIST ==========
+    - name: Format middlewares for IngressRoute
+      when: middlewares | length > 0
+      ansible.builtin.set_fact:
+        formatted_middlewares: >-
+          {{ middlewares | map('dict2items') |
+             map('items2dict') | list }}
+
+    - name: Set empty middlewares if none provided
+      when: middlewares | length == 0
+      ansible.builtin.set_fact:
+        formatted_middlewares: []
+
+    # ========== 6. CREATE INGRESSROUTE CRD ==========
+    - name: Create IngressRoute
+      kubernetes.core.k8s:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ namespace }}"
+            labels:
+              app.kubernetes.io/name: "{{ app_name }}"
+              app.kubernetes.io/managed-by: ansible
+              generated-by: idi
+          spec:
+            entryPoints: "{{ entrypoints }}"
+            routes:
+              - match: "{{ final_match_rule }}"
+                kind: Rule
+                services:
+                  - name: "{{ service_name }}"
+                    port: "{{ service_port }}"
+                middlewares: "{{ formatted_middlewares if formatted_middlewares | length > 0 else omit }}"
+            tls: "{{ tls_config | default(omit) }}"
+      register: ingressroute_result
+
+    # ========== 7. VERIFICATION ==========
+    - name: Verify IngressRoute was created
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k3s_kubeconfig }}"
+        kind: IngressRoute
+        api_version: traefik.io/v1alpha1
+        name: "{{ app_name }}"
+        namespace: "{{ namespace }}"
+      register: verification
+      failed_when: verification.resources | length == 0
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "IngressRoute Created Successfully"
+          - "=========================================="
+          - "Name: {{ app_name }}"
+          - "Namespace: {{ namespace }}"
+          - "Host: {{ host }}"
+          - "Service: {{ service_name }}:{{ service_port }}"
+          - "EntryPoints: {{ entrypoints | join(', ') }}"
+          - "TLS Secret: {{ tls_secret | default('None') }}"
+          - "Cert Resolver: {{ cert_resolver | default('None') }}"
+          - "Middlewares: {{ middlewares | map(attribute='name') | list | join(', ') if middlewares | length > 0 else 'None' }}"
+          - "Match Rule: {{ final_match_rule }}"
+          - "=========================================="

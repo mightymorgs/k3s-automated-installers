@@ -1,0 +1,46 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-cloudflare-origin-cert.yml:
+    summary: Configure cert-manager with Cloudflare Origin CA for edge certificates
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ cloudflare_api_url }}/certificates'
+    references_services:
+    - cloudflare-api
+  05-wire-vault-pki.yml:
+    summary: Create a cert-manager ClusterIssuer backed by Vault PKI for internal
+      cluster TLS certificates. Enables the Vault PKI secrets engine, generates an
+      internal root CA, configures a role for cluster.local domains, creates a Vault
+      policy and K8s auth role for cert-manager, and applies the ClusterIssuer CRD.
+      Uses K8s service account auth (no API keys needed).
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ vault_url }}/v1/sys/health'
+    - '{{ vault_url }}/v1/sys/mounts/{{ pki_path }}'
+    - '{{ vault_url }}/v1/{{ pki_path }}/ca/pem'
+    - '{{ vault_url }}/v1/{{ pki_path }}/root/generate/internal'
+    - '{{ vault_url }}/v1/{{ pki_path }}/roles/{{ pki_role_name }}'
+    - '{{ vault_url }}/v1/sys/policies/acl/cert-manager-pki'
+    - '{{ vault_url }}/v1/sys/auth/kubernetes'
+    - '{{ vault_url }}/v1/auth/kubernetes/config'
+    - '{{ vault_url }}/v1/auth/kubernetes/role/{{ vault_auth_role }}'
+    requires_apps:
+    - vault
+    references_services:
+    - vault
+  06-enable-metrics.yml:
+    summary: Add Prometheus scrape annotations to the cert-manager controller deployment.
+      cert-manager natively exposes metrics on port 9402 at /metrics. This playbook
+      adds pod-level annotations so Prometheus auto-discovers and scrapes the metrics
+      endpoint via its kubernetes-pods scrape config.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+depends_on_apps:
+- cloudflare-api
+- prometheus
+- vault

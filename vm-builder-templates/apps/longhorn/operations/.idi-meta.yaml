@@ -1,0 +1,67 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  backup-create.yml:
+    summary: Create a Longhorn Backup for an existing volume. Backups are stored in
+      the configured BackupTarget (S3, NFS, or Azure Blob). Each backup creates a
+      new point-in-time copy. Requires a snapshot to exist or creates one automatically.
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: longhorn
+        field: status
+      - app: longhorn
+        field: backup_target
+      writes_to:
+      - app: longhorn
+        field: backups
+      - app: longhorn
+        field: backups
+      - app: longhorn
+        field: backups
+  setting-update.yml:
+    summary: 'Update a Longhorn Setting via CRD. Settings control Longhorn behavior
+      such as backup target, replica count defaults, storage policies, etc. Common
+      settings: backup-target, default-replica-count, storage-over-provisioning-percentage.'
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: longhorn
+        field: status
+      writes_to:
+      - app: longhorn
+        field: settings
+  snapshot-create.yml:
+    summary: Create a Longhorn Snapshot for an existing volume. Snapshots are local
+      point-in-time copies stored within the Longhorn system. They are fast to create
+      and can be used for quick rollbacks or as source for backups.
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: longhorn
+        field: status
+      writes_to:
+      - app: longhorn
+        field: snapshots
+      - app: longhorn
+        field: snapshots
+  volume-create.yml:
+    summary: 'Create a Longhorn Volume via CRD. This operation is idempotent - if
+      a volume with the same name exists, it will be skipped. Supports all volume
+      parameters: size, replicas, data locality, etc.'
+    source: inferred
+    confidence: medium
+    wiring:
+      reads_from:
+      - app: longhorn
+        field: status
+      writes_to:
+      - app: longhorn
+        field: volumes
+      - app: longhorn
+        field: volumes
+      - app: longhorn
+        field: volumes

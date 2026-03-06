@@ -1,0 +1,77 @@
+---
+# Grafana StatefulSet (J2 template)
+# Defaults match k8s-base/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('grafana') }}
+  namespace: {{ app_namespace | default('grafana') }}
+  labels:
+    app: {{ app_name | default('grafana') }}
+    app.kubernetes.io/name: {{ app_name | default('grafana') }}
+    app.kubernetes.io/component: {{ app_component | default('server') }}
+spec:
+  serviceName: {{ app_name | default('grafana') }}
+  replicas: {{ replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('grafana') }}
+      app.kubernetes.io/name: {{ app_name | default('grafana') }}
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('grafana') }}
+        app.kubernetes.io/name: {{ app_name | default('grafana') }}
+        app.kubernetes.io/component: {{ app_component | default('server') }}
+    spec:
+      containers:
+        - name: {{ app_name | default('grafana') }}
+          image: {{ image | default('grafana/grafana:latest') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          ports:
+            - name: http
+              containerPort: {{ container_port | default(3000) }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ configmap_name | default('grafana-config') }}
+            - secretRef:
+                name: {{ secret_name | default('grafana-secrets') }}
+                optional: true
+          volumeMounts:
+            - name: data
+              mountPath: {{ data_mount_path | default('/data') }}
+          resources:
+            requests:
+              cpu: {{ cpu_request | default('100m') }}
+              memory: {{ memory_request | default('256Mi') }}
+            limits:
+              cpu: {{ cpu_limit | default('2000m') }}
+              memory: {{ memory_limit | default('2Gi') }}
+          livenessProbe:
+            httpGet:
+              path: {{ health_path | default('/api/health') }}
+              port: http
+            initialDelaySeconds: {{ liveness_initial_delay | default(60) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ health_path | default('/api/health') }}
+              port: http
+            initialDelaySeconds: {{ readiness_initial_delay | default(30) }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: {{ app_name | default('grafana') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ data_storage_size | default('10Gi') }}

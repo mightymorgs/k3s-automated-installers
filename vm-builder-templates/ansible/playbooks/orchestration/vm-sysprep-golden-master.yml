@@ -1,0 +1,154 @@
+---
+# playbook_metadata:
+#   id: "orchestration/vm-sysprep-golden-master"
+#   type: "orchestration"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "orchestration/vm-sysprep-golden-master.yml"
+#     category: "orchestration"
+#     subsystem: "vm"
+#     deployment_method: "ansible"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "ubuntu"
+#       folder_version: null
+#       supported_versions: ["22.04", "24.04"]
+#       version_range: ">=22.04"
+#
+#     requires:
+#       tailscale: ">=1.0.0"
+#       os:
+#         ubuntu: ">=22.04"
+#
+#     tested_combinations:
+#       - ubuntu: "24.04"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2025-11-12"
+#         notes: "Syntax verified. Functional test requires golden master candidate VM. WARNING: DESTRUCTIVE playbook."
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["vm_golden_master_ready"]
+#   provides: ["vm_sysprep_complete"]
+#   tags: ["vm", "sysprep", "golden-master", "orchestration"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: false
+#   description: Sysprep VM for golden master snapshot (remove all instance-specific data)
+- name: PHASE 1 - Remove GitHub Runner Registration
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Generate runner removal token
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/mightymorgs/media-stack/actions/runners/remove-token
+        method: POST
+        headers:
+          Authorization: Bearer {{ lookup('env', 'GH_TOKEN') }}
+      register: removal_token
+      delegate_to: localhost
+    - name: Remove runner registration
+      ansible.builtin.command:
+        cmd: /home/runner/config.sh remove --token {{ removal_token.json.token }}
+      become: true
+      become_user: runner
+      changed_when: true
+- name: PHASE 2 - Remove Tailscale Device
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Logout from Tailscale
+      ansible.builtin.command: tailscale logout
+      changed_when: true
+- name: PHASE 3 - Remove SSH Keys
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Remove runner SSH keys
+      ansible.builtin.file:
+        path: /home/runner/.ssh
+        state: absent
+- name: PHASE 4 - Reset Network Configuration
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Remove machine ID
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop: [/etc/machine-id, /var/lib/dbus/machine-id]
+    - name: Truncate machine-id files (will regenerate on boot)
+      ansible.builtin.copy:
+        content: ''
+        dest: '{{ item }}'
+        mode: '0444'
+      loop: [/etc/machine-id]
+    - name: Remove DHCP leases
+      ansible.builtin.file:
+        path: /var/lib/dhcp
+        state: absent
+    - name: Remove persistent network rules
+      ansible.builtin.file:
+        path: /etc/udev/rules.d/70-persistent-net.rules
+        state: absent
+- name: PHASE 5 - Clean System State
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Clean apt cache
+      ansible.builtin.command: apt clean
+      changed_when: true
+    - name: Remove logs
+      ansible.builtin.file:
+        path: /var/log
+        state: absent
+    - name: Recreate log directory
+      ansible.builtin.file:
+        path: /var/log
+        state: directory
+        mode: '0755'
+    - name: Clear temp files
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop: [/tmp/*, /var/tmp/*]
+    - name: Clear bash history
+      ansible.builtin.file:
+        path: /home/runner/.bash_history
+        state: absent
+    - name: Clear cloud-init artifacts
+      ansible.builtin.file:
+        path: /var/lib/cloud
+        state: absent
+- name: PHASE 6 - Final Report
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Sysprep complete
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Sysprep Complete - Ready for Snapshot
+          - ==========================================
+          - 'All instance-specific data removed:'
+          - '  - GitHub runner registration'
+          - '  - Tailscale device'
+          - '  - SSH keys'
+          - '  - Machine ID'
+          - '  - DHCP leases'
+          - '  - Logs and temp files'
+          - ''
+          - 'Next steps:'
+          - '  1. Shutdown VM: shutdown -h now'
+          - '  2. Snapshot as golden-master-ubuntu-24.04-runner-v1.0.0'
+          - '  3. Future VMs clone from this template'
+          - ==========================================

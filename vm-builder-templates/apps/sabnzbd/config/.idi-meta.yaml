@@ -1,0 +1,22 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  04-configure-api.yml:
+    summary: Configure SABnzbd access control for Tailscale Ingress. Sets inet_exposure=4
+      (full access) and adds the Tailscale hostname to host_whitelist so requests
+      via the operator proxy are not blocked.
+    source: inferred
+    confidence: medium
+  05-deploy-exporter.yml:
+    summary: Deploy Exportarr sidecar container to SABnzbd StatefulSet for Prometheus
+      metrics scraping. Patches the StatefulSet to add the exportarr container on
+      port 9710 and adds prometheus.io annotations for automatic discovery.
+    source: inferred
+    confidence: medium
+    requires_apps:
+    - prometheus
+    references_services:
+    - app
+depends_on_apps:
+- app
+- prometheus

@@ -1,0 +1,342 @@
+---
+name: Destroy VM
+# Fully destroys a VM: Terragrunt state, libvirt domain/volumes, Tailscale device, GitHub runner.
+# Three jobs:
+#   1. prepare      (ubuntu-latest) — read BWS, extract config
+#   2. destroy-local (self-hosted)  — terragrunt destroy + libvirt cleanup (needs hypervisor)
+#   3. cleanup      (ubuntu-latest) — Cloudflare, Tailscale, GitHub runner (need internet)
+on:
+  workflow_dispatch:
+    inputs:
+      vm_hostname:
+        description: VM hostname (e.g., homelab-k3s-master-test-vertslice-libvirt-latest)
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-vertslice-libvirt-latest)
+        required: true
+        type: string
+      hypervisor_inventory_key:
+        description: Hypervisor BWS inventory (e.g., inventory/hypervisors/hv-auros15g-libvirt-office)
+        required: true
+        type: string
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Read BWS inventory and extract values needed by other jobs
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    outputs:
+      hypervisor_name: ${{ steps.extract.outputs.hypervisor_name }}
+      hypervisor_short_name: ${{ steps.extract.outputs.hypervisor_short_name }}
+      vm_hostname: ${{ steps.extract.outputs.vm_hostname }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Extract VM and hypervisor config from BWS
+        id: extract
+        run: |
+          set -euo pipefail
+
+          # --- VM inventory ---
+          VM_SECRET_ID=$(jq -r --arg k "${{ inputs.inventory_key }}" \
+            '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$VM_SECRET_ID" ] || [ "$VM_SECRET_ID" = "null" ]; then
+            echo "ERROR: VM inventory not found at key: ${{ inputs.inventory_key }}" >&2
+            exit 1
+          fi
+
+          sleep 1
+          VM_INV=$(bws secret get "$VM_SECRET_ID" --output json | jq -r '.value')
+
+          VM_HOSTNAME=$(echo "$VM_INV" | jq -r '.identity.hostname')
+          echo "vm_hostname=$VM_HOSTNAME" >> "$GITHUB_OUTPUT"
+
+          # --- Hypervisor: read actual identity from BWS inventory ---
+          HV_KEY="${{ inputs.hypervisor_inventory_key }}"
+          HV_SECRET_ID=$(jq -r --arg k "$HV_KEY" \
+            '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$HV_SECRET_ID" ] || [ "$HV_SECRET_ID" = "null" ]; then
+            echo "ERROR: Hypervisor inventory not found at key: $HV_KEY" >&2
+            exit 1
+          fi
+
+          HV_INV=$(bws secret get "$HV_SECRET_ID" --output json | jq -r '.value')
+
+          # Use identity.full_name from inventory (authoritative), fall back to key
+          HV_FULL_NAME=$(echo "$HV_INV" | jq -r '.identity.full_name // empty')
+          if [ -z "$HV_FULL_NAME" ]; then
+            HV_FULL_NAME="${HV_KEY#inventory/hypervisors/}"
+          fi
+
+          # Short name: identity.name or identity.short_name
+          HV_SHORT_NAME=$(echo "$HV_INV" | jq -r '.identity.name // .identity.short_name // empty')
+          if [ -z "$HV_SHORT_NAME" ]; then
+            # Extract from key — works for both old and new format
+            HV_SHORT_NAME="${HV_KEY#inventory/hypervisors/}"
+          fi
+
+          echo "hypervisor_name=$HV_FULL_NAME" >> "$GITHUB_OUTPUT"
+          echo "hypervisor_short_name=$HV_SHORT_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "VM hostname: $VM_HOSTNAME"
+          echo "Hypervisor full: $HV_FULL_NAME"
+          echo "Hypervisor short: $HV_SHORT_NAME"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Run on the hypervisor — terragrunt destroy + libvirt cleanup
+  # Terragrunt destroy MUST run on the hypervisor because:
+  #   - Phase 2 creates resources with TG_MODULE_SOURCE pointing to a local path
+  #   - The libvirt provider needs local access to qemu:///system
+  #   - Running terragrunt destroy from ubuntu-latest sees empty state
+  # ---------------------------------------------------------------------------
+  destroy-local:
+    needs: prepare
+    # Use short name as runner label — stable across old/new naming conventions
+    # (bootstrap registers with labels: hypervisor,<short>,<full>,<platform>,<location>)
+    runs-on: [self-hosted, '${{ needs.prepare.outputs.hypervisor_short_name }}']
+    env:
+      VM_NAME: ${{ needs.prepare.outputs.vm_hostname }}
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    outputs:
+      tg_destroy_outcome: ${{ steps.tg_destroy.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Fetch TFC credentials from BWS
+        id: tfc
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+
+          TFC_ORG_ID=$(id_for 'inventory/shared/secrets/terraform/cloudorganization')
+          TFC_TOKEN_ID=$(id_for 'inventory/shared/secrets/terraform/cloudtoken')
+
+          if [ -z "$TFC_ORG_ID" ] || [ "$TFC_ORG_ID" = "null" ]; then
+            echo "WARNING: TFC organization not found in BWS — skipping terragrunt destroy" >&2
+            exit 1
+          fi
+          if [ -z "$TFC_TOKEN_ID" ] || [ "$TFC_TOKEN_ID" = "null" ]; then
+            echo "WARNING: TFC token not found in BWS — skipping terragrunt destroy" >&2
+            exit 1
+          fi
+
+          TFC_ORG=$(get_val "$TFC_ORG_ID")
+          TFC_TOKEN=$(get_val "$TFC_TOKEN_ID")
+
+          echo "::add-mask::${TFC_TOKEN}"
+
+          echo "tfc_organization=$TFC_ORG" >> "$GITHUB_OUTPUT"
+          echo "tfc_token=$TFC_TOKEN" >> "$GITHUB_OUTPUT"
+          echo "TFC org: $TFC_ORG"
+
+      - name: Terragrunt destroy
+        id: tg_destroy
+        continue-on-error: true
+        env:
+          TF_CLOUD_TOKEN: ${{ steps.tfc.outputs.tfc_token }}
+          TF_TOKEN_app_terraform_io: ${{ steps.tfc.outputs.tfc_token }}
+          TG_TFC_ORGANIZATION: ${{ steps.tfc.outputs.tfc_organization }}
+          TG_NAME: ${{ needs.prepare.outputs.vm_hostname }}
+          # Use local module source — same as Phase 2 uses on the hypervisor
+          TG_MODULE_SOURCE: ${{ github.workspace }}/vm-builder/vm-builder-templates/infra/terraform/modules/k3s-vm-gpu
+          TF_IN_AUTOMATION: 'true'
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TF_CLOUD_TOKEN}"
+
+          TG_DIR="vm-builder/vm-builder-templates/infra/terragrunt/live/media-stack-single-node"
+          cd "$TG_DIR"
+
+          # Pre-flight: verify Terraform Cloud is reachable (with retry)
+          echo "Checking Terraform Cloud connectivity..."
+          for attempt in 1 2 3; do
+            if curl -sf --max-time 10 https://app.terraform.io/.well-known/terraform.json >/dev/null 2>&1; then
+              echo "Terraform Cloud reachable"
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "WARNING: Cannot reach app.terraform.io after 3 attempts — skipping terragrunt destroy"
+              exit 1
+            fi
+            echo "Attempt $attempt/3 failed — retrying in 10s..."
+            sleep 10
+          done
+
+          echo "Workspace: ${TG_NAME}"
+          echo "Module source: ${TG_MODULE_SOURCE}"
+
+          terragrunt init
+          # Show state before destroy for debugging
+          terraform show -no-color 2>/dev/null | head -20 || echo "(no state or show failed)"
+          terragrunt destroy -auto-approve
+
+      - name: Defensive libvirt cleanup
+        id: libvirt_cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "Post-destroy libvirt cleanup for: ${VM_NAME}"
+
+          # Stop VM if running
+          sudo virsh destroy "${VM_NAME}" 2>/dev/null || echo "VM not running (ok)"
+
+          # Undefine — try with storage removal first, then fallbacks
+          if sudo virsh dominfo "${VM_NAME}" >/dev/null 2>&1; then
+            echo "Undefining VM..."
+            sudo virsh undefine "${VM_NAME}" --remove-all-storage 2>/dev/null || \
+              sudo virsh undefine "${VM_NAME}" --nvram 2>/dev/null || \
+              sudo virsh undefine "${VM_NAME}" 2>/dev/null || \
+              echo "WARNING: undefine failed, continuing"
+          fi
+
+          # Remove orphaned volumes matching the VM name
+          for vol in $(sudo virsh vol-list --pool default 2>/dev/null | grep "${VM_NAME}" | sed "s/^ *//" | cut -d" " -f1); do
+            echo "Removing orphaned volume: ${vol}"
+            sudo virsh vol-delete "${vol}" --pool default 2>/dev/null || true
+          done
+
+          echo "Libvirt cleanup complete"
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Run on ubuntu-latest — internet-requiring cleanup
+  # (Cloudflare, Tailscale, GitHub runner de-registration)
+  # ---------------------------------------------------------------------------
+  cleanup:
+    needs: [prepare, destroy-local]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      VM_NAME: ${{ needs.prepare.outputs.vm_hostname }}
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Cloudflare Tunnel and DNS cleanup (non-fatal)
+      # -----------------------------------------------------------------------
+      - name: Cloudflare cleanup
+        id: cloudflare_cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          # Check if Cloudflare state exists in BWS before running cleanup
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+          SECRET_ID=$(jq -r --arg k "$INVENTORY_KEY" \
+            '.[] | select(.key==$k) | .id' /tmp/bws_secrets.json)
+
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "null" ]; then
+            echo "No inventory found — skipping Cloudflare cleanup"
+            exit 0
+          fi
+
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+          HAS_CF=$(echo "$INVENTORY" | jq -r '._state.cloudflare.tunnel_id // empty')
+
+          if [ -z "$HAS_CF" ]; then
+            echo "No Cloudflare state — skipping cleanup"
+            exit 0
+          fi
+
+          echo "Cloudflare state found — running cleanup playbook"
+          pip install ansible-core --quiet
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/apps/cloudflare/uninstall/01-cleanup-tunnel-and-dns.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e vm_hostname=${{ inputs.vm_hostname }}
+
+      # -----------------------------------------------------------------------
+      # Tailscale device removal
+      # -----------------------------------------------------------------------
+      - name: Get Tailscale OAuth token
+        id: ts_oauth
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/tailscale-oauth-token
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Tailscale device removal
+        id: tailscale_removal
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/tailscale-delete-device
+        with:
+          hostname: ${{ needs.prepare.outputs.vm_hostname }}
+          access_token: ${{ steps.ts_oauth.outputs.access_token }}
+
+      # -----------------------------------------------------------------------
+      # GitHub runner de-registration (non-fatal)
+      # -----------------------------------------------------------------------
+      - name: De-register GitHub Actions runner
+        id: runner_dereg
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          PAT_ID=$(id_for 'inventory/shared/secrets/github/pat')
+          GH_PAT=$(get_val "$PAT_ID")
+
+          RUNNER_NAME="${VM_NAME}"
+          echo "Looking up runner: $RUNNER_NAME"
+
+          RUNNER_ID=$(curl -s -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+            | jq -r --arg name "$RUNNER_NAME" '(.runners // [])[] | select(.name==$name) | .id')
+
+          if [ -n "$RUNNER_ID" ]; then
+            echo "Deleting runner: $RUNNER_NAME (ID: $RUNNER_ID)"
+            curl -X DELETE \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners/$RUNNER_ID"
+            echo "Runner $RUNNER_NAME (ID: $RUNNER_ID) deleted"
+          else
+            echo "No runner found with name: $RUNNER_NAME"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Summary
+      # -----------------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Destroy VM Summary"
+            echo ""
+            echo "| Item | Status |"
+            echo "|------|--------|"
+            echo "| VM hostname | \`${VM_NAME}\` |"
+            echo "| Inventory key | \`${{ inputs.inventory_key }}\` |"
+            echo "| Hypervisor | \`${{ needs.prepare.outputs.hypervisor_name }}\` |"
+            echo "| Terragrunt destroy | ${{ needs.destroy-local.outputs.tg_destroy_outcome }} |"
+            echo "| Cloudflare cleanup | ${{ steps.cloudflare_cleanup.outcome }} |"
+            echo "| Tailscale device removal | ${{ steps.tailscale_removal.outcome }} |"
+            echo "| Runner de-registration | ${{ steps.runner_dereg.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

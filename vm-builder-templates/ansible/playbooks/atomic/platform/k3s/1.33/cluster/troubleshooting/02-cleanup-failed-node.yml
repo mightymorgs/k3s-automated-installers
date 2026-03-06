@@ -1,0 +1,108 @@
+---
+# playbook_metadata:
+#   id: "atomic/platform/k3s/1.33/cluster/troubleshooting/02-cleanup-failed-node"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/platform/k3s/1.33/cluster/troubleshooting/02-cleanup-failed-node.yml"
+#     category: "platform"
+#     subsystem: "k3s"
+#     version_folder: "1.33"
+#     role: "cluster"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "k3s"
+#       folder_version: "1.33"
+#       supported_versions: ["1.30.0+", "1.31.0+", "1.33.x"]
+#       version_range: ">=1.30.0"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#         kernel: ">=5.15"
+#
+#     tested_combinations:
+#       - k3s: "1.33.5"
+#         os: "ubuntu-24.04"
+#         kernel: "6.8.0-85"
+#         result: "success"
+#         test_date: "2025-10-30"
+#         notes: "Troubleshooting playbook for cleaning up failed nodes"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: ["k3s_master_ready"]
+#   provides: ["failed_node_cleaned"]
+#   tags: ["k3s", "cleanup", "troubleshooting"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: Delete failed/Not Ready node from cluster
+- name: Cleanup failed node registration
+  hosts: k3s_masters
+  gather_facts: false
+  become: false
+  vars:
+    failed_node_name: k3s-automation-test-worker
+  tasks:
+    - name: Check if node exists in cluster
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        name: '{{ failed_node_name }}'
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: node_check
+      failed_when: false
+    - name: Delete failed node from cluster
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Node
+        name: '{{ failed_node_name }}'
+        state: absent
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      when: node_check.resources | length > 0
+    - name: Display cleanup status
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Node cleanup complete
+          - '==========================================  '
+          - >-
+            Node {{ failed_node_name }}
+            {{ 'deleted' if node_check.resources | length > 0
+            else 'not found (already clean)' }}
+          - ==========================================
+- name: Stop K3s agent and clean worker state
+  hosts: k3s_workers
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Stop K3s agent service
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: stopped
+      ignore_errors: true
+    - name: Remove K3s agent data directory
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s/agent
+        state: absent
+    - name: Remove node password file
+      ansible.builtin.file:
+        path: /etc/rancher/node/password
+        state: absent
+    - name: Display worker cleanup status
+      ansible.builtin.debug:
+        msg:
+          - ==========================================
+          - Worker node state cleaned
+          - ==========================================
+          - 'Removed:'
+          - '  - K3s agent data'
+          - '  - Node password file'
+          - ==========================================
+          - Worker is ready for clean rejoin
+          - ==========================================

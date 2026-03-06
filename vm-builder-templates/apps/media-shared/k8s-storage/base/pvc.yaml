@@ -1,0 +1,23 @@
+---
+# Shared Media Storage PVC
+# Provides shared storage for media downloads and library
+# Used by: sonarr, radarr, sabnzbd, qbittorrent
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-shared-pvc
+  namespace: media-stack
+  labels:
+    app.kubernetes.io/name: media-shared-storage
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: media-stack
+spec:
+  accessModes:
+    # RWX for multi-pod access (Longhorn NFSv4)
+    - ReadWriteMany
+  storageClassName: longhorn
+  resources:
+    requests:
+      # Note: For production, increase to 100Gi+ with larger disk
+      # GCP test VMs have limited disk (20GB), so using 5Gi for testing
+      storage: 5Gi

@@ -1,0 +1,181 @@
+---
+# Authentik Server StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ app_name | default('authentik') }}-server
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app: {{ app_name | default('authentik') }}
+    app.kubernetes.io/name: {{ app_name | default('authentik') }}
+    app.kubernetes.io/component: server
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  serviceName: {{ app_name | default('authentik') }}
+  replicas: {{ server_replicas | default(1) }}
+  selector:
+    matchLabels:
+      app: {{ app_name | default('authentik') }}
+      component: server
+  template:
+    metadata:
+      labels:
+        app: {{ app_name | default('authentik') }}
+        component: server
+        app.kubernetes.io/name: {{ app_name | default('authentik') }}
+        app.kubernetes.io/component: server
+    spec:
+      securityContext:
+        fsGroup: {{ fs_group | default(1000) }}
+        runAsUser: {{ run_as_user | default(1000) }}
+        runAsGroup: {{ run_as_group | default(1000) }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ busybox_image | default('busybox:1.36') }}
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ postgres_host | default('authentik-postgres') }} {{ postgres_port | default(5432) }}; do
+                echo "Waiting for Postgres..."
+                sleep 2
+              done
+              echo "Postgres is ready"
+        - name: wait-for-redis
+          image: {{ busybox_image | default('busybox:1.36') }}
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ redis_host | default('authentik-redis') }} {{ redis_port | default(6379) }}; do
+                echo "Waiting for Redis..."
+                sleep 2
+              done
+              echo "Redis is ready"
+      containers:
+        - name: {{ app_name | default('authentik') }}
+          image: {{ authentik_image | default('ghcr.io/goauthentik/server:latest') }}
+          imagePullPolicy: {{ image_pull_policy | default('Always') }}
+          args: ["server"]
+          env:
+            - name: AUTHENTIK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: secret-key
+            - name: AUTHENTIK_POSTGRESQL__HOST
+              value: {{ postgres_host | default('authentik-postgres') }}
+            - name: AUTHENTIK_POSTGRESQL__NAME
+              value: {{ postgres_db | default('authentik') }}
+            - name: AUTHENTIK_POSTGRESQL__USER
+              value: {{ postgres_user | default('authentik') }}
+            - name: AUTHENTIK_POSTGRESQL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: postgres-password
+            - name: AUTHENTIK_REDIS__HOST
+              value: {{ redis_host | default('authentik-redis') }}
+            - name: AUTHENTIK_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: bootstrap-password
+            - name: AUTHENTIK_BOOTSTRAP_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ secrets_name | default('authentik-secrets') }}
+                  key: bootstrap-email
+            - name: AUTHENTIK_ERROR_REPORTING__ENABLED
+              value: "{{ error_reporting_enabled | default('false') }}"
+            - name: AUTHENTIK_LOG_LEVEL
+              value: "{{ log_level | default('info') }}"
+            - name: DOMAIN
+              value: "{{ domain }}"
+          ports:
+            - name: http
+              containerPort: {{ http_port | default(9000) }}
+              protocol: TCP
+            - name: https
+              containerPort: {{ https_port | default(9443) }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ metrics_port | default(9300) }}
+              protocol: TCP
+          volumeMounts:
+            - name: media
+              mountPath: /media
+            - name: custom-templates
+              mountPath: /templates
+            - name: blueprints
+              mountPath: /blueprints/custom
+              readOnly: true
+          resources:
+            requests:
+              cpu: {{ server_cpu_request | default('200m') }}
+              memory: {{ server_memory_request | default('512Mi') }}
+            limits:
+              cpu: {{ server_cpu_limit | default('1000m') }}
+              memory: {{ server_memory_limit | default('1Gi') }}
+          livenessProbe:
+            httpGet:
+              path: {{ server_health_live_path | default('/-/health/live/') }}
+              port: http
+            initialDelaySeconds: {{ server_liveness_initial_delay | default(60) }}
+            periodSeconds: {{ server_liveness_period | default(10) }}
+            timeoutSeconds: {{ server_liveness_timeout | default(5) }}
+            failureThreshold: {{ server_liveness_failure_threshold | default(3) }}
+          readinessProbe:
+            httpGet:
+              path: {{ server_health_ready_path | default('/-/health/ready/') }}
+              port: http
+            initialDelaySeconds: {{ server_readiness_initial_delay | default(30) }}
+            periodSeconds: {{ server_readiness_period | default(10) }}
+            timeoutSeconds: {{ server_readiness_timeout | default(5) }}
+            failureThreshold: {{ server_readiness_failure_threshold | default(3) }}
+      volumes:
+        - name: custom-templates
+          emptyDir: {}
+        - name: blueprints
+          configMap:
+            name: {{ app_name | default('authentik') }}-blueprints
+  volumeClaimTemplates:
+    - metadata:
+        name: media
+        labels:
+          app: {{ app_name | default('authentik') }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ storage_class | default('longhorn') }}
+        resources:
+          requests:
+            storage: {{ media_storage_size | default('5Gi') }}
+
+---
+# Authentik Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name | default('authentik') }}
+  namespace: {{ app_namespace | default('authentik') }}
+  labels:
+    app: {{ app_name | default('authentik') }}
+    app.kubernetes.io/name: {{ app_name | default('authentik') }}
+    app.kubernetes.io/managed-by: idi-phase5
+spec:
+  type: {{ service_type | default('NodePort') }}
+  selector:
+    app: {{ app_name | default('authentik') }}
+    component: server
+  ports:
+    - name: http
+      port: {{ http_port | default(9000) }}
+      targetPort: {{ http_port | default(9000) }}
+{% if service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ nodeport | default(30900) }}
+{% endif %}
+      protocol: TCP
+    - name: https
+      port: {{ https_port | default(9443) }}
+      targetPort: {{ https_port | default(9443) }}
+      protocol: TCP

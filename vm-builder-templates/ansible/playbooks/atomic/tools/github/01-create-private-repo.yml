@@ -1,0 +1,130 @@
+---
+# playbook_metadata:
+#   id: "atomic/tools/github/01-create-private-repo"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/tools/github/01-create-private-repo.yml"
+#     category: "tools"
+#     subsystem: "github"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "gh-api"
+#       supported_versions: ["2020-01-01+"]
+#       version_range: ">=2020-01-01"
+#
+#     requires:
+#       os:
+#         ubuntu: ">=22.04"
+#         debian: ">=12"
+#
+#     tested_combinations:
+#       - gh-api: "2024-11-01"
+#         os: "ubuntu-24.04"
+#         result: "success"
+#         test_date: "2025-11-13"
+#         notes: "Tested with GitHub REST API v3, creates private repo via PAT from BWS or secrets.json"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260122_v31_metadata_migration"
+#   dependencies: []
+#   provides: ["github_repo_created"]
+#   tags: ["github", "repo", "api", "automation"]
+#   estimated_duration: 20
+#   parallel_safe: true
+#   idempotent: true
+#   description: Ensure a private GitHub repository exists (uses PAT from Bitwarden or local secrets.json)
+- name: Ensure private GitHub repository exists
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    repo_name: "{{ target_repo_name | default('media-stack') }}"
+    github_api: https://api.github.com
+    bws_access_token: "{{ lookup('env','BWS_ACCESS_TOKEN') }}"
+    secrets_json_path: "{{ project_root | default(playbook_dir + '/../../../../..') }}/secrets/secrets.json"
+  tasks:
+    - name: Resolve GitHub PAT from Bitwarden (key ~ github + (token|pat))
+      ansible.builtin.command: >-
+        docker run --rm
+        -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+        bitwarden/bws secret list --output json
+      register: bws_list
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: bws_access_token | length > 0
+    - name: Parse GitHub PAT secret id from BWS list
+      ansible.builtin.set_fact:
+        github_pat_secret_id: >-
+          {{ (bws_list.stdout | default('[]')) | from_json
+             | selectattr('key','search','github')
+             | selectattr('key','search','token|pat')
+             | map(attribute='id') | first | default('') }}
+      when: bws_list.rc is defined and bws_list.rc == 0
+    - name: Fetch GitHub PAT value from Bitwarden
+      ansible.builtin.command: >-
+        docker run --rm
+        -e BWS_ACCESS_TOKEN={{ bws_access_token }}
+        bitwarden/bws secret get {{ github_pat_secret_id }} --output json
+      register: bws_pat
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: github_pat_secret_id | default('') | length > 0
+    - name: Set GitHub PAT fact from BWS
+      ansible.builtin.set_fact:
+        github_pat: "{{ (bws_pat.stdout | from_json).value | default('') }}"
+      when: bws_pat is defined and bws_pat.stdout is defined
+      no_log: true
+    - name: Fallback - load GitHub PAT from local secrets.json
+      ansible.builtin.set_fact:
+        github_pat: "{{ (lookup('file', secrets_json_path) | from_json).github.token | default('') }}"
+      when: (github_pat | default('')) == '' and (secrets_json_path is exists)
+      no_log: true
+    - name: Assert we have a GitHub PAT
+      ansible.builtin.assert:
+        that: [github_pat is defined, github_pat | length > 0]
+        fail_msg: GitHub PAT not found via Bitwarden or secrets.json
+      no_log: true
+    - name: Resolve GitHub username via API
+      ansible.builtin.uri:
+        url: '{{ github_api }}/user'
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        return_content: true
+      register: gh_user
+      no_log: true
+    - name: Set GitHub owner login fact
+      ansible.builtin.set_fact:
+        github_owner: "{{ (gh_user.json.login | default('')) }}"
+    - name: Check if repository exists
+      ansible.builtin.uri:
+        url: '{{ github_api }}/repos/{{ github_owner }}/{{ repo_name }}'
+        method: GET
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+        status_code: [200, 404]
+        return_content: false
+      register: repo_check
+      no_log: true
+    - name: Create repository if missing (private)
+      ansible.builtin.uri:
+        url: '{{ github_api }}/user/repos'
+        method: POST
+        headers:
+          Authorization: token {{ github_pat }}
+          Accept: application/vnd.github+json
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: '{{ repo_name }}'
+          private: true
+          description: Self-contained media stack IaC
+      when: repo_check.status == 404

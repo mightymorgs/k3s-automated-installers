@@ -1,0 +1,71 @@
+---
+# Tailscale Operator Deployment (J2 template)
+# Defaults match the official tailscale/tailscale operator.yaml manifest
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: {{ tailscale_namespace | default('tailscale') }}
+  labels:
+    app.kubernetes.io/name: tailscale-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: networking
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tailscale-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tailscale-operator
+        app.kubernetes.io/component: operator
+        app.kubernetes.io/part-of: networking
+    spec:
+      serviceAccountName: operator
+      containers:
+        - name: operator
+          image: {{ tailscale_operator_image | default('tailscale/k8s-operator:latest') }}
+          imagePullPolicy: {{ tailscale_operator_image_pull_policy | default('Always') }}
+          env:
+            - name: OPERATOR_HOSTNAME
+              value: "{{ tailscale_operator_hostname | default('tailscale-operator') }}"
+            - name: OPERATOR_SECRET
+              value: "{{ tailscale_operator_secret_name | default('operator-oauth') }}"
+            - name: OPERATOR_LOGGING
+              value: "{{ tailscale_operator_log_level | default('info') }}"
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CLIENT_ID_FILE
+              value: "/oauth/client_id"
+            - name: CLIENT_SECRET_FILE
+              value: "/oauth/client_secret"
+            - name: PROXY_IMAGE
+              value: "{{ tailscale_proxy_image | default('tailscale/tailscale:latest') }}"
+            - name: PROXY_TAGS
+              value: "{{ tailscale_proxy_tags | default('tag:k8s-operator') }}"
+            - name: APISERVER_PROXY
+              value: "{{ tailscale_apiserver_proxy | default('false') }}"
+          ports:
+            - name: metrics
+              containerPort: {{ tailscale_operator_metrics_port | default(9090) }}
+              protocol: TCP
+          resources:
+            requests:
+              memory: {{ tailscale_operator_memory_request | default('128Mi') }}
+              cpu: {{ tailscale_operator_cpu_request | default('100m') }}
+            limits:
+              memory: {{ tailscale_operator_memory_limit | default('256Mi') }}
+              cpu: {{ tailscale_operator_cpu_limit | default('500m') }}
+          volumeMounts:
+            - name: oauth
+              mountPath: /oauth
+              readOnly: true
+      volumes:
+        - name: oauth
+          secret:
+            secretName: {{ tailscale_operator_secret_name | default('operator-oauth') }}

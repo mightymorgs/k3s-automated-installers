@@ -1,0 +1,382 @@
+---
+# validate-install.yml — Check install playbooks against golden master rules
+#
+# Input variables (set by caller):
+#   app_path          — absolute path to the app directory (e.g. .../apps/grafana)
+#   validation_results — list accumulator for per-rule results
+#
+# All asserts use failed_when: false so validation continues for every rule
+# even when some fail. Results are collected into app_install_results.
+
+# ============================================================
+# 1. DISCOVER INSTALL PLAYBOOKS
+# ============================================================
+
+- name: "{{ app_path | basename }} | Find install playbooks"
+  ansible.builtin.find:
+    paths: "{{ app_path }}/install"
+    patterns: "*.yml,*.yaml"
+    file_type: file
+  register: install_playbook_files
+  failed_when: false
+
+- name: "{{ app_path | basename }} | Skip if no install playbooks"
+  ansible.builtin.set_fact:
+    install_content: ""
+    install_has_playbooks: false
+  when: install_playbook_files.files | default([]) | length == 0
+
+# ============================================================
+# 2. SLURP ALL INSTALL PLAYBOOKS INTO ONE COMBINED STRING
+# ============================================================
+
+- name: "{{ app_path | basename }} | Slurp install playbooks"
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  register: install_slurped
+  loop: "{{ install_playbook_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: install_playbook_files.files | default([]) | length > 0
+
+- name: "{{ app_path | basename }} | Combine install playbook contents"
+  ansible.builtin.set_fact:
+    install_content: >-
+      {{ install_slurped.results
+         | default([])
+         | map(attribute='content')
+         | map('b64decode')
+         | join('\n---PLAYBOOK_SEPARATOR---\n') }}
+    install_has_playbooks: true
+  when: install_slurped.results is defined and install_slurped.results | length > 0
+
+# ============================================================
+# 3. DERIVE CONDITION FLAGS (applies_when from rules.yml)
+# ============================================================
+
+- name: "{{ app_path | basename }} | Detect rule applicability flags"
+  ansible.builtin.set_fact:
+    has_secrets: "{{ 'secret' in install_content | lower }}"
+    has_password_generation: >-
+      {{ "lookup('password'" in install_content
+         or "lookup('ansible.builtin.password'" in install_content }}
+    has_kubectl_wait: "{{ 'kubectl wait' in install_content }}"
+    has_statefulset_with_claims: >-
+      {{ 'volumeClaimTemplates' in install_content
+         or 'statefulset' in install_content | lower }}
+    has_replace_force: >-
+      {{ 'replace --force' in install_content
+         or 'kubectl_action' in install_content }}
+    has_retries: "{{ 'retries:' in install_content }}"
+    has_template_rendering: >-
+      {{ 'ansible.builtin.template' in install_content
+         or 'render_dir' in install_content }}
+  when: install_has_playbooks | default(false)
+
+# ============================================================
+# 4. RULE CHECKS — CRITICAL
+# ============================================================
+
+# --- namespace-first ---
+- name: "{{ app_path | basename }} | Rule: namespace-first"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'kubectl create namespace' in install_content
+        or 'Ensure namespace' in install_content
+        or 'create namespace' in install_content
+    fail_msg: >-
+      CRITICAL [namespace-first] {{ app_path | basename }}:
+      No namespace creation/ensure task found before manifest apply.
+    success_msg: "PASS [namespace-first]"
+    quiet: true
+  register: rule_namespace_first
+  failed_when: false
+  when: install_has_playbooks | default(false)
+
+# --- secret-split-apply ---
+# Verifies secrets are applied SEPARATELY from workload resources.
+# Must detect: (a) explicit kubectl apply for secrets, OR (b) kind-based
+# split-apply loop, OR (c) prefix-based split-apply.
+# Must NOT pass just because kubectl apply exists for namespace-ensure.
+- name: "{{ app_path | basename }} | Rule: secret-split-apply"
+  ansible.builtin.assert:
+    that:
+      - >-
+        install_content is search('kubectl apply.*secret|kubectl apply -f.*secret')
+        or install_content is search('kubectl apply.*10-')
+        or install_content is search("case.*kind|Namespace\\|Secret")
+        or install_content is search("prefix.*<.*40.*apply|regex_search.*0-3")
+        or 'secret' not in install_content | lower
+    fail_msg: >-
+      CRITICAL [secret-split-apply] {{ app_path | basename }}:
+      Secrets may be applied via kubectl_action (replace --force) instead of
+      a separate kubectl apply. Secrets must always use kubectl apply.
+      Use split-apply: kind-based classification or prefix-based convention.
+    success_msg: "PASS [secret-split-apply]"
+    quiet: true
+  register: rule_secret_split_apply
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_secrets | default(false)
+
+# --- secret-preservation ---
+- name: "{{ app_path | basename }} | Rule: secret-preservation"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'kubectl get secret' in install_content
+        or 'existing_secret' in install_content
+        or 'existing_pg_secret' in install_content
+        or 'existing_config_secret' in install_content
+        or 'existing_salt' in install_content
+        or 'existing_' in install_content
+    fail_msg: >-
+      CRITICAL [secret-preservation] {{ app_path | basename }}:
+      Playbook generates secrets (lookup('password'...)) but does not check
+      for existing secret values before generating. This will overwrite
+      credentials on re-deploy.
+    success_msg: "PASS [secret-preservation]"
+    quiet: true
+  register: rule_secret_preservation
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_password_generation | default(false)
+
+# --- non-empty-secret-guard ---
+- name: "{{ app_path | basename }} | Rule: non-empty-secret-guard"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'length == 0' in install_content
+        or 'length > 0' in install_content
+        or 'Refusing to apply' in install_content
+        or 'ansible.builtin.fail' in install_content
+        or '| length' in install_content
+    fail_msg: >-
+      CRITICAL [non-empty-secret-guard] {{ app_path | basename }}:
+      Playbook generates secrets but has no guard against deploying empty
+      values. An empty secret corrupts the entire credential pipeline.
+    success_msg: "PASS [non-empty-secret-guard]"
+    quiet: true
+  register: rule_non_empty_secret_guard
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_password_generation | default(false)
+
+# --- pod-exists-before-wait ---
+- name: "{{ app_path | basename }} | Rule: pod-exists-before-wait"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'get pods' in install_content
+        or 'pod_exists' in install_content
+        or 'pod_count' in install_content
+        or 'Wait for.*pod.*exist' in install_content
+    fail_msg: >-
+      CRITICAL [pod-exists-before-wait] {{ app_path | basename }}:
+      kubectl wait is used without a pod existence pre-check.
+      Without this, kubectl wait fails immediately if no pods exist yet
+      (race between StatefulSet creation and pod scheduling).
+    success_msg: "PASS [pod-exists-before-wait]"
+    quiet: true
+  register: rule_pod_exists_before_wait
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_kubectl_wait | default(false)
+
+# --- sts-pvc-safety-gate ---
+- name: "{{ app_path | basename }} | Rule: sts-pvc-safety-gate"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'existing_pvc' in install_content
+        or 'claim_template' in install_content
+        or 'pvc' in install_content | lower
+        or 'workload_action' in install_content
+        or 'volumeClaimTemplates' not in install_content
+    fail_msg: >-
+      CRITICAL [sts-pvc-safety-gate] {{ app_path | basename }}:
+      Playbook references StatefulSet with volumeClaimTemplates but has no
+      PVC safety gate. Replace --force on a StatefulSet with claimTemplates
+      causes PVC deletion and data loss.
+    success_msg: "PASS [sts-pvc-safety-gate]"
+    quiet: true
+  register: rule_sts_pvc_safety_gate
+  failed_when: false
+  when: >-
+    install_has_playbooks | default(false)
+    and has_statefulset_with_claims | default(false)
+    and 'volumeClaimTemplates' in install_content
+
+# --- resource-kind-classifier ---
+- name: "{{ app_path | basename }} | Rule: resource-kind-classifier"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'protected_kinds' in install_content
+        or install_content is search("grep.*kind:|case.*kind")
+        or install_content is search("kind.*Secret.*PersistentVolumeClaim|Namespace\\|Secret")
+        or install_content is search("kubectl apply.*secret|kubectl apply -f.*secret")
+    fail_msg: >-
+      CRITICAL [resource-kind-classifier] {{ app_path | basename }}:
+      Playbook uses kubectl_action (may be replace --force) but has no
+      resource kind classifier safety net. Protected kinds (Secret, PVC,
+      Namespace, CRD) must be applied separately with kubectl apply.
+    success_msg: "PASS [resource-kind-classifier]"
+    quiet: true
+  register: rule_resource_kind_classifier
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_replace_force | default(false)
+
+# ============================================================
+# 5. RULE CHECKS — WARNING
+# ============================================================
+
+# --- namespace-labels ---
+- name: "{{ app_path | basename }} | Rule: namespace-labels"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'kubectl label namespace' in install_content
+        or 'app.kubernetes.io/name' in install_content
+    fail_msg: >-
+      WARNING [namespace-labels] {{ app_path | basename }}:
+      Namespace is not labeled with app.kubernetes.io/name or
+      app.kubernetes.io/part-of after creation.
+    success_msg: "PASS [namespace-labels]"
+    quiet: true
+  register: rule_namespace_labels
+  failed_when: false
+  when: install_has_playbooks | default(false)
+
+# --- consistent-namespace-var ---
+- name: "{{ app_path | basename }} | Rule: consistent-namespace-var"
+  ansible.builtin.assert:
+    that:
+      - >-
+        (app_path | basename) + '_namespace' not in install_content
+    fail_msg: >-
+      WARNING [consistent-namespace-var] {{ app_path | basename }}:
+      Uses {{ app_path | basename }}_namespace instead of app_namespace.
+      Phase 4 extra-vars inject app_namespace for all apps uniformly.
+    success_msg: "PASS [consistent-namespace-var]"
+    quiet: true
+  register: rule_consistent_namespace_var
+  failed_when: false
+  when: install_has_playbooks | default(false)
+
+# --- global-timeout-constants ---
+- name: "{{ app_path | basename }} | Rule: global-timeout-constants"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'app_start_timeout_seconds' in install_content
+        or 'retry_interval_seconds' in install_content
+        or 'timeout_seconds' in install_content
+    fail_msg: >-
+      WARNING [global-timeout-constants] {{ app_path | basename }}:
+      Timeout/retry values use magic numbers instead of named variables
+      (app_start_timeout_seconds, retry_interval_seconds). Named constants
+      make tuning consistent across apps.
+    success_msg: "PASS [global-timeout-constants]"
+    quiet: true
+  register: rule_global_timeout_constants
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_retries | default(false)
+
+# --- dryrun-validation ---
+- name: "{{ app_path | basename }} | Rule: dryrun-validation"
+  ansible.builtin.assert:
+    that:
+      - >-
+        'dry-run=server' in install_content
+        or 'dry-run' in install_content
+        or 'dryrun' in install_content | lower
+    fail_msg: >-
+      WARNING [dryrun-validation] {{ app_path | basename }}:
+      No dry-run=server validation step before manifest apply.
+      This catches schema errors and CRD version mismatches before
+      any state change.
+    success_msg: "PASS [dryrun-validation]"
+    quiet: true
+  register: rule_dryrun_validation
+  failed_when: false
+  when: install_has_playbooks | default(false) and has_template_rendering | default(false)
+
+# ============================================================
+# 6. COLLECT RESULTS
+# ============================================================
+
+- name: "{{ app_path | basename }} | Collect install validation results"
+  ansible.builtin.set_fact:
+    app_install_results:
+      app: "{{ app_path | basename }}"
+      category: install
+      rules:
+        - id: namespace-first
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (install_has_playbooks | default(false))
+               else ('pass' if (rule_namespace_first.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: secret-split-apply
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (has_secrets | default(false))
+               else ('pass' if (rule_secret_split_apply.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: secret-preservation
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (has_password_generation | default(false))
+               else ('pass' if (rule_secret_preservation.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: non-empty-secret-guard
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (has_password_generation | default(false))
+               else ('pass' if (rule_non_empty_secret_guard.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: pod-exists-before-wait
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (has_kubectl_wait | default(false))
+               else ('pass' if (rule_pod_exists_before_wait.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: sts-pvc-safety-gate
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (has_statefulset_with_claims | default(false))
+               else ('pass' if (rule_sts_pvc_safety_gate.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: resource-kind-classifier
+          severity: critical
+          status: >-
+            {{ 'skipped' if not (has_replace_force | default(false))
+               else ('pass' if (rule_resource_kind_classifier.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: namespace-labels
+          severity: warning
+          status: >-
+            {{ 'skipped' if not (install_has_playbooks | default(false))
+               else ('pass' if (rule_namespace_labels.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: consistent-namespace-var
+          severity: warning
+          status: >-
+            {{ 'skipped' if not (install_has_playbooks | default(false))
+               else ('pass' if (rule_consistent_namespace_var.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: global-timeout-constants
+          severity: warning
+          status: >-
+            {{ 'skipped' if not (has_retries | default(false))
+               else ('pass' if (rule_global_timeout_constants.evaluated_to | default(true))
+                     else 'fail') }}
+        - id: dryrun-validation
+          severity: warning
+          status: >-
+            {{ 'skipped' if not (has_template_rendering | default(false))
+               else ('pass' if (rule_dryrun_validation.evaluated_to | default(true))
+                     else 'fail') }}
+
+- name: "{{ app_path | basename }} | Append install results to validation_results"
+  ansible.builtin.set_fact:
+    validation_results: "{{ validation_results | default([]) + [app_install_results] }}"

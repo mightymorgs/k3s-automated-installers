@@ -1,0 +1,179 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/cloudflare/uninstall/01-cleanup-tunnel-and-dns"
+#   type: "atomic"
+#   path_info:
+#     file_path: "atomic/apps/cloudflare/uninstall/01-cleanup-tunnel-and-dns.yml"
+#     category: "platform"
+#     subsystem: "cloudflare"
+#     role: "uninstall"
+#   batch_id: "20260223_cloudflare_phase5"
+#   dependencies: []
+#   provides: ["cloudflare_resources_cleaned"]
+#   tags: ["cloudflare", "cleanup", "destroy", "uninstall"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Clean up all Cloudflare resources for a VM: delete DNS CNAME records,
+#     delete the Cloudflare Tunnel, and clear BWS state. Used during VM destroy.
+#   bws_state:
+#     reads:
+#       - path: "cloudflare.api_token_key"
+#         purpose: "Cloudflare API authentication"
+#       - path: "cloudflare.account_id_key"
+#         purpose: "Cloudflare account for tunnel API"
+#       - path: "cloudflare.zone_id_key"
+#         purpose: "Cloudflare zone for DNS API"
+#       - path: "_state.cloudflare.tunnel_id"
+#         purpose: "Tunnel to delete"
+#       - path: "_state.cloudflare.dns_records"
+#         purpose: "DNS records to delete"
+#     writes:
+#       - path: "_state.cloudflare"
+#         example: {}
+
+- name: Clean up Cloudflare Tunnel and DNS Records
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  tasks:
+    # === Read BWS inventory ===
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory
+      ansible.builtin.set_fact:
+        _inventory: "{{ inventory_raw.stdout | from_json }}"
+
+    # === Check if Cloudflare was ever configured ===
+    - name: Check for Cloudflare state
+      ansible.builtin.set_fact:
+        has_cloudflare_state: "{{ _inventory._state.cloudflare is defined and _inventory._state.cloudflare.tunnel_id is defined }}"
+
+    - name: Skip if no Cloudflare state
+      ansible.builtin.debug:
+        msg: "No Cloudflare state found — skipping cleanup"
+      when: not has_cloudflare_state
+
+    - name: End play if no Cloudflare state
+      ansible.builtin.meta: end_play
+      when: not has_cloudflare_state
+
+    # === Resolve credentials ===
+    - name: Resolve Cloudflare API token
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.cloudflare.api_token_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_api_token_raw
+      changed_when: false
+      no_log: true
+
+    - name: Resolve Cloudflare Account ID
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.cloudflare.account_id_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_account_id_raw
+      changed_when: false
+
+    - name: Resolve Cloudflare Zone ID
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "{{ _inventory.cloudflare.zone_id_key }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: cf_zone_id_raw
+      changed_when: false
+
+    - name: Set credentials
+      ansible.builtin.set_fact:
+        cf_api_token: "{{ cf_api_token_raw.stdout | trim }}"
+        cf_account_id: "{{ cf_account_id_raw.stdout | trim }}"
+        cf_zone_id: "{{ cf_zone_id_raw.stdout | trim }}"
+        tunnel_id: "{{ _inventory._state.cloudflare.tunnel_id }}"
+        dns_hostnames: "{{ _inventory._state.cloudflare.dns_records | default([]) }}"
+      no_log: true
+
+    # === Delete DNS CNAME records ===
+    - name: Look up DNS record IDs
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records?type=CNAME&name={{ item }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cf_api_token }}"
+        status_code: 200
+      loop: "{{ dns_hostnames }}"
+      loop_control:
+        label: "{{ item }}"
+      register: dns_lookup_results
+      failed_when: false
+
+    - name: Delete DNS CNAME records
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records/{{ item.json.result[0].id }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ cf_api_token }}"
+        status_code: [200, 404]
+      loop: "{{ dns_lookup_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.json.result | default([]) | length > 0
+      register: dns_delete_results
+      failed_when: false
+
+    # === Delete Cloudflare Tunnel ===
+    - name: Clean up tunnel connections
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cf_account_id }}/cfd_tunnel/{{ tunnel_id }}/connections"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ cf_api_token }}"
+        status_code: [200, 404]
+      failed_when: false
+
+    - name: Delete Cloudflare Tunnel
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cf_account_id }}/cfd_tunnel/{{ tunnel_id }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ cf_api_token }}"
+        status_code: [200, 404]
+      register: tunnel_delete_result
+      failed_when: false
+
+    # === Clear BWS state ===
+    - name: Get inventory secret ID from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE=/tmp/bws_secrets.json
+        jq -r --arg k "inventory/{{ vm_hostname }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: _inv_id_raw
+      changed_when: false
+
+    - name: Clear Cloudflare state in BWS
+      ansible.builtin.shell: |
+        set -eu
+        inv_id="{{ _inv_id_raw.stdout | trim }}"
+        inv=$(bws secret get "$inv_id" --output json | jq -r '.value')
+
+        updated=$(printf '%s' "$inv" | jq 'del(._state.cloudflare)')
+
+        bws secret edit "$inv_id" --value "$updated"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      changed_when: true
+
+    - name: Display cleanup summary
+      ansible.builtin.debug:
+        msg:
+          - "Cloudflare cleanup complete"
+          - "  DNS records deleted: {{ dns_delete_results.results | default([]) | selectattr('status', 'defined') | selectattr('status', 'equalto', 200) | list | length }}"
+          - "  Tunnel {{ tunnel_id }}: {{ 'deleted' if tunnel_delete_result.status | default(0) == 200 else 'already gone or failed' }}"

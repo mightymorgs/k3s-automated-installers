@@ -1,0 +1,208 @@
+{# Tailscale ACL baseline -- RBAC-aware, rendered per-VM during Phase 2.
+
+   Variables:
+     vm_tags        - list of tags from the current VM (e.g. ["tag:homelab", "tag:prod", "tag:hv-auros15g"])
+     console_user   - SSH console username from BWS (e.g. "morgs")
+
+   Tag taxonomy:
+     tag:{client}          - client/tenant scoping    (homelab, austerit, ...)
+     tag:{state}           - environment              (prod, staging, dev, test)
+     tag:hv-{name}         - per-hypervisor scoping   (hv-imac-libvirt-office, hv-auros15g-proxmox-office)
+     tag:k8s-master        - K8s control plane node
+     tag:k8s-worker        - K8s worker node
+     tag:service-cluster   - any node in a K8s cluster
+     tag:hypervisor        - bare-metal hypervisor host
+     tag:vm-host           - broader VM host category
+     tag:service-ssh       - SSH-accessible service
+     tag:ci                - GitHub Actions runners
+     tag:claudebox         - AI agent sandbox (scoped to staging)
+
+   RBAC model:
+     1. Admin          → full access everywhere
+     2. CI             → full access to all infrastructure (deploy/manage)
+     3. Per-hypervisor → each hypervisor reaches only VMs it hosts (via tag:hv-{name})
+     4. Client scoping → devices reach only same-client devices
+     5. K8s cluster    → master ↔ worker on control plane + kubelet ports
+     6. Service mesh   → intra-cluster traffic on all ports
+     7. MagicDNS       → masters/workers expose HTTP(S) + NodePort range
+     8. Claudebox      → scoped to staging cluster only
+#}
+{
+  "tagOwners": {
+    "tag:ci": ["autogroup:admin"],
+    "tag:hypervisor": ["autogroup:admin"],
+    "tag:vm-host": ["autogroup:admin"],
+    "tag:service-ssh": ["autogroup:admin"],
+    "tag:service-cluster": ["autogroup:admin"],
+    "tag:k8s-master": ["autogroup:admin"],
+    "tag:k8s-worker": ["autogroup:admin"],
+    "tag:claudebox": ["autogroup:admin"],
+    "tag:dev": ["autogroup:admin"],
+    "tag:staging": ["autogroup:admin"],
+    "tag:prod": ["autogroup:admin"],
+    "tag:test": ["autogroup:admin"],
+    "tag:k8s-operator": ["autogroup:admin"]{% for t in vm_tags %},
+    "{{ t }}": ["autogroup:admin"]{% endfor %}
+
+  },
+  "acls": [
+    {# --- 1. Admin: full access --- #}
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": ["*:*"]
+    },
+
+    {# --- 2. CI: full access to all tagged infrastructure --- #}
+    {
+      "action": "accept",
+      "src": ["tag:ci"],
+      "dst": [
+        "tag:hypervisor:*",
+        "tag:vm-host:*",
+        "tag:service-ssh:*",
+        "tag:service-cluster:*",
+        "tag:k8s-master:*",
+        "tag:k8s-worker:*"
+      ]
+    },
+
+    {# --- 3. Per-hypervisor scoping: each hypervisor reaches only VMs it hosts --- #}
+    {% for t in vm_tags if t.startswith("tag:hv-") %}
+    {
+      "action": "accept",
+      "src": ["{{ t }}"],
+      "dst": ["{{ t }}:*"]
+    },
+    {% endfor %}
+
+    {# --- 4. Client scoping: same-client devices can reach each other --- #}
+    {% for t in vm_tags if t.startswith("tag:") and t.split(":")[1] not in ["prod","staging","dev","test","k8s-master","k8s-worker","service-cluster","service-ssh"] %}
+    {
+      "action": "accept",
+      "src": ["{{ t }}"],
+      "dst": ["{{ t }}:*"]
+    },
+    {% endfor %}
+
+    {# --- 5. K8s control plane: master ↔ worker --- #}
+    {
+      "action": "accept",
+      "src": ["tag:k8s-master"],
+      "dst": [
+        "tag:k8s-worker:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": ["tag:k8s-worker"],
+      "dst": [
+        "tag:k8s-master:6443",
+        "tag:k8s-master:9345",
+        "tag:k8s-master:2379",
+        "tag:k8s-master:2380"
+      ]
+    },
+
+    {# --- 6. Intra-cluster: service-cluster mesh (all ports) --- #}
+    {
+      "action": "accept",
+      "src": ["tag:service-cluster"],
+      "dst": ["tag:service-cluster:*"]
+    },
+
+    {# --- 7. MagicDNS: expose HTTP(S) + NodePort range for webapps --- #}
+    {
+      "action": "accept",
+      "src": ["tag:service-cluster"],
+      "dst": [
+        "tag:k8s-master:80",
+        "tag:k8s-master:443",
+        "tag:k8s-master:30000-32767",
+        "tag:k8s-worker:80",
+        "tag:k8s-worker:443",
+        "tag:k8s-worker:30000-32767"
+      ]
+    },
+
+    {# --- 8. K8s operator: Tailscale operator ingress proxies reach cluster services --- #}
+    {
+      "action": "accept",
+      "src": ["tag:k8s-operator"],
+      "dst": [
+        "tag:k8s-master:*",
+        "tag:k8s-worker:*",
+        "tag:service-cluster:*"
+      ]
+    },
+
+    {# --- 9. Claudebox: scoped to staging cluster only --- #}
+    {
+      "action": "accept",
+      "src": ["tag:claudebox"],
+      "dst": [
+        "tag:staging:*"
+      ]
+    }
+  ],
+
+  "autoApprovers": {
+    {# Allow the K8s operator to advertise routes and create Ingress devices #}
+    "routes": {
+      "10.42.0.0/16": ["tag:k8s-operator"],
+      "10.43.0.0/16": ["tag:k8s-operator"]
+    }
+  },
+
+  "ssh": [
+    {# --- Admin SSH: full access, all users --- #}
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": [
+        "tag:hypervisor",
+        "tag:vm-host",
+        "tag:service-ssh",
+        "tag:k8s-master",
+        "tag:k8s-worker"{% for t in vm_tags %},
+        "{{ t }}"{% endfor %}
+
+      ],
+      "users": ["autogroup:nonroot", "{{ console_user }}", "root"]
+    },
+
+    {# --- CI SSH: deploy access to all infrastructure --- #}
+    {
+      "action": "accept",
+      "src": ["tag:ci"],
+      "dst": [
+        "tag:hypervisor",
+        "tag:vm-host",
+        "tag:service-ssh",
+        "tag:k8s-master",
+        "tag:k8s-worker"{% for t in vm_tags %},
+        "{{ t }}"{% endfor %}
+
+      ],
+      "users": ["autogroup:nonroot", "{{ console_user }}", "root"]
+    },
+
+    {# --- Hypervisor SSH: per-hypervisor scoped access --- #}
+    {% for t in vm_tags if t.startswith("tag:hv-") %}
+    {
+      "action": "accept",
+      "src": ["{{ t }}"],
+      "dst": ["{{ t }}"],
+      "users": ["{{ console_user }}", "root"]
+    },
+    {% endfor %}
+
+    {# --- Claudebox SSH: staging only --- #}
+    {
+      "action": "accept",
+      "src": ["tag:claudebox"],
+      "dst": ["tag:staging"],
+      "users": ["{{ console_user }}"]
+    }
+  ]
+}

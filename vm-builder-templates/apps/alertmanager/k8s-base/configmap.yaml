@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: alertmanager
+  labels:
+    app.kubernetes.io/name: alertmanager
+data:
+  # Configuration will be populated by ansible
+  APP_URL: "https://alertmanager.example.com"

@@ -1,0 +1,137 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/08-wire-elastic"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/08-wire-elastic.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "elastic_deployed"]
+#   provides: ["grafana_elastic_wired"]
+#   tags: ["grafana", "elastic", "integration", "wiring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add Elasticsearch as a datasource in Grafana via the HTTP API.
+#     Uses internal K8s DNS for the Elasticsearch URL. Configures the
+#     logs-* index pattern with @timestamp as the time field.
+#     Idempotent: checks for existing datasource before creating.
+#   requires_apps: ["grafana", "elastic"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Wire Elasticsearch into Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    # elastic_url: from BWS _state via Phase 4 extra-vars
+    elastic_internal_url: "{{ elastic_url }}"
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== VERIFY GRAFANA API ==========
+
+    # ========== SKIP IF ELASTIC NOT INSTALLED ==========
+    - name: Skip if elastic is not installed on this VM
+      when: elastic_url is not defined
+      block:
+        - name: "elastic not installed — skipping grafana <-> elastic wiring"
+          ansible.builtin.debug:
+            msg: "elastic is not installed on this VM (no elastic_url in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== CHECK IF DATASOURCE ALREADY EXISTS ==========
+    - name: Get existing datasources
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: GET
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+      register: existing_datasources
+      changed_when: false
+
+    - name: Check if Elasticsearch datasource already exists
+      ansible.builtin.set_fact:
+        elastic_ds_exists: >-
+          {{ (existing_datasources.json | selectattr('type', 'equalto', 'elasticsearch') | list | length) > 0 }}
+
+    # ========== ADD ELASTICSEARCH DATASOURCE ==========
+    - name: Add Elasticsearch as datasource in Grafana
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "Elasticsearch"
+          type: "elasticsearch"
+          url: "{{ elastic_internal_url }}"
+          access: "proxy"
+          isDefault: false
+          database: "logs-*"
+          jsonData:
+            timeField: "@timestamp"
+            esVersion: "8.0.0"
+            logMessageField: "message"
+            logLevelField: "level"
+        status_code: [200, 409]
+      register: add_elastic
+      changed_when: add_elastic.status == 200
+      when: not elastic_ds_exists
+
+    - name: Elasticsearch datasource already configured
+      ansible.builtin.debug:
+        msg: "Elasticsearch datasource already exists in Grafana - skipping"
+      when: elastic_ds_exists
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana <-> Elasticsearch Wiring Complete"
+          - "=========================================="
+          - "Datasource: Elasticsearch ({{ 'Added' if not elastic_ds_exists else 'Already configured' }})"
+          - "Index Pattern: logs-*"
+          - "Time Field: @timestamp"
+          - "Internal URL: {{ elastic_internal_url }}"
+          - "Access Mode: proxy (server-side)"
+          - "=========================================="

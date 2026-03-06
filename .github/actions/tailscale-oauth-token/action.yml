@@ -1,0 +1,59 @@
+name: Tailscale OAuth Token
+description: Get a Tailscale OAuth access token using BWS-cached credentials
+
+inputs:
+  bws_access_token:
+    description: BWS access token (for bws secret get calls)
+    required: true
+
+outputs:
+  access_token:
+    description: Tailscale API access token (masked)
+    value: ${{ steps.token.outputs.access_token }}
+  client_id:
+    description: OAuth client ID (masked)
+    value: ${{ steps.token.outputs.client_id }}
+  client_secret:
+    description: OAuth client secret (masked)
+    value: ${{ steps.token.outputs.client_secret }}
+
+runs:
+  using: composite
+  steps:
+    - name: Get Tailscale OAuth token
+      id: token
+      shell: bash
+      env:
+        BWS_ACCESS_TOKEN: ${{ inputs.bws_access_token }}
+      run: |
+        set -euo pipefail
+        source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+
+        CID_ID=$(id_for 'inventory/shared/secrets/tailscale/oauthclientid')
+        CSEC_ID=$(id_for 'inventory/shared/secrets/tailscale/oauthclientsecret')
+
+        if [ -z "$CID_ID" ] || [ "$CID_ID" = "null" ] || [ -z "$CSEC_ID" ] || [ "$CSEC_ID" = "null" ]; then
+          echo "ERROR: Tailscale OAuth credentials not found in BWS cache" >&2
+          exit 1
+        fi
+
+        CID=$(get_val "$CID_ID")
+        CSEC=$(get_val "$CSEC_ID")
+
+        AT=$(curl -sS -X POST \
+          "https://api.tailscale.com/api/v2/oauth/token" \
+          -u "$CID:$CSEC" \
+          -d grant_type=client_credentials -d scope=all \
+          | jq -r '.access_token')
+
+        if [ -z "$AT" ] || [ "$AT" = "null" ]; then
+          echo "ERROR: Failed to get Tailscale OAuth token" >&2
+          exit 1
+        fi
+
+        echo "::add-mask::$CID"
+        echo "::add-mask::$CSEC"
+        echo "::add-mask::$AT"
+        echo "access_token=$AT" >> "$GITHUB_OUTPUT"
+        echo "client_id=$CID" >> "$GITHUB_OUTPUT"
+        echo "client_secret=$CSEC" >> "$GITHUB_OUTPUT"

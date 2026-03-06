@@ -1,0 +1,292 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prometheus/06-enable-rule-files"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prometheus/config/06-enable-rule-files.yml"
+#     category: "apps"
+#     subsystem: "prometheus"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["prometheus_deployed"]
+#   provides: ["prometheus_rule_files_enabled"]
+#   tags: ["prometheus", "alerting", "rules", "observability", "phase4"]
+#   estimated_duration: 90
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Add rule_files section to the Prometheus ConfigMap and mount a rules
+#     ConfigMap. Creates an empty prometheus-rules ConfigMap as a placeholder
+#     for alert rules, patches prometheus.yml to include rule_files pointing
+#     at /etc/prometheus/rules/*.yml, and mounts the rules ConfigMap into the
+#     Prometheus deployment. Triggers a config reload via /-/reload.
+#   requires_apps: ["prometheus"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state: {}
+
+- name: Enable Prometheus Rule Files
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    prometheus_namespace: "observability"
+    # prometheus_url: from BWS _state via Phase 4 extra-vars
+    rules_mount_path: "/etc/prometheus/rules"
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== CHECK IF PROMETHEUS IS DEPLOYED ==========
+    - name: Check if Prometheus pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ prometheus_namespace }} -l app=prometheus --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Prometheus not deployed
+      ansible.builtin.meta: end_play
+      when: prometheus_pod_check.rc != 0 or prometheus_pod_check.stdout | length == 0
+
+    # ========== GET CURRENT PROMETHEUS CONFIG ==========
+    - name: Get current Prometheus ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get configmap prometheus-config -n {{ prometheus_namespace }}
+          -o jsonpath='{.data.prometheus\.yml}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_config_raw
+      changed_when: false
+      failed_when: false
+
+    - name: End play if Prometheus ConfigMap not found
+      ansible.builtin.meta: end_play
+      when: current_config_raw.rc != 0 or current_config_raw.stdout | length == 0
+
+    - name: Store current config
+      ansible.builtin.set_fact:
+        current_config: "{{ current_config_raw.stdout }}"
+
+    # ========== CHECK IF RULE_FILES ALREADY CONFIGURED ==========
+    - name: Check if rule_files section already in config
+      ansible.builtin.set_fact:
+        rules_already_configured: "{{ 'rule_files' in current_config }}"
+
+    - name: Note rules already configured
+      ansible.builtin.debug:
+        msg: "rule_files section already present in Prometheus config - skipping config patch"
+      when: rules_already_configured
+
+    # ========== CREATE EMPTY RULES CONFIGMAP ==========
+    # Create a placeholder ConfigMap for alert rules. Individual alert
+    # rule files will be added to this ConfigMap by downstream playbooks
+    # (e.g. wiring playbooks that add service-specific alert rules).
+    - name: Check if prometheus-rules ConfigMap exists
+      ansible.builtin.command:
+        cmd: kubectl get configmap prometheus-rules -n {{ prometheus_namespace }} --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: rules_cm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create empty prometheus-rules ConfigMap
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: prometheus-rules
+            namespace: {{ prometheus_namespace }}
+            labels:
+              app: prometheus
+              component: rules
+          data:
+            _placeholder.yml: |
+              # Placeholder rule file. Add alert rules via downstream playbooks.
+              # Example:
+              #   groups:
+              #     - name: example
+              #       rules:
+              #         - alert: HighMemoryUsage
+              #           expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+              #           for: 5m
+              #           labels:
+              #             severity: warning
+              #           annotations:
+              #             summary: "High memory usage on {{ '{{' }} $labels.instance {{ '}}' }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: rules_cm_result
+      changed_when: "'created' in rules_cm_result.stdout"
+
+    # ========== PATCH PROMETHEUS CONFIG WITH RULE_FILES ==========
+    # Prometheus requires a rule_files section in prometheus.yml to load
+    # alert/recording rules. We add the section pointing to the mount
+    # path where the rules ConfigMap will be mounted.
+    - name: Patch Prometheus ConfigMap with rule_files section
+      when: not rules_already_configured
+      block:
+        - name: Build rule_files config block
+          ansible.builtin.set_fact:
+            rule_files_block: |
+              rule_files:
+                - '{{ rules_mount_path }}/*.yml'
+
+        - name: Append rule_files section to prometheus.yml in ConfigMap
+          ansible.builtin.shell: |
+            # Get current prometheus.yml from ConfigMap
+            CURRENT=$(kubectl get configmap prometheus-config -n {{ prometheus_namespace }} \
+              -o jsonpath='{.data.prometheus\.yml}')
+
+            # Check if rule_files section already exists (double-check)
+            if echo "$CURRENT" | grep -q "rule_files:"; then
+              echo "ALREADY_CONFIGURED"
+              exit 0
+            fi
+
+            # Append rule_files block to existing config
+            TMPFILE=$(mktemp)
+            cat > "$TMPFILE" <<'YAMLEOF'
+            {{ current_config }}
+
+            {{ rule_files_block }}
+            YAMLEOF
+
+            # Replace the ConfigMap data
+            kubectl create configmap prometheus-config \
+              -n {{ prometheus_namespace }} \
+              --from-file=prometheus.yml="$TMPFILE" \
+              --dry-run=client -o yaml | \
+              kubectl apply -f -
+
+            rm -f "$TMPFILE"
+            echo "PATCHED"
+          environment:
+            KUBECONFIG: "{{ kubeconfig }}"
+          register: config_patch_result
+          changed_when: "'PATCHED' in config_patch_result.stdout"
+
+    # ========== MOUNT RULES CONFIGMAP INTO PROMETHEUS ==========
+    # Check if the rules volume is already mounted, then patch the
+    # deployment/statefulset to add the volume and volumeMount.
+    - name: Get Prometheus workload type and name
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment,statefulset -n {{ prometheus_namespace }}
+          -l app=prometheus -o jsonpath='{.items[0].kind}/{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: prometheus_workload
+      changed_when: false
+
+    - name: Set workload fact
+      ansible.builtin.set_fact:
+        prometheus_workload_ref: "{{ prometheus_workload.stdout | lower }}"
+
+    - name: Check if rules volume already mounted
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get {{ prometheus_workload_ref }} -n {{ prometheus_namespace }}
+          -o jsonpath='{.spec.template.spec.volumes[*].name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: current_volumes
+      changed_when: false
+
+    - name: Set volume_already_mounted fact
+      ansible.builtin.set_fact:
+        rules_volume_mounted: "{{ 'prometheus-rules' in (current_volumes.stdout | default('')) }}"
+
+    - name: Patch Prometheus workload to mount rules ConfigMap
+      ansible.builtin.command:
+        cmd: >-
+          kubectl patch {{ prometheus_workload_ref }} -n {{ prometheus_namespace }}
+          --type=json
+          -p=[
+            {"op": "add", "path": "/spec/template/spec/volumes/-",
+             "value": {"name": "prometheus-rules", "configMap": {"name": "prometheus-rules"}}},
+            {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
+             "value": {"name": "prometheus-rules", "mountPath": "{{ rules_mount_path }}", "readOnly": true}}
+          ]
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: volume_patch
+      changed_when: "'patched' in volume_patch.stdout and '(no change)' not in volume_patch.stdout"
+      when: not rules_volume_mounted
+
+    # ========== RELOAD OR RESTART PROMETHEUS ==========
+    # Try /-/reload first (hot config reload). If that fails, the
+    # volume mount patch triggers a rolling restart anyway.
+    - name: Reload Prometheus config via lifecycle API
+      ansible.builtin.uri:
+        url: "{{ prometheus_url }}/-/reload"
+        method: POST
+        status_code: [200, 204]
+      register: reload_result
+      failed_when: false
+      when: not rules_already_configured or not rules_volume_mounted
+
+    - name: Note if reload API not available
+      ansible.builtin.debug:
+        msg: >-
+          Prometheus /-/reload returned {{ reload_result.status | default('unavailable') }}.
+          If reload failed, the volume mount patch triggers a rolling restart.
+      when: >-
+        (not rules_already_configured or not rules_volume_mounted) and
+        (reload_result.status is not defined or reload_result.status not in [200, 204])
+
+    # ========== WAIT FOR ROLLOUT (if volume was patched) ==========
+    - name: Wait for Prometheus rollout to complete
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status {{ prometheus_workload_ref }}
+          -n {{ prometheus_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      when: not rules_volume_mounted
+
+    # ========== VERIFY PROMETHEUS IS HEALTHY ==========
+    - name: Verify Prometheus health endpoint
+      ansible.builtin.uri:
+        url: "{{ prometheus_url }}/-/healthy"
+        method: GET
+        status_code: [200]
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Prometheus not healthy
+      ansible.builtin.fail:
+        msg: "Prometheus not healthy after rule_files update (status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display rule files configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prometheus Rule Files Configuration"
+          - "=========================================="
+          - ""
+          - "Config Patch: {{ 'Already configured' if rules_already_configured else 'rule_files section added' }}"
+          - "Rules ConfigMap: prometheus-rules ({{ 'existed' if rules_cm_check.rc == 0 else 'created' }})"
+          - "Volume Mount: {{ rules_mount_path }} ({{ 'already mounted' if rules_volume_mounted else 'mounted' }})"
+          - "Rule Files Glob: {{ rules_mount_path }}/*.yml"
+          - ""
+          - "To add alert rules, patch the prometheus-rules ConfigMap:"
+          - "  kubectl patch configmap prometheus-rules -n {{ prometheus_namespace }}"
+          - "    --type=merge -p='{\"data\":{\"my-alerts.yml\":\"...\"}}'  "
+          - "Then reload: POST {{ prometheus_url }}/-/reload"
+          - "=========================================="

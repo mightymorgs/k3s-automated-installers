@@ -1,0 +1,197 @@
+# DEPRECATED: This playbook is not in registry.json and does not run in Phase 4.
+# It has been superseded by 04-configure-datasources.yml (basic auth) and
+# per-datasource wiring playbooks (05-09). Kept for reference only.
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/01-configure-datasources"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/01-configure-datasources.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260123_v32_bws_state_migration"
+#   dependencies: ["grafana_deployed", "loki_deployed", "prometheus_deployed"]
+#   requires_apps: ["grafana", "prometheus", "loki"]
+#   provides: ["grafana_datasources_configured"]
+#   tags: ["grafana", "observability", "configuration", "wiring", "phase4"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Configure Grafana datasources by reading BWS._state for Loki and Prometheus URLs.
+#     Wires Grafana to available datasources via API (no kubectl). Updates BWS._state
+#     with wiring status.
+#
+#   # ========== BWS STATE INTERACTION (v3.2 NEW) ==========
+#   bws_state:
+#     # What this playbook reads from BWS
+#     reads:
+#       - path: "_state.apps.installed"
+#         purpose: "Check which datasources are available"
+#       - path: "_state.apps.grafana.url"
+#         purpose: "Grafana endpoint for API calls"
+#       - path: "_state.apps.grafana.api_key"
+#         purpose: "Grafana admin API key for authentication"
+#       - path: "_state.apps.loki.url"
+#         purpose: "Loki endpoint for datasource config"
+#       - path: "_state.apps.prometheus.url"
+#         purpose: "Prometheus endpoint for datasource config"
+#
+#     # What this playbook writes to BWS
+#     writes:
+#       - path: "_state.apps.grafana.datasources_configured"
+#         example: ["loki", "prometheus"]
+#       - path: "_state.apps.loki.connected_from"
+#         example: ["grafana"]
+#       - path: "_state.apps.prometheus.connected_from"
+#         example: ["grafana"]
+
+- name: Configure Grafana Datasources from BWS._state
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    inventory_secret_name: >-
+      {{ bws_inventory_secret_name | default('inventory/homelab-k3s-master-test-baseline-libvirt-latest') }}
+
+  tasks:
+    # ========================================
+    # READ BWS._state
+    # ========================================
+    - name: Get cluster state from BWS
+      ansible.builtin.shell: |
+        bws secret get {{ inventory_secret_name }} --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: state_raw
+      no_log: true
+      changed_when: false
+
+    - name: Parse BWS state
+      ansible.builtin.set_fact:
+        state: "{{ (state_raw.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    # ========================================
+    # CHECK WHAT'S INSTALLED
+    # ========================================
+    - name: Set datasource availability from BWS._state
+      ansible.builtin.set_fact:
+        grafana_available: "{{ 'grafana' in state._state.apps.installed | default([]) }}"
+        loki_available: "{{ 'loki' in state._state.apps.installed | default([]) }}"
+        prometheus_available: "{{ 'prometheus' in state._state.apps.installed | default([]) }}"
+
+    - name: Skip if Grafana not deployed
+      ansible.builtin.debug:
+        msg: "Grafana not deployed - skipping configuration"
+      when: not grafana_available
+
+    - name: End play if Grafana not available
+      ansible.builtin.meta: end_play
+      when: not grafana_available
+
+    # ========================================
+    # GET URLS AND KEYS FROM BWS._state (NO KUBECTL!)
+    # ========================================
+    - name: Set datasource endpoints from BWS._state
+      ansible.builtin.set_fact:
+        grafana_url: "{{ state._state.apps.grafana.url }}"
+        grafana_admin_password: "{{ state._state.apps.grafana.admin_password | default('') }}"
+        loki_url: "{{ state._state.apps.loki.url | default('') }}"
+        prometheus_url: "{{ state._state.apps.prometheus.url | default('') }}"
+      no_log: true
+
+    # ========================================
+    # CONFIGURE LOKI DATASOURCE VIA API
+    # ========================================
+    - name: Add Loki datasource to Grafana
+      when: loki_available and loki_url | length > 0
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        url_username: admin
+        url_password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body:
+          name: "Loki"
+          type: "loki"
+          url: "{{ loki_url }}"
+          access: "proxy"
+          isDefault: false
+          jsonData:
+            maxLines: 1000
+        body_format: json
+        status_code: [200, 201, 409]  # 409 = already exists (idempotent)
+      register: loki_datasource
+      no_log: true
+
+    - name: Display Loki datasource result
+      ansible.builtin.debug:
+        msg: "Loki datasource {{ 'already exists' if loki_datasource.status == 409 else 'added successfully' }}"
+      when: loki_available
+
+    # ========================================
+    # CONFIGURE PROMETHEUS DATASOURCE VIA API
+    # ========================================
+    - name: Add Prometheus datasource to Grafana
+      when: prometheus_available and prometheus_url | length > 0
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/datasources"
+        method: POST
+        url_username: admin
+        url_password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body:
+          name: "Prometheus"
+          type: "prometheus"
+          url: "{{ prometheus_url }}"
+          access: "proxy"
+          isDefault: true
+          jsonData:
+            httpMethod: "POST"
+            timeInterval: "15s"
+        body_format: json
+        status_code: [200, 201, 409]  # 409 = already exists (idempotent)
+      register: prometheus_datasource
+      no_log: true
+
+    - name: Display Prometheus datasource result
+      ansible.builtin.debug:
+        msg: >-
+          Prometheus datasource
+          {{ 'already exists' if prometheus_datasource.status == 409
+             else 'added successfully' }}
+      when: prometheus_available
+
+    # ========================================
+    # UPDATE BWS._state WITH WIRING STATUS
+    # ========================================
+    - name: Build datasources configured list
+      ansible.builtin.set_fact:
+        datasources_configured: >-
+          {{
+            (['loki'] if loki_available else []) +
+            (['prometheus'] if prometheus_available else [])
+          }}
+
+    - name: Write wiring status to BWS._state
+      ansible.builtin.debug:
+        msg: "TODO: Call generic BWS writeback playbook with wiring status"
+      # This will be implemented when generic writeback playbook exists
+      # vars:
+      #   app_name: "grafana"
+      #   app_state:
+      #     datasources_configured: "{{ datasources_configured }}"
+      #
+      # Also update reverse pointers:
+      #   _state.apps.loki.connected_from: ["grafana"]
+      #   _state.apps.prometheus.connected_from: ["grafana"]
+
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg: "Grafana configured with datasources: {{ datasources_configured | join(', ') }}"

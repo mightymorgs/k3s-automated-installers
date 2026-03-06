@@ -1,0 +1,37 @@
+---
+# Tier 3: Full integration test — runs on self-hosted runner with real k3s + BWS.
+# NOT runnable on cloud CI or local without k3s.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: molecule/requirements.yml
+driver:
+  name: default
+  options:
+    managed: false
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      gathering: explicit
+  env:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  inventory:
+    hosts:
+      all:
+        hosts:
+          localhost:
+            ansible_connection: local
+            target_hosts: localhost
+            install_mode: rebuild
+            kubectl_action: apply
+scenario:
+  test_sequence:
+    - dependency
+    - converge
+    - verify
+    - cleanup
+verifier:
+  name: ansible

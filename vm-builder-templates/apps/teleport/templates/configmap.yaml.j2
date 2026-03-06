@@ -1,0 +1,41 @@
+---
+# Teleport ConfigMap (J2 template)
+# Defaults match k8s-base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ app_name | default('teleport') }}-config
+  namespace: {{ app_namespace | default('teleport') }}
+  labels:
+    app.kubernetes.io/name: {{ app_name | default('teleport') }}
+    app.kubernetes.io/component: {{ app_component | default('zero-trust-access') }}
+data:
+  teleport.yaml: |
+    version: v3
+    teleport:
+      nodename: {{ app_name | default('teleport') }}
+      data_dir: /var/lib/teleport
+      log:
+        output: stderr
+        severity: {{ log_severity | default('INFO') }}
+    auth_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3025
+      cluster_name: {{ cluster_name | default('teleport.localhost') }}
+      tokens:
+        - proxy,node:${TELEPORT_JOIN_TOKEN}
+    proxy_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3023
+      web_listen_addr: 0.0.0.0:{{ web_port | default(3080) }}
+      tunnel_listen_addr: 0.0.0.0:3024
+      public_addr: {{ public_addr | default('teleport.localhost:443') }}
+    ssh_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3022
+    kubernetes_service:
+      enabled: true
+      listen_addr: 0.0.0.0:3027
+      resources:
+        - labels:
+            "teleport.dev/kubernetes": "enabled"

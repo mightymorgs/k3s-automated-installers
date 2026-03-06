@@ -1,0 +1,147 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/prowlarr/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/prowlarr/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "prowlarr"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["prowlarr_deployed"]
+#   provides: ["prowlarr_api_configured"]
+#   tags: ["prowlarr", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: Configure Prowlarr via API (disable auth for local addresses)
+#   requires_apps: ["prowlarr"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.prowlarr.api_key"
+#     writes:
+#       - path: "_state.apps.prowlarr.configured"
+#         example: true
+
+- name: Configure Prowlarr via API
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    prowlarr_namespace: "media-stack"
+    app_name: "prowlarr"
+    app_namespace: "{{ prowlarr_namespace }}"
+    # prowlarr_pod: resolved dynamically via kubectl label selector
+    # prowlarr_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== CHECK IF PROWLARR IS DEPLOYED ==========
+    - name: Check if Prowlarr pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=prowlarr --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: prowlarr_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Prowlarr not deployed
+      ansible.builtin.debug:
+        msg: "Prowlarr not deployed - skipping API configuration"
+      when: prowlarr_pod_check.rc != 0 or prowlarr_pod_check.stdout | length == 0
+
+    - name: End play if Prowlarr not available
+      ansible.builtin.meta: end_play
+      when: prowlarr_pod_check.rc != 0 or prowlarr_pod_check.stdout | length == 0
+
+    # ========== GET POD NAME DYNAMICALLY ==========
+    - name: Get Prowlarr pod name
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ app_namespace }} \
+          -l app.kubernetes.io/name=prowlarr \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
+        kubectl get pods -n {{ app_namespace }} \
+          -l app=prowlarr \
+          -o jsonpath='{.items[0].metadata.name}'
+      register: app_pod
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+    # ========== GET API KEY FROM BWS (via Phase 4 extra-vars) ==========
+    - name: Fail if API key not available from BWS
+      ansible.builtin.fail:
+        msg: >-
+          {{ app_name }}_api_key not provided by Phase 4 extra-vars.
+          Phase 3 extract-api-keys job may have failed.
+          Check _state.apps.{{ app_name }}.api_key in BWS inventory.
+      when: (app_name + '_api_key') is not defined or
+            lookup('vars', app_name + '_api_key', default='') | length == 0
+
+    - name: Set API key from BWS extra-var
+      ansible.builtin.set_fact:
+        api_key: "{{ lookup('vars', app_name + '_api_key') }}"
+      no_log: true
+
+    # ========== VERIFY API CONNECTIVITY ==========
+    - name: Verify Prowlarr API is accessible
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/system/status"
+        method: GET
+        headers:
+          X-Api-Key: "{{ api_key }}"
+        return_content: false
+      register: api_status
+      retries: 5
+      delay: 10
+      until: api_status.status is defined and api_status.status == 200
+      failed_when: false
+
+    - name: Fail if Prowlarr API not accessible
+      ansible.builtin.fail:
+        msg: "Prowlarr API not accessible after retries (last status: {{ api_status.status | default('unknown') }})"
+      when: api_status.status is not defined or api_status.status != 200
+
+    # ========== DISABLE BUILT-IN AUTH FOR LOCAL ADDRESSES ==========
+    - name: Get current host config
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/config/host"
+        method: GET
+        headers:
+          X-Api-Key: "{{ api_key }}"
+        status_code: [200]
+      register: current_host_config
+
+    - name: Disable authentication for local addresses (includes CGNAT/Tailscale)
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/config/host"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: >-
+          {{ current_host_config.json | combine({
+            'authenticationRequired': 'DisabledForLocalAddresses',
+            'trustCgnatIpAddresses': true
+          }) }}
+        status_code: [200, 202]
+      when: >-
+        current_host_config.json.authenticationRequired != 'DisabledForLocalAddresses' or
+        not current_host_config.json.trustCgnatIpAddresses | default(false)
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Prowlarr API Configuration Complete"
+          - "=========================================="
+          - "Auth: DisabledForLocalAddresses"
+          - "=========================================="

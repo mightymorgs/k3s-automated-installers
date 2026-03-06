@@ -1,0 +1,80 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  01-configure-repo-sync.yml:
+    summary: Configure AWX repository sync and create initial inventory and job templates
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_url }}/ping/'
+    - '{{ awx_api_url }}/tokens/'
+    - '{{ awx_api_url }}/credentials/?name=GitHub%20SSH%20Deploy%20Key'
+    - '{{ awx_api_url }}/credentials/'
+    - '{{ awx_api_url }}/projects/?name={{ project_name | urlencode }}'
+    - '{{ awx_api_url }}/projects/'
+    - '{{ awx_api_url }}/projects/{{ project_id }}/update/'
+    - '{{ awx_api_url }}/project_updates/{{ project_sync.json.id }}/'
+    - '{{ awx_api_url }}/inventories/?name={{ inventory_name | urlencode'
+    - '{{ awx_api_url }}/inventories/'
+    - '{{ awx_api_url }}/inventories/{{ inventory_id }}/hosts/?name=localhost'
+    - '{{ awx_api_url }}/inventories/{{ inventory_id }}/hosts/'
+    - '{{ awx_api_url }}/job_templates/?name=Example%3A%20K3s%20Status%20Check'
+    - '{{ awx_api_url }}/job_templates/'
+    - '{{ awx_api_url }}/projects/'
+    - '{{ awx_api_url }}/tokens/{{ awx_token.json.id }}/'
+    references_services:
+    - awx-api
+    - awx-repo
+    - repo
+  04-configure-api.yml:
+    summary: Configure AWX Django settings for Tailscale Ingress mode. Sets CSRF_TRUSTED_ORIGINS,
+      REMOTE_HOST_HEADERS, and ALLOWED_HOSTS via the AWX REST API so that requests
+      proxied through the Tailscale operator are not blocked by Django CSRF protection.
+      Tailscale provides the authentication layer.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_url }}/api/v2/ping/'
+    - '{{ awx_url }}/api/v2/tokens/'
+    - '{{ awx_url }}/api/v2/settings/system/'
+    - '{{ awx_url }}/api/v2/settings/system/'
+    - '{{ awx_url }}/api/v2/settings/system/'
+    - '{{ awx_url }}/api/v2/ping/'
+    - '{{ awx_url }}/api/v2/tokens/{{ awx_token_id }}/'
+  04-configure-traefik-ingress.yml:
+    summary: Deploy AWX with Traefik IngressRoute and Authentik OAuth2 SSO
+    source: inferred
+    confidence: medium
+    calls_api:
+    - https://awx.{{ domain }}/api/v2/tokens/
+    - https://awx.{{ domain }}/api/v2/settings/authentication/oidc/
+    references_services:
+    - authentik
+  05-wire-vault.yml:
+    summary: Wire AWX to HashiCorp Vault as a credential backend. Creates a "HashiCorp
+      Vault Secret Lookup" credential in AWX pointing at Vault's KV v2 engine via
+      internal K8s DNS. This credential can then be linked to Machine credentials
+      as an input_source, allowing AWX job templates to pull secrets from Vault at
+      runtime.
+    source: inferred
+    confidence: medium
+    calls_api:
+    - '{{ awx_api_url }}/ping/'
+    - '{{ awx_api_url }}/tokens/'
+    - '{{ awx_api_url }}/credential_types/?name__startswith=HashiCorp%20Vault%20Secret%20Lookup'
+    - '{{ awx_api_url }}/credentials/?name={{ vault_credential_name | urlencode }}'
+    - '{{ awx_api_url }}/credentials/'
+    - '{{ vault_internal_addr }}'
+    - '{{ awx_api_url }}/credentials/{{ vault_credential_id | trim }}/test/'
+    - '{{ awx_api_url }}/tokens/{{ awx_token_id }}/'
+    requires_apps:
+    - vault
+    references_services:
+    - awx-api
+    - vault
+depends_on_apps:
+- authentik
+- awx-api
+- awx-repo
+- repo
+- vault

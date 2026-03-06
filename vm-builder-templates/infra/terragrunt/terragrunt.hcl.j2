@@ -1,0 +1,33 @@
+# Rendered by Phase 2 workflow from terragrunt.hcl.j2
+# Source: BWS inventory {{ inventory_key }}
+# Rendered at: {{ render_timestamp }}
+
+locals {
+  repo_root = get_repo_root()
+}
+
+# Terraform Cloud backend with baked-in org/workspace
+generate "backend" {
+  path      = "backend.tf"
+  if_exists = "overwrite"
+  contents  = <<EOF
+terraform {
+  cloud {
+    organization = "{{ tfc_organization }}"
+    workspaces {
+      name = "{{ tfc_workspace }}"
+    }
+    token = "${get_env("TF_CLOUD_TOKEN", "")}"
+  }
+}
+EOF
+}
+
+terraform {
+  source = get_env(
+    "TG_MODULE_SOURCE",
+    "github.com/mightymorgs/media-stack//infra/terraform/modules/k3s-vm-gpu?ref=main"
+  )
+}
+
+inputs = {}

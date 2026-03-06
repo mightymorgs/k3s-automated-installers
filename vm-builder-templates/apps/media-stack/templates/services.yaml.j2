@@ -1,0 +1,115 @@
+---
+# Sonarr Service (J2 template)
+# Defaults match k8s-standalone/base/services.yaml with GCP overlay nodeports
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonarr
+  namespace: {{ media_namespace | default('media-stack') }}
+  labels:
+    app: sonarr
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ media_service_type | default('NodePort') }}
+  selector:
+    app: sonarr
+  ports:
+    - name: http
+      port: 8989
+      targetPort: 8989
+{% if media_service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ sonarr_nodeport | default(30989) }}
+{% endif %}
+      protocol: TCP
+
+---
+# Radarr Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: radarr
+  namespace: {{ media_namespace | default('media-stack') }}
+  labels:
+    app: radarr
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ media_service_type | default('NodePort') }}
+  selector:
+    app: radarr
+  ports:
+    - name: http
+      port: 7878
+      targetPort: 7878
+{% if media_service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ radarr_nodeport | default(30878) }}
+{% endif %}
+      protocol: TCP
+
+---
+# SABnzbd Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: sabnzbd
+  namespace: {{ media_namespace | default('media-stack') }}
+  labels:
+    app: sabnzbd
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ media_service_type | default('NodePort') }}
+  selector:
+    app: sabnzbd
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+{% if media_service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ sabnzbd_nodeport | default(30880) }}
+{% endif %}
+      protocol: TCP
+
+---
+# Prowlarr Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: prowlarr
+  namespace: {{ media_namespace | default('media-stack') }}
+  labels:
+    app: prowlarr
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ media_service_type | default('NodePort') }}
+  selector:
+    app: prowlarr
+  ports:
+    - name: http
+      port: 9696
+      targetPort: 9696
+{% if media_service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ prowlarr_nodeport | default(30696) }}
+{% endif %}
+      protocol: TCP
+
+---
+# qBittorrent Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent
+  namespace: {{ media_namespace | default('media-stack') }}
+  labels:
+    app: qbittorrent
+    app.kubernetes.io/part-of: media-stack
+spec:
+  type: {{ media_service_type | default('NodePort') }}
+  selector:
+    app: qbittorrent
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+{% if media_service_type | default('NodePort') == 'NodePort' %}
+      nodePort: {{ qbittorrent_nodeport | default(30081) }}
+{% endif %}
+      protocol: TCP

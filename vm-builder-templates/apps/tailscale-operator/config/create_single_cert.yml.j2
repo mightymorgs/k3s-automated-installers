@@ -1,0 +1,164 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# This is an included task file, called by 01-create-certs.yml.  #}
+{# Variables are inherited from the parent playbook context.       #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   kubeconfig_path       - Path to kubeconfig                   #}
+{#                           (default: /etc/rancher/k3s/k3s.yaml) #}
+{#   cert_working_dir      - Directory for temporary cert files   #}
+{#                           (inherited from parent, REQUIRED)     #}
+{#   cert_renewal_window_seconds - Seconds before expiry to renew #}
+{#                           (default: 2592000, 30 days)          #}
+{# ============================================================== #}
+---
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Construct certificate hostname"
+  ansible.builtin.set_fact:
+    cert_hostname: "{{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}.{{ '{{ ' }} vm_hostname {{ ' }}' }}.{{ '{{ ' }} tailnet_name {{ ' }}' }}"
+
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Display certificate hostname"
+  ansible.builtin.debug:
+    msg: "Creating certificate for {{ '{{ ' }} cert_hostname {{ ' }}' }}"
+
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Check if certificate already exists in K8s"
+  ansible.builtin.command:
+    cmd: kubectl get secret {{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}-tailscale-cert -n {{ '{{ ' }} app.ingress.namespace {{ ' }}' }} -o json
+  register: existing_cert
+  changed_when: false
+  failed_when: false
+
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Parse existing certificate"
+  ansible.builtin.set_fact:
+    cert_exists: "{{ '{{ ' }} existing_cert.rc == 0 {{ ' }}' }}"
+
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Check certificate expiry (if exists)"
+  when: cert_exists
+  block:
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Extract certificate from secret"
+      ansible.builtin.shell: |
+        kubectl get secret {{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}-tailscale-cert -n {{ '{{ ' }} app.ingress.namespace {{ ' }}' }} \
+          -o jsonpath='{.data.tls\.crt}' | base64 -d > {{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}.crt
+      changed_when: false
+      no_log: true
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Check certificate validity"
+      ansible.builtin.command:
+        cmd: openssl x509 -in {{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}.crt -noout -checkend {{ cert_renewal_window_seconds | default(2592000) }}
+      register: cert_validity
+      changed_when: false
+      failed_when: false
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Set certificate renewal flag"
+      ansible.builtin.set_fact:
+        needs_renewal: "{{ '{{ ' }} cert_validity.rc != 0 {{ ' }}' }}"
+
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Generate new certificate if needed"
+  when: not cert_exists or needs_renewal | default(false)
+  block:
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Run tailscale cert command"
+      ansible.builtin.command:
+        cmd: sudo tailscale cert {{ '{{ ' }} cert_hostname {{ ' }}' }}
+        chdir: "{{ '{{ ' }} cert_working_dir {{ ' }}' }}"
+      register: tailscale_cert_result
+      changed_when: true
+      failed_when: false
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Warn if tailscale cert failed"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: tailscale cert failed for {{ '{{ ' }} cert_hostname {{ ' }}' }}
+          (rc={{ '{{ ' }} tailscale_cert_result.rc {{ ' }}' }}, stderr={{ '{{ ' }} tailscale_cert_result.stderr | default('') {{ ' }}' }}).
+          Skipping TLS cert creation -- Tailscale tunnel encryption still protects traffic.
+      when: tailscale_cert_result.rc != 0
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Verify certificate files created"
+      ansible.builtin.stat:
+        path: "{{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.crt"
+      register: cert_file
+      when: tailscale_cert_result.rc == 0
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Verify key files created"
+      ansible.builtin.stat:
+        path: "{{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.key"
+      register: key_file
+      when: tailscale_cert_result.rc == 0
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Fail if certificate not created"
+      ansible.builtin.fail:
+        msg: "Certificate file not created: {{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.crt"
+      when: tailscale_cert_result.rc == 0 and not cert_file.stat.exists
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Fail if key not created"
+      ansible.builtin.fail:
+        msg: "Key file not created: {{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.key"
+      when: tailscale_cert_result.rc == 0 and not key_file.stat.exists
+
+    - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Store cert in K8s"
+      when: tailscale_cert_result.rc == 0
+      block:
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Read certificate content"
+          ansible.builtin.slurp:
+            src: "{{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.crt"
+          register: cert_content
+          no_log: true
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Read key content"
+          ansible.builtin.slurp:
+            src: "{{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.key"
+          register: key_content
+          no_log: true
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Create namespace if not exists"
+          ansible.builtin.command:
+            cmd: kubectl create namespace {{ '{{ ' }} app.ingress.namespace {{ ' }}' }} --dry-run=client -o yaml
+          register: namespace_manifest
+          changed_when: false
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Apply namespace"
+          ansible.builtin.command:
+            cmd: kubectl apply -f -
+            stdin: "{{ '{{ ' }} namespace_manifest.stdout {{ ' }}' }}"
+          changed_when: true
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Delete existing secret if present"
+          ansible.builtin.command:
+            cmd: kubectl delete secret {{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}-tailscale-cert -n {{ '{{ ' }} app.ingress.namespace {{ ' }}' }}
+          when: cert_exists
+          changed_when: true
+          failed_when: false
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Create K8s Secret with certificate"
+          ansible.builtin.shell: |
+            kubectl create secret tls {{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}-tailscale-cert \
+              -n {{ '{{ ' }} app.ingress.namespace {{ ' }}' }} \
+              --cert={{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.crt \
+              --key={{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.key \
+              --dry-run=client -o yaml | kubectl apply -f -
+          changed_when: true
+          no_log: true
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Verify secret created"
+          ansible.builtin.command:
+            cmd: kubectl get secret {{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}-tailscale-cert -n {{ '{{ ' }} app.ingress.namespace {{ ' }}' }}
+          changed_when: false
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Clean up certificate files"
+          ansible.builtin.file:
+            path: "{{ '{{ ' }} item {{ ' }}' }}"
+            state: absent
+          loop:
+            - "{{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.crt"
+            - "{{ '{{ ' }} cert_working_dir {{ ' }}' }}/{{ '{{ ' }} cert_hostname {{ ' }}' }}.key"
+          no_log: true
+
+        - name: "{{ '{{ ' }} app.id {{ ' }}' }} - Display success message"
+          ansible.builtin.debug:
+            msg: >-
+              Certificate created and stored in secret {{ '{{ ' }} app.ingress.subdomain {{ ' }}' }}-tailscale-cert
+              in namespace {{ '{{ ' }} app.ingress.namespace {{ ' }}' }}
+
+- name: "{{ '{{ ' }} app.id {{ ' }}' }} - Display skip message"
+  ansible.builtin.debug:
+    msg: "Certificate already exists and is valid for {{ '{{ ' }} cert_hostname {{ ' }}' }}, skipping"
+  when: cert_exists and not (needs_renewal | default(false))

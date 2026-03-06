@@ -1,0 +1,45 @@
+---
+- name: "Verify awx deployment"
+  hosts: localhost
+  gather_facts: false
+  environment:
+    KUBECONFIG: /tmp/molecule-kubeconfig
+  vars:
+    app_name: "awx"
+    app_namespace: "awx"
+  tasks:
+    - name: Check namespace exists
+      ansible.builtin.command: kubectl get namespace {{ app_namespace }}
+      register: ns_check
+      changed_when: false
+
+    - name: Check pods are running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods -l app={{ app_name }}
+        -o jsonpath='{.items[*].status.phase}'
+      register: pod_status
+      changed_when: false
+      failed_when: false
+
+    - name: Verify pod status
+      ansible.builtin.assert:
+        that:
+          - "'Running' in pod_status.stdout or 'Pending' in pod_status.stdout"
+        fail_msg: "No running pods found for {{ app_name }} in {{ app_namespace }}: {{ pod_status.stdout }}"
+      when: pod_status.stdout | length > 0
+
+    - name: Check services exist
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc -l app={{ app_name }}
+        -o jsonpath='{.items[*].metadata.name}'
+      register: svc_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report deployment status
+      ansible.builtin.debug:
+        msg: |
+          App: {{ app_name }}
+          Namespace: {{ app_namespace }}
+          Pods: {{ pod_status.stdout | default('none') }}
+          Services: {{ svc_check.stdout | default('none') }}

@@ -1,0 +1,114 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/metallb/02-verify"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/metallb/install/02-verify.yml"
+#     category: "platform"
+#     subsystem: "metallb"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "metallb"
+#       supported_versions: ["0.14.x"]
+#       version_range: ">=0.14.0"
+#
+#     requires:
+#       k3s: ">=1.30.0"
+#
+#     tested_combinations:
+#       - metallb: "0.14.x"
+#         k3s: "1.33.x"
+#         os: "ubuntu-24.04"
+#         result: "pending"
+#         test_date: "2026-03-05"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260305_golden_master_fixes"
+#   dependencies: ["metallb_deployed"]
+#   provides: ["metallb_verified", "metallb_healthy"]
+#   tags: ["metallb", "verify", "healthcheck"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: Verify MetalLB deployment is healthy
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads: []
+#     writes:
+#       - path: "_state.apps.metallb.verified"
+#         example: true
+
+- name: Verify MetalLB Deployment
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    app_name: metallb
+    app_namespace: "metallb-system"
+
+    # Global timeout constants
+    health_probe_timeout_seconds: 5
+    retry_interval_seconds: 10
+
+  tasks:
+    # ========== 1. POD PHASE CHECK ==========
+    - name: Check controller pod phase is Running
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/component=controller
+        -o jsonpath='{.items[0].status.phase}'
+      register: pod_phase
+      changed_when: false
+      failed_when: pod_phase.stdout != 'Running'
+
+    # ========== 2. GET READY POD NAME ==========
+    - name: Get ready controller pod name
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} get pods
+        -l app.kubernetes.io/component=controller
+        -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}'
+        | awk '{print $1}'
+      register: app_pod
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: app_pod.rc == 0 and app_pod.stdout != ''
+
+    # ========== 3. CHECK SPEAKER DAEMONSET ==========
+    - name: Check speaker DaemonSet desired vs ready
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get daemonset speaker
+        -o jsonpath='{.status.numberReady}/{.status.desiredNumberScheduled}'
+      register: speaker_status
+      changed_when: false
+      retries: 3
+      delay: "{{ retry_interval_seconds }}"
+      until: speaker_status.rc == 0 and speaker_status.stdout != '' and speaker_status.stdout.split('/')[0] == speaker_status.stdout.split('/')[1]
+
+    # ========== 4. CHECK SERVICE EXISTS ==========
+    - name: Check webhook service exists
+      ansible.builtin.command: >-
+        kubectl -n {{ app_namespace }} get svc metallb-webhook-service
+        -o jsonpath='{.spec.type}'
+      register: service_check
+      changed_when: false
+      failed_when: service_check.stdout == ''
+
+    # ========== 5. DISPLAY VERIFICATION SUMMARY ==========
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "MetalLB Verification Summary"
+          - "=========================================="
+          - "Controller:   {{ pod_phase.stdout | default('UNKNOWN') }} -- {{ 'OK' if pod_phase.stdout == 'Running' else 'FAILED' }}"
+          - "Ready Pod:    {{ app_pod.stdout | default('NONE') }} -- {{ 'OK' if app_pod.stdout | default('') != '' else 'FAILED' }}"
+          - "Speaker:      {{ speaker_status.stdout | default('UNKNOWN') }} -- OK"
+          - "Service:      {{ service_check.stdout | default('NONE') }} -- {{ 'OK' if service_check.stdout | default('') != '' else 'FAILED' }}"
+          - "=========================================="

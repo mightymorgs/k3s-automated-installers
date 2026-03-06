@@ -1,0 +1,112 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/kibana/04-configure-api"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/kibana/config/04-configure-api.yml"
+#     category: "apps"
+#     subsystem: "kibana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260221_api_config_auth"
+#   dependencies: ["kibana_deployed"]
+#   provides: ["kibana_api_configured"]
+#   tags: ["kibana", "api", "configuration", "zero-touch"]
+#   estimated_duration: 60
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Enable anonymous access for Kibana in Tailscale mode.
+#     Patches the Kibana deployment to disable xpack security
+#     so users on the tailnet can access dashboards without logging in.
+#     Tailscale provides the authentication layer.
+#   requires_apps: ["kibana"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     writes:
+#       - path: "_state.apps.kibana.configured"
+#         example: true
+
+- name: Configure Kibana anonymous access for Tailscale Ingress
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    kibana_namespace: "kibana"
+    app_namespace: "{{ kibana_namespace }}"
+    # kibana_url: from BWS _state via Phase 4 extra-vars
+
+  tasks:
+    # ========== 1. CHECK IF KIBANA IS DEPLOYED ==========
+    - name: Check if Kibana pod is running
+      ansible.builtin.command:
+        cmd: kubectl get pod -n {{ app_namespace }} -l app=kibana --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: kibana_pod_check
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if Kibana not deployed
+      ansible.builtin.debug:
+        msg: "Kibana not deployed - skipping API configuration"
+      when: kibana_pod_check.rc != 0 or kibana_pod_check.stdout | length == 0
+
+    - name: End play if Kibana not available
+      ansible.builtin.meta: end_play
+      when: kibana_pod_check.rc != 0 or kibana_pod_check.stdout | length == 0
+
+    # ========== 2. PATCH DEPLOYMENT TO DISABLE XPACK SECURITY ==========
+    # When Tailscale is the auth layer, Kibana's built-in login is redundant.
+    # Disabling xpack security removes the login page entirely, allowing
+    # direct dashboard access for authenticated tailnet users.
+    - name: Disable xpack security via environment variables
+      ansible.builtin.command:
+        cmd: >-
+          kubectl set env deployment/kibana -n {{ app_namespace }}
+          XPACK_SECURITY_ENABLED=false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: env_patch_result
+      changed_when: "'updated' in env_patch_result.stdout"
+
+    # ========== 3. WAIT FOR ROLLOUT ==========
+    - name: Wait for Kibana rollout to complete
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/kibana -n {{ app_namespace }} --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+      changed_when: false
+
+    # ========== 4. VERIFY KIBANA IS ACCESSIBLE ==========
+    - name: Verify Kibana health endpoint is reachable
+      ansible.builtin.uri:
+        url: "{{ kibana_url }}/api/status"
+        method: GET
+        return_content: false
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status is defined and health_check.status == 200
+      failed_when: false
+
+    - name: Fail if Kibana not accessible after rollout
+      ansible.builtin.fail:
+        msg: "Kibana not accessible after rollout (last status: {{ health_check.status | default('unknown') }})"
+      when: health_check.status is not defined or health_check.status != 200
+
+    # ========== 5. DISPLAY RESULT ==========
+    - name: Display configuration result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Kibana API Configuration Complete"
+          - "=========================================="
+          - "xpack.security.enabled: false"
+          - "Auth Layer: Tailscale (built-in login bypassed)"
+          - "Health Check: {{ kibana_url }}/api/status ({{ health_check.status }})"
+          - "=========================================="

@@ -1,0 +1,316 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/cert-manager/05-wire-vault-pki"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/cert-manager/config/05-wire-vault-pki.yml"
+#     category: "apps"
+#     subsystem: "cert-manager"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["cert_manager_deployed", "vault_deployed", "vault_initialized"]
+#   provides: ["cert_manager_vault_pki_wired", "clusterissuer_vault_pki_ready"]
+#   tags: ["cert-manager", "vault", "pki", "tls", "integration", "wiring", "phase4"]
+#   estimated_duration: 120
+#   parallel_safe: false
+#   idempotent: true
+#   description: >-
+#     Create a cert-manager ClusterIssuer backed by Vault PKI for internal
+#     cluster TLS certificates. Enables the Vault PKI secrets engine, generates
+#     an internal root CA, configures a role for cluster.local domains, creates
+#     a Vault policy and K8s auth role for cert-manager, and applies the
+#     ClusterIssuer CRD. Uses K8s service account auth (no API keys needed).
+#   requires_apps: ["cert-manager", "vault"]
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.vault.root_token"
+#         purpose: "Vault root token for PKI engine and policy configuration"
+
+- name: Wire cert-manager to Vault PKI
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    cert_manager_namespace: "cert-manager"
+    vault_namespace: "vault"
+    # vault_url: from BWS _state via Phase 4 extra-vars
+    vault_internal_url: "{{ vault_url }}"
+    pki_path: pki
+    pki_role_name: cluster-local
+    pki_common_name: "Homelab Internal CA"
+    pki_ttl: "87600h"
+    pki_max_ttl: "43800h"
+    pki_allowed_domains: "cluster.local,svc,svc.cluster.local"
+    vault_auth_role: cert-manager
+    kubeconfig: "{{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+
+    # ========== SKIP IF VAULT NOT INSTALLED ==========
+    - name: Skip if vault is not installed on this VM
+      when: vault_root_token is not defined
+      block:
+        - name: "vault not installed — skipping cert-manager <-> vault wiring"
+          ansible.builtin.debug:
+            msg: "vault is not installed on this VM (no vault_root_token in BWS state) — skipping wiring"
+        - name: End play gracefully
+          ansible.builtin.meta: end_play
+
+    - name: Fail if vault_root_token not provided
+      ansible.builtin.fail:
+        msg: >-
+          vault_root_token must be provided via extra-vars (from BWS _state.apps.vault.root_token)
+      when: vault_root_token is not defined or vault_root_token | length == 0
+
+    # ========== CHECK IF CERT-MANAGER IS DEPLOYED ==========
+    - name: Check if cert-manager controller is running
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get deployment -n {{ cert_manager_namespace }}
+          -l app.kubernetes.io/name=cert-manager --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: certmanager_check
+      changed_when: false
+      failed_when: false
+
+    - name: End play if cert-manager not deployed
+      ansible.builtin.meta: end_play
+      when: certmanager_check.rc != 0 or certmanager_check.stdout | length == 0
+
+    # ========== CHECK IF CLUSTERISSUER ALREADY EXISTS ==========
+    - name: Check if vault-pki ClusterIssuer already exists
+      ansible.builtin.command:
+        cmd: kubectl get clusterissuer vault-pki --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: existing_issuer
+      changed_when: false
+      failed_when: false
+
+    - name: Set ClusterIssuer existence fact
+      ansible.builtin.set_fact:
+        issuer_exists: "{{ existing_issuer.rc == 0 and existing_issuer.stdout | length > 0 }}"
+
+    # ========== VERIFY VAULT API ==========
+    - name: Verify Vault API is accessible
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/sys/health"
+        method: GET
+        status_code: [200, 429, 472, 473, 501, 503]
+        return_content: false
+      register: vault_health
+      retries: 5
+      delay: 10
+      until: vault_health.status is defined
+      failed_when: false
+
+    - name: End play if Vault API not accessible
+      ansible.builtin.meta: end_play
+      when: vault_health.status is not defined
+
+    # ========== ENABLE VAULT PKI SECRETS ENGINE ==========
+    - name: Enable PKI secrets engine
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/sys/mounts/{{ pki_path }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          type: "pki"
+          config:
+            max_lease_ttl: "{{ pki_ttl }}"
+        status_code: [200, 204, 400]
+      register: pki_engine
+      # 400 = path already in use (already enabled)
+
+    - name: Note PKI engine status
+      ansible.builtin.debug:
+        msg: "PKI engine at '{{ pki_path }}': {{ 'Already enabled' if pki_engine.status == 400 else 'Enabled' }}"
+
+    # ========== GENERATE ROOT CA ==========
+    - name: Check if root CA already exists
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/{{ pki_path }}/ca/pem"
+        method: GET
+        status_code: [200, 204, 404]
+        return_content: true
+      register: existing_ca
+
+    - name: Generate internal root CA
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/{{ pki_path }}/root/generate/internal"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          common_name: "{{ pki_common_name }}"
+          ttl: "{{ pki_ttl }}"
+          issuer_name: "homelab-root"
+        status_code: [200, 204]
+      register: root_ca_result
+      when: existing_ca.content is not defined or existing_ca.content | length < 10
+
+    # ========== CONFIGURE PKI ROLE ==========
+    - name: Configure PKI role for cluster.local domains
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/{{ pki_path }}/roles/{{ pki_role_name }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          allowed_domains: "{{ pki_allowed_domains }}"
+          allow_subdomains: true
+          allow_bare_domains: true
+          max_ttl: "{{ pki_max_ttl }}"
+          generate_lease: true
+        status_code: [200, 204]
+      register: pki_role_result
+
+    # ========== CREATE VAULT POLICY FOR CERT-MANAGER ==========
+    - name: Create Vault policy for cert-manager PKI access
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/sys/policies/acl/cert-manager-pki"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          policy: |
+            path "{{ pki_path }}/sign/{{ pki_role_name }}" {
+              capabilities = ["create", "update"]
+            }
+            path "{{ pki_path }}/issue/{{ pki_role_name }}" {
+              capabilities = ["create"]
+            }
+        status_code: [200, 204]
+
+    # ========== CREATE K8S AUTH ROLE FOR CERT-MANAGER ==========
+    - name: Ensure Kubernetes auth method is enabled
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/sys/auth/kubernetes"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          type: "kubernetes"
+        status_code: [200, 204, 400]
+      # 400 = already enabled
+
+    - name: Configure Kubernetes auth method
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/auth/kubernetes/config"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          kubernetes_host: "https://kubernetes.default.svc"
+        status_code: [200, 204]
+
+    - name: Create Kubernetes auth role for cert-manager
+      ansible.builtin.uri:
+        url: "{{ vault_url }}/v1/auth/kubernetes/role/{{ vault_auth_role }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_root_token }}"
+        body_format: json
+        body:
+          bound_service_account_names:
+            - "cert-manager"
+            - "default"
+          bound_service_account_namespaces:
+            - "{{ cert_manager_namespace }}"
+          policies:
+            - "cert-manager-pki"
+          ttl: "1h"
+        status_code: [200, 204]
+
+    # ========== APPLY CLUSTERISSUER CRD ==========
+    - name: Apply vault-pki ClusterIssuer
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: vault-pki
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/component: pki
+          spec:
+            vault:
+              path: {{ pki_path }}/sign/{{ pki_role_name }}
+              server: {{ vault_internal_url }}
+              auth:
+                kubernetes:
+                  role: {{ vault_auth_role }}
+                  mountPath: /v1/auth/kubernetes
+                  serviceAccountRef:
+                    name: cert-manager
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: issuer_apply
+      changed_when: "'created' in issuer_apply.stdout or 'configured' in issuer_apply.stdout"
+
+    # ========== WAIT FOR CLUSTERISSUER READY ==========
+    - name: Wait for ClusterIssuer to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get clusterissuer vault-pki
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: issuer_status
+      until: issuer_status.stdout == "True"
+      retries: 12
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Set ClusterIssuer readiness fact
+      ansible.builtin.set_fact:
+        issuer_ready: "{{ issuer_status.stdout == 'True' }}"
+
+    - name: Warn if ClusterIssuer not ready
+      ansible.builtin.debug:
+        msg: |
+          WARNING: ClusterIssuer 'vault-pki' is not Ready.
+          Possible causes:
+            - Vault not accessible at {{ vault_internal_url }}
+            - K8s auth role '{{ vault_auth_role }}' misconfigured
+            - cert-manager service account cannot authenticate to Vault
+          Debug: kubectl describe clusterissuer vault-pki
+      when: not issuer_ready
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display wiring result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "cert-manager <-> Vault PKI Wiring Complete"
+          - "=========================================="
+          - ""
+          - "PKI Engine: {{ pki_path }}/"
+          - "Root CA: {{ pki_common_name }}"
+          - "Role: {{ pki_role_name }} (domains: {{ pki_allowed_domains }})"
+          - "Vault Policy: cert-manager-pki"
+          - "K8s Auth Role: {{ vault_auth_role }}"
+          - "ClusterIssuer: vault-pki ({{ 'Ready' if issuer_ready else 'Not Ready - see warning above' }})"
+          - ""
+          - "Usage: Reference in Certificate or Ingress annotations:"
+          - "  issuerRef:"
+          - "    name: vault-pki"
+          - "    kind: ClusterIssuer"
+          - "=========================================="

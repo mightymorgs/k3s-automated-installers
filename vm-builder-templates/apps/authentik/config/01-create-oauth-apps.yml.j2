@@ -1,0 +1,218 @@
+{# ============================================================== #}
+{# Template variables                                             #}
+{#                                                                #}
+{# Infrastructure:                                                #}
+{#   vm_hostname           - VM name (REQUIRED, no default)       #}
+{#   kubeconfig_path       - Path to kubeconfig                   #}
+{#                           (default: /etc/rancher/k3s/k3s.yaml) #}
+{#   registry_path_default - Relative fallback for REGISTRY_PATH  #}
+{#                           (default: playbook_dir/../../../registry.json) #}
+{#                                                                #}
+{# Service:                                                       #}
+{#   authentik_registry_key - Registry key for authentik           #}
+{#                            (default: authentik)                 #}
+{#   authentik_api_version  - API version path segment             #}
+{#                            (default: v3)                        #}
+{#                                                                #}
+{# State:                                                         #}
+{#   bws_cache_path        - Path to BWS secrets cache            #}
+{#                           (default: /tmp/bws_secrets.json)     #}
+{#   bws_inventory_prefix  - BWS key prefix for inventory         #}
+{#                           (default: inventory)                 #}
+{#                                                                #}
+{# Configuration:                                                 #}
+{#   target_hosts          - Ansible host pattern                 #}
+{#                           (default: localhost)                  #}
+{# ============================================================== #}
+---
+- name: Auto-generate Authentik OAuth applications from registry
+  hosts: {{ target_hosts | default('localhost') }}
+  connection: local
+  gather_facts: false
+
+  vars:
+    registry_path: "{{ '{{ ' }} lookup('env', 'REGISTRY_PATH') | default(playbook_dir ~ '/{{ registry_path_default | default('../../../registry.json') }}') {{ ' }}' }}"
+    bws_access_token: "{{ '{{ ' }} lookup('env', 'BWS_ACCESS_TOKEN') {{ ' }}' }}"
+
+  tasks:
+    # ===== STEP 1: Load Registry =====
+    - name: Read app registry
+      ansible.builtin.slurp:
+        src: "{{ '{{ ' }} registry_path {{ ' }}' }}"
+      register: registry_raw
+
+    - name: Parse registry JSON
+      ansible.builtin.set_fact:
+        registry: "{{ '{{ ' }} registry_raw.content | b64decode | from_json {{ ' }}' }}"
+      no_log: false
+
+    - name: Extract authentik service details from registry
+      ansible.builtin.set_fact:
+        _ak_namespace: "{{ '{{ ' }} registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.namespace {{ ' }}' }}"
+        _ak_service: "{{ '{{ ' }} registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.service_name {{ ' }}' }}"
+        _ak_port: "{{ '{{ ' }} registry.apps.{{ authentik_registry_key | default('authentik') }}.ingress.service_port {{ ' }}' }}"
+
+    # ===== STEP 1b: Resolve authentik ClusterIP (K8s DNS not available from runner) =====
+    - name: Resolve authentik ClusterIP
+      ansible.builtin.shell: |
+        kubectl get svc {{ '{{ ' }} _ak_service {{ ' }}' }} -n {{ '{{ ' }} _ak_namespace {{ ' }}' }} -o jsonpath='{.spec.clusterIP}'
+      environment:
+        KUBECONFIG: {{ kubeconfig_path | default('/etc/rancher/k3s/k3s.yaml') }}
+      register: authentik_ip_raw
+      changed_when: false
+
+    - name: Set authentik base URL from ClusterIP
+      ansible.builtin.set_fact:
+        authentik_base_url: "http://{{ '{{ ' }} authentik_ip_raw.stdout | trim {{ ' }}' }}:{{ '{{ ' }} _ak_port {{ ' }}' }}"
+        authentik_api_base: "http://{{ '{{ ' }} authentik_ip_raw.stdout | trim {{ ' }}' }}:{{ '{{ ' }} _ak_port {{ ' }}' }}/api/{{ authentik_api_version | default('v3') }}"
+
+    # ===== STEP 2: Read BWS Inventory =====
+    - name: Read VM inventory from BWS cache
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: inventory_raw
+      changed_when: false
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ '{{ ' }} inventory_raw.stdout | from_json {{ ' }}' }}"
+
+    - name: Get BWS secret ID for later write-back
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ bws_inventory_prefix | default('inventory') }}/{{ '{{ ' }} vm_hostname {{ ' }}' }}" '.[] | select(.key==$k) | .id' "$BWS_CACHE"
+      register: bws_secret_id_raw
+      changed_when: false
+
+    - name: Set BWS secret ID
+      ansible.builtin.set_fact:
+        bws_secret_id: "{{ '{{ ' }} bws_secret_id_raw.stdout | trim {{ ' }}' }}"
+
+    # ===== STEP 3: Extract Inventory Configuration =====
+    - name: Extract ingress configuration
+      ansible.builtin.set_fact:
+        ingress_mode: "{{ '{{ ' }} inventory.ingress.mode {{ ' }}' }}"
+        ingress_domain: "{{ '{{ ' }} inventory.ingress.domain | default('') {{ ' }}' }}"
+        tailnet_key: "{{ '{{ ' }} inventory.tailscale.tailnet_key | default('') {{ ' }}' }}"
+        authentik_admin_token: "{{ '{{ ' }} inventory._state.apps.{{ authentik_registry_key | default('authentik') }}.admin_token | default('') {{ ' }}' }}"
+        client_name: "{{ '{{ ' }} inventory.identity.name | default(vm_hostname) | regex_replace('-.*', '') {{ ' }}' }}"
+
+    - name: Extract SSO overrides
+      ansible.builtin.set_fact:
+        sso_overrides: "{{ '{{ ' }} inventory.ingress.sso_overrides | default({}) {{ ' }}' }}"
+
+    - name: Resolve tailnet from pointer key
+      ansible.builtin.shell: |
+        set -eu
+        BWS_CACHE={{ bws_cache_path | default('/tmp/bws_secrets.json') }}
+        jq -r --arg k "{{ '{{ ' }} tailnet_key {{ ' }}' }}" '.[] | select(.key==$k) | .value' "$BWS_CACHE"
+      register: tailnet_raw
+      changed_when: false
+      when: tailnet_key | length > 0
+
+    - name: Set tailnet value
+      ansible.builtin.set_fact:
+        tailnet_name: "{{ '{{ ' }} tailnet_raw.stdout | trim if tailnet_key | length > 0 else '' {{ ' }}' }}"
+
+    # ===== STEP 4: Filter Apps with SSO Enabled =====
+    - name: Extract installed apps list
+      ansible.builtin.set_fact:
+        installed_apps: "{{ '{{ ' }} inventory._state.apps.installed | default([]) {{ ' }}' }}"
+
+    - name: Display installed apps
+      ansible.builtin.debug:
+        msg: "Installed apps: {{ '{{ ' }} installed_apps {{ ' }}' }}"
+
+    - name: Build list of all SSO-capable apps with OAuth config
+      ansible.builtin.set_fact:
+        _all_sso_apps: >-
+          {{ '{{ ' }}
+            registry.apps
+            | dict2items
+            | selectattr('value.sso.enabled', 'defined')
+            | selectattr('value.sso.enabled', 'equalto', true)
+            | selectattr('value.sso.oauth', 'defined')
+            | list
+          {{ ' }}' }}
+
+    - name: Filter to only installed apps
+      ansible.builtin.set_fact:
+        sso_enabled_apps: >-
+          {{ '{{ ' }} _all_sso_apps | selectattr('key', 'in', installed_apps) | list {{ ' }}' }}
+      no_log: false
+
+    - name: Apply sso_overrides (exclude apps with sso_overrides=false)
+      ansible.builtin.set_fact:
+        sso_enabled_apps: >-
+          {{ '{{ ' }} sso_enabled_apps |
+          rejectattr('key', 'in',
+            sso_overrides | dict2items |
+            rejectattr('value', 'equalto', true) |
+            map(attribute='key') | list
+          ) | list {{ ' }}' }}
+      when: sso_overrides | length > 0
+
+    - name: Display apps requiring OAuth
+      ansible.builtin.debug:
+        msg: >-
+          Found {{ '{{ ' }} sso_enabled_apps | length {{ ' }}' }} installed apps with OAuth config
+          (out of {{ '{{ ' }} _all_sso_apps | length {{ ' }}' }} total, {{ '{{ ' }} sso_overrides | dict2items | rejectattr('value', 'equalto', true) | list | length {{ ' }}' }} disabled by sso_overrides):
+          {{ '{{ ' }} sso_enabled_apps | map(attribute='key') | list {{ ' }}' }}
+
+    # ===== STEP 4b: Look up authorization flow UUID by designation =====
+    - name: Get authorization flow UUID
+      ansible.builtin.uri:
+        url: "{{ '{{ ' }} authentik_api_base {{ ' }}' }}/flows/instances/?designation=authorization"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ '{{ ' }} authentik_admin_token {{ ' }}' }}"
+        status_code: [200]
+      register: auth_flow_raw
+
+    - name: Set authorization flow UUID
+      ansible.builtin.set_fact:
+        authorization_flow_uuid: "{{ '{{ ' }} auth_flow_raw.json.results[0].pk {{ ' }}' }}"
+
+    # ===== STEP 5: Create OAuth Apps in Authentik =====
+    - name: Create OAuth provider and application for each app
+      ansible.builtin.include_tasks: create_oauth_app.yml
+      loop: "{{ '{{ ' }} sso_enabled_apps {{ ' }}' }}"
+      loop_control:
+        loop_var: app_item
+        label: "{{ '{{ ' }} app_item.key {{ ' }}' }}"
+
+    # ===== STEP 6: Write OAuth Credentials to BWS =====
+    - name: Update BWS inventory with OAuth credentials
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ '{{ ' }} bws_secret_id {{ ' }}' }}" --output json | jq -r '.value')
+
+        # Merge OAuth credentials
+        UPDATED=$(echo "$CURRENT" | jq --argjson oauth '{{ '{{ ' }} oauth_credentials | to_json {{ ' }}' }}' '
+          . as $inv |
+          $oauth | to_entries | map({
+            key: .key,
+            value: .value
+          }) | reduce .[] as $item ($inv;
+            ._state.apps[$item.key].oauth = $item.value
+          )
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ '{{ ' }} bws_secret_id {{ ' }}' }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ '{{ ' }} lookup('env', 'BWS_ACCESS_TOKEN') {{ ' }}' }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+      when: oauth_credentials is defined and oauth_credentials | length > 0
+
+    - name: Confirm OAuth apps created
+      ansible.builtin.debug:
+        msg: >-
+          Successfully created {{ '{{ ' }} sso_enabled_apps | length {{ ' }}' }} OAuth
+          applications in Authentik and wrote credentials to
+          BWS._state.apps.{app}.oauth

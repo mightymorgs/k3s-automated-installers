@@ -1,0 +1,251 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/awx/operations/project-sync"
+#   type: "atomic"
+#   generated_by: "idi"
+#   source_operation: "awx.projects.sync"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/awx/operations/project-sync.yml"
+#     category: "platform"
+#     subsystem: "awx"
+#
+#   # ========== VERSION COMPATIBILITY ==========
+#   compatibility:
+#     primary_component:
+#       name: "awx"
+#       supported_versions: ["23.x", "24.x"]
+#       version_range: ">=23.0.0"
+#
+#     requires:
+#       k3s: ">=1.28.0"
+#
+#     tested_combinations:
+#       - awx: "24.x"
+#         k3s: "1.33.x"
+#         result: "pending"
+#         test_date: "2026-01-27"
+#         notes: "IDI-generated from AWX API specification"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   batch_id: "20260127_idi_awx_operations"
+#   dependencies: ["awx_deployed", "awx_project_created"]
+#   provides: ["awx_project_synced"]
+#   tags: ["awx", "project", "sync", "scm", "automation", "operations"]
+#   estimated_duration: 120
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Trigger an SCM update for an AWX project to pull latest changes from the
+#     repository. Waits for the sync job to complete and reports status.
+#
+#   # ========== BWS STATE INTERACTION (v3.2) ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.awx.token"
+#         purpose: "AWX API token for authentication"
+#       - path: "_state.apps.awx.projects.{project_name}.id"
+#         purpose: "Project ID to sync"
+#
+#     writes:
+#       - path: "_state.apps.awx.projects.{project_name}.last_sync"
+#         example: "2026-01-27T12:00:00Z"
+#       - path: "_state.apps.awx.projects.{project_name}.sync_status"
+#         example: "successful"
+
+- name: AWX - Sync Project from SCM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    inventory_secret_name: "{{ lookup('env', 'VM_INVENTORY_SECRET') }}"
+    awx_base_url: "{{ awx_url }}"
+    awx_api_base: "{{ awx_base_url }}/api/v2"
+
+    # Required fields - one of these must be provided
+    # project_name: Name of the project to sync
+    # project_id: ID of the project to sync (alternative to name)
+
+    # Optional: wait for sync to complete
+    wait_for_sync: "{{ wait_for_sync_input | default(true) }}"
+    sync_timeout_retries: "{{ sync_timeout_retries_input | default(30) }}"
+    sync_delay_seconds: "{{ sync_delay_seconds_input | default(10) }}"
+
+  tasks:
+    # ===== STEP 1: Validate Required Inputs =====
+    - name: Validate at least one identifier is provided
+      ansible.builtin.assert:
+        that:
+          - (project_name is defined and project_name | length > 0) or (project_id is defined)
+        fail_msg: "Required: Either project_name or project_id must be provided"
+        success_msg: "Project identifier validated"
+
+    # ===== STEP 2: Validate Environment =====
+    - name: Validate BWS_ACCESS_TOKEN is set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'BWS_ACCESS_TOKEN') | length > 0
+        fail_msg: "BWS_ACCESS_TOKEN environment variable must be set"
+        success_msg: "BWS access configured"
+
+    - name: Validate VM_INVENTORY_SECRET is set
+      ansible.builtin.assert:
+        that:
+          - inventory_secret_name | length > 0
+        fail_msg: "VM_INVENTORY_SECRET environment variable must be set"
+        success_msg: "Inventory secret name configured"
+
+    # ===== STEP 3: Read BWS Inventory and AWX Token =====
+    - name: Fetch VM inventory from BWS
+      ansible.builtin.shell: |
+        bws secret get "{{ inventory_secret_name }}" --output json
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_result
+      changed_when: false
+      no_log: true
+
+    - name: Parse inventory JSON
+      ansible.builtin.set_fact:
+        inventory: "{{ (bws_result.stdout | from_json).value | from_json }}"
+      no_log: true
+
+    - name: Extract AWX token
+      ansible.builtin.set_fact:
+        awx_token: "{{ inventory._state.apps.awx.token }}"
+      no_log: true
+
+    - name: Validate AWX token is available
+      ansible.builtin.assert:
+        that:
+          - awx_token | length > 0
+        fail_msg: "AWX token not found in BWS _state. Ensure AWX is configured."
+        success_msg: "AWX token retrieved from BWS _state"
+
+    # ===== STEP 4: Resolve Project ID =====
+    - name: Look up project by name if ID not provided
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/?name={{ project_name | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      register: project_lookup
+      when: project_id is not defined
+      no_log: false
+
+    - name: Set project ID from lookup
+      ansible.builtin.set_fact:
+        resolved_project_id: "{{ project_lookup.json.results[0].id }}"
+        resolved_project_name: "{{ project_lookup.json.results[0].name }}"
+      when: project_id is not defined and project_lookup.json.count > 0
+
+    - name: Use provided project ID
+      ansible.builtin.set_fact:
+        resolved_project_id: "{{ project_id }}"
+        resolved_project_name: "{{ project_name | default('unknown') }}"
+      when: project_id is defined
+
+    - name: Validate project was found
+      ansible.builtin.assert:
+        that:
+          - resolved_project_id is defined
+        fail_msg: "Project '{{ project_name | default(project_id) }}' not found in AWX"
+        success_msg: "Project found with ID: {{ resolved_project_id }}"
+
+    # ===== STEP 5: Trigger Project Sync =====
+    - name: Trigger project sync (SCM update)
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/projects/{{ resolved_project_id }}/update/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: {}
+        status_code: [201, 202]
+        validate_certs: false
+      register: sync_result
+      no_log: false
+
+    - name: Record sync job ID
+      ansible.builtin.set_fact:
+        sync_job_id: "{{ sync_result.json.id | default(sync_result.json.project_update) }}"
+
+    - name: Display sync initiated
+      ansible.builtin.debug:
+        msg: "Project sync initiated for '{{ resolved_project_name }}' (job ID: {{ sync_job_id }})"
+
+    # ===== STEP 6: Wait for Sync to Complete (Optional) =====
+    - name: Wait for sync job to complete
+      ansible.builtin.uri:
+        url: "{{ awx_api_base }}/project_updates/{{ sync_job_id }}/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ awx_token }}"
+        status_code: [200]
+        validate_certs: false
+      register: sync_status
+      until: sync_status.json.status in ['successful', 'failed', 'error', 'canceled']
+      retries: "{{ sync_timeout_retries }}"
+      delay: "{{ sync_delay_seconds }}"
+      when: wait_for_sync | bool
+      no_log: false
+
+    - name: Set sync result
+      ansible.builtin.set_fact:
+        final_sync_status: "{{ sync_status.json.status if wait_for_sync | bool else 'pending' }}"
+
+    - name: Fail if sync failed
+      ansible.builtin.fail:
+        msg: >-
+          Project sync failed for '{{ resolved_project_name }}'.
+          Status: {{ final_sync_status }}
+      when: wait_for_sync | bool and final_sync_status in ['failed', 'error']
+
+    # ===== STEP 7: Write Result to BWS._state =====
+    - name: Update BWS inventory with sync status
+      ansible.builtin.shell: |
+        # Get current inventory
+        CURRENT=$(bws secret get "{{ inventory_secret_name }}" --output json | jq -r '.value')
+
+        # Get current timestamp
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        # Update _state.apps.awx.projects.{project_name}
+        UPDATED=$(echo "$CURRENT" | jq \
+          --arg name "{{ resolved_project_name }}" \
+          --arg status "{{ final_sync_status }}" \
+          --argjson job_id {{ sync_job_id }} \
+          --arg timestamp "$TIMESTAMP" \
+          '
+          if ._state.apps.awx == null then ._state.apps.awx = {} else . end |
+          if ._state.apps.awx.projects == null then ._state.apps.awx.projects = {} else . end |
+          if ._state.apps.awx.projects[$name] == null then ._state.apps.awx.projects[$name] = {} else . end |
+          ._state.apps.awx.projects[$name].last_sync = $timestamp |
+          ._state.apps.awx.projects[$name].sync_status = $status |
+          ._state.apps.awx.projects[$name].last_sync_job_id = $job_id
+        ')
+
+        # Write back to BWS
+        bws secret edit "{{ inventory_secret_name }}" --value "$UPDATED"
+      environment:
+        BWS_ACCESS_TOKEN: "{{ lookup('env', 'BWS_ACCESS_TOKEN') }}"
+      register: bws_update_result
+      changed_when: true
+      no_log: true
+
+    # ===== STEP 8: Output Result =====
+    - name: Display sync result
+      ansible.builtin.debug:
+        msg:
+          project_name: "{{ resolved_project_name }}"
+          project_id: "{{ resolved_project_id }}"
+          sync_job_id: "{{ sync_job_id }}"
+          sync_status: "{{ final_sync_status }}"
+          message: >-
+            Project '{{ resolved_project_name }}' sync {{ 'completed successfully' if final_sync_status == 'successful' else 'initiated (status: ' + final_sync_status + ')' }}

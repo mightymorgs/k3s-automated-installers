@@ -1,0 +1,11 @@
+schema_version: '1.0'
+repo_id: vm-builder-templates
+files:
+  00-render-manifests.yml:
+    summary: Render Longhorn storage system manifests from J2 templates using BWS
+      inventory variables
+    source: inferred
+    confidence: medium
+    uses_files:
+    - '{{ playbook_dir }}/../../../../../templates/k8s/platform/longhorn/deployment.yaml.j2'
+    - '{{ playbook_dir }}/../../../../../templates/k8s/platform/longhorn/storageclass.yaml.j2'

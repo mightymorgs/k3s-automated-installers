@@ -1,0 +1,100 @@
+---
+# playbook_metadata:
+#   id: "atomic/apps/grafana/12-dashboard-longhorn"
+#   type: "atomic"
+#
+#   # ========== FILE LOCATION ==========
+#   path_info:
+#     file_path: "atomic/apps/grafana/config/12-dashboard-longhorn.yml"
+#     category: "apps"
+#     subsystem: "grafana"
+#
+#   # ========== TRADITIONAL METADATA ==========
+#   dependencies: ["grafana_deployed", "prometheus_deployed", "grafana_prometheus_wired"]
+#   provides: ["grafana_dashboard_longhorn"]
+#   tags: ["grafana", "longhorn", "dashboard", "monitoring", "phase4"]
+#   estimated_duration: 30
+#   parallel_safe: true
+#   idempotent: true
+#   description: >-
+#     Import Longhorn v1 dashboard (Grafana.com #16888) into Grafana
+#     via the HTTP API. Uses basic auth and the /api/dashboards/import endpoint.
+#     Idempotent: uses overwrite=true so re-runs update the existing dashboard.
+#   requires_apps: ["grafana", "longhorn", "prometheus"]
+#
+#   # ========== BWS STATE INTERACTION ==========
+#   bws_state:
+#     reads:
+#       - path: "_state.apps.grafana.admin_password"
+
+- name: Import Longhorn Dashboard into Grafana
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  become: false
+
+  vars:
+    grafana_namespace: "grafana"
+    app_namespace: "{{ grafana_namespace }}"
+    # grafana_url: from BWS _state via Phase 4 extra-vars
+    grafana_user: "admin"
+    dashboard_id: 16888
+    dashboard_name: "Longhorn v1"
+
+  tasks:
+    # ========== VALIDATE REQUIRED VARS ==========
+    - name: Fail if Grafana admin password not provided
+      ansible.builtin.fail:
+        msg: >-
+          grafana_admin_password must be provided via extra-vars or
+          GRAFANA_ADMIN_PASSWORD environment variable
+      when: grafana_admin_password is not defined or grafana_admin_password | length == 0
+    # ========== VERIFY GRAFANA API ==========
+    - name: Verify Grafana API is accessible
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/health"
+        method: GET
+        return_content: false
+      register: grafana_health
+      retries: 5
+      delay: 10
+      until: grafana_health.status is defined and grafana_health.status == 200
+      failed_when: false
+
+    - name: End play if Grafana API not accessible
+      ansible.builtin.meta: end_play
+      when: grafana_health.status is not defined or grafana_health.status != 200
+
+    # ========== IMPORT DASHBOARD ==========
+    - name: "Import {{ dashboard_name }} dashboard from Grafana.com"
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/dashboards/import"
+        method: POST
+        user: "{{ grafana_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          dashboard:
+            id: null
+          folderId: 0
+          overwrite: true
+          inputs:
+            - name: "DS_PROMETHEUS"
+              type: "datasource"
+              pluginId: "prometheus"
+              value: "Prometheus"
+          gnetId: "{{ dashboard_id }}"
+        status_code: [200]
+      register: import_result
+
+    # ========== DISPLAY RESULT ==========
+    - name: Display import result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Grafana Dashboard Import Complete"
+          - "=========================================="
+          - "Dashboard: {{ dashboard_name }}"
+          - "Grafana.com ID: {{ dashboard_id }}"
+          - "Status: {{ import_result.status }}"
+          - "=========================================="

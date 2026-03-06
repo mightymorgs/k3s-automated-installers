@@ -1,0 +1,1100 @@
+---
+name: Phase 3 - Dynamic App Installation
+# Purpose: Install K3s, Longhorn, Vault/ESO, and user-selected apps dynamically
+# Runs on: Self-hosted runner on the target VM (after Phase 2.5 bootstrap)
+#
+# This workflow reads app selections from JSON input and dynamically
+# installs only the selected apps. Apps are discovered from the
+# app registry (tools/app-registry/registry.json) which is generated
+# from atomic playbook metadata.
+#
+# Job Ordering:
+#   prepare → install-k3s → install-longhorn
+#     ├→ install-vault → init-vault → install-eso  (security infrastructure first)
+#     └→ install-media-storage                      (parallel with vault chain)
+#   install-all-apps (single job, parallel background processes)
+#     → write-phase3-state
+#
+# Key Features:
+# - Vault + ESO installed FIRST (before apps) so security infrastructure is ready
+# - API keys extracted from running pods and written to BWS for DR
+# - Vault KV populated with all secrets for ESO consumption
+# - Phase 4 just wires BWS/Vault vars to config playbooks
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_hostname:
+        description: VM hostname (must match runner label)
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key (e.g., inventory/homelab-k3s-master-test-gcp-latest)
+        required: true
+        type: string
+      selected_apps:
+        description: 'JSON array of apps (optional - reads from BWS inventory if empty)'
+        required: false
+        type: string
+        default: ''
+      install_vault:
+        description: Install Vault secrets manager
+        required: false
+        type: boolean
+        default: true
+      mode:
+        description: 'Install mode: "full" reinstalls everything, "rebuild" skips already-installed apps'
+        required: false
+        type: string
+        default: 'rebuild'
+
+  workflow_call:
+    inputs:
+      vm_hostname:
+        description: VM hostname
+        required: true
+        type: string
+      inventory_key:
+        description: BWS inventory key
+        required: true
+        type: string
+      selected_apps:
+        description: JSON array of apps (optional - reads from BWS if empty)
+        required: false
+        type: string
+      install_vault:
+        description: Install Vault
+        required: false
+        type: boolean
+        default: true
+      mode:
+        description: 'Install mode: full or rebuild (default)'
+        required: false
+        type: string
+        default: 'rebuild'
+
+jobs:
+  # Parse the selected apps and resolve dependencies
+  prepare:
+    runs-on: ubuntu-latest
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    outputs:
+      dynamic_apps: ${{ steps.parse.outputs.dynamic_apps }}
+      needs_shared_storage: ${{ steps.parse.outputs.needs_shared_storage }}
+      app_list: ${{ steps.parse.outputs.app_list }}
+      install_order: ${{ steps.parse.outputs.install_order }}
+      storage_mounts: ${{ steps.get_apps.outputs.storage_mounts }}
+      storage_location: ${{ steps.get_apps.outputs.storage_location }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Get apps from BWS or input
+        id: get_apps
+        run: |
+          INPUT_APPS='${{ inputs.selected_apps }}'
+          INVENTORY_KEY='${{ inputs.inventory_key }}'
+
+          # Always read inventory from BWS for storage config extraction
+          echo "Reading inventory from BWS: $INVENTORY_KEY"
+          SECRET_ID=$(jq -r --arg key "$INVENTORY_KEY" '.[] | select(.key==$key) | .id' /tmp/bws_secrets.json)
+          if [ -z "$SECRET_ID" ] || [ "$SECRET_ID" = "null" ]; then
+            echo "ERROR: Could not find secret with key: $INVENTORY_KEY"
+            exit 1
+          fi
+          echo "Found secret ID: $SECRET_ID"
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # If selected_apps input is provided and not empty, use it
+          if [ -n "$INPUT_APPS" ] && [ "$INPUT_APPS" != "[]" ] && [ "$INPUT_APPS" != "" ]; then
+            echo "Using apps from workflow input"
+            echo "selected_apps=$INPUT_APPS" >> "$GITHUB_OUTPUT"
+          else
+            # Extract apps.selected_apps from inventory
+            BWS_APPS=$(echo "$INVENTORY" | jq -c '.apps.selected_apps // []')
+            echo "Apps from BWS: $BWS_APPS"
+            echo "selected_apps=$BWS_APPS" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Extract storage config from inventory
+          STORAGE_MOUNTS=$(echo "$INVENTORY" | jq -c '.storage.mounts // []')
+          STORAGE_LOCATION=$(echo "$INVENTORY" | jq -r '.storage.location // ""')
+          echo "storage_mounts=$STORAGE_MOUNTS" >> "$GITHUB_OUTPUT"
+          echo "storage_location=$STORAGE_LOCATION" >> "$GITHUB_OUTPUT"
+          echo "Storage mounts: $STORAGE_MOUNTS"
+          echo "Storage location: $STORAGE_LOCATION"
+
+      - name: Parse selected apps and resolve dependencies
+        id: parse
+        run: |
+          SELECTED='${{ steps.get_apps.outputs.selected_apps }}'
+          echo "Selected apps JSON: $SELECTED"
+
+          # Load registry
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          # Get the full install order from registry
+          FULL_ORDER=$(echo "$REGISTRY" | jq -c '.install_order')
+          echo "Full install order: $FULL_ORDER"
+
+          # Build list of valid selected apps
+          VALID_APPS=$(echo "$SELECTED" | jq -c '[.[] | select(. != null and . != "")]')
+
+          # Resolve dependencies - add any missing required apps
+          RESOLVED_APPS="$VALID_APPS"
+          for app in $(echo "$VALID_APPS" | jq -r '.[]'); do
+            DEPS=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].depends_on // [] | .[]')
+            for dep in $DEPS; do
+              if ! echo "$RESOLVED_APPS" | jq -e --arg dep "$dep" 'index($dep)' > /dev/null 2>&1; then
+                echo "Adding dependency: $dep (required by $app)"
+                RESOLVED_APPS=$(echo "$RESOLVED_APPS" | jq -c --arg dep "$dep" '. + [$dep]')
+              fi
+            done
+          done
+
+          # Sort resolved apps by install_order
+          SORTED_APPS=$(echo "$REGISTRY" | jq -c --argjson apps "$RESOLVED_APPS" '
+            .install_order | map(select(. as $app | $apps | index($app)))
+          ')
+          echo "Sorted apps: $SORTED_APPS"
+
+          # Check if any app needs shared storage
+          NEEDS_STORAGE="false"
+          for app in $(echo "$SORTED_APPS" | jq -r '.[]'); do
+            REQ_STORAGE=$(echo "$REGISTRY" | jq -r --arg a "$app" '.apps[$a].requires_shared_storage')
+            if [ "$REQ_STORAGE" = "true" ]; then
+              NEEDS_STORAGE="true"
+              break
+            fi
+          done
+
+          # Exclude apps with dedicated baked-in jobs from dynamic install:
+          # - vault, external-secrets: ordered security chain (vault → init → ESO)
+          # - media-shared: handled by install-media-storage with storage-specific extra-vars
+          BAKED_IN='["vault", "external-secrets", "media-shared"]'
+          DYNAMIC_APPS=$(echo "$SORTED_APPS" | jq -c --argjson skip "$BAKED_IN" '[.[] | select(. as $a | $skip | index($a) | not)]')
+
+          {
+            echo "dynamic_apps=$DYNAMIC_APPS"
+            echo "needs_shared_storage=$NEEDS_STORAGE"
+            echo "app_list=$SORTED_APPS"
+            echo "install_order=$SORTED_APPS"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Dynamic apps: $DYNAMIC_APPS"
+          echo "Needs shared storage: $NEEDS_STORAGE"
+          echo "Final app list: $SORTED_APPS"
+
+  install-k3s:
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify running on correct VM
+        run: |
+          CURRENT_HOSTNAME=$(hostname)
+          EXPECTED_HOSTNAME="${{ inputs.vm_hostname }}"
+          echo "Current hostname: $CURRENT_HOSTNAME"
+          echo "Expected hostname: $EXPECTED_HOSTNAME"
+          if [ "$CURRENT_HOSTNAME" != "$EXPECTED_HOSTNAME" ]; then
+            echo "ERROR: Running on wrong host!"
+            exit 1
+          fi
+
+      - name: Install K3s Server
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/platform/k3s/1.33/server/01-install.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Install Python kubernetes library for ansible
+        run: |
+          pip3 install kubernetes --break-system-packages || pip3 install kubernetes
+
+      - name: Verify K3s cluster (kubectl)
+        run: |
+          echo "Waiting for K3s to be ready..."
+          sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=120s
+          echo ""
+          echo "Cluster nodes:"
+          sudo k3s kubectl get nodes -o wide
+          echo ""
+          echo "System pods:"
+          sudo k3s kubectl get pods -n kube-system
+
+      - name: Configure kubectl for runner user
+        run: |
+          mkdir -p ~/.kube
+          sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+          sudo chown "$(id -u):$(id -g)" ~/.kube/config
+          kubectl get nodes
+
+  install-longhorn:
+    needs: install-k3s
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Longhorn Storage
+        run: |
+          ansible-playbook vm-builder/vm-builder-templates/ansible/playbooks/atomic/platform/k3s/1.33/storage/01-install-longhorn.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Wait for Longhorn to be ready
+        run: |
+          echo "Waiting for Longhorn pods..."
+          kubectl -n longhorn-system wait --for=condition=ready pod \
+            -l app=longhorn-manager --timeout=300s
+          kubectl -n longhorn-system get pods
+
+      - name: Create Longhorn storage classes
+        run: |
+          kubectl apply -f vm-builder/vm-builder-templates/apps/longhorn/k8s-base/storage-classes.yaml
+          kubectl get storageclass
+
+  # ============================================================
+  # SECURITY INFRASTRUCTURE (Vault + ESO) - runs BEFORE apps
+  # ============================================================
+
+  # Install Vault server (needs Longhorn for PVC)
+  install-vault:
+    needs: install-longhorn
+    if: inputs.install_vault == true
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get Vault install playbooks
+        id: vault_playbooks
+        run: |
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          PLAYBOOKS=$(echo "$REGISTRY" | jq -c '.apps["vault"].install_playbooks // []')
+          echo "playbooks=$PLAYBOOKS" >> "$GITHUB_OUTPUT"
+
+      - name: Install Vault (install playbooks only)
+        run: |
+          PLAYBOOKS='${{ steps.vault_playbooks.outputs.playbooks }}'
+
+          echo "=========================================="
+          echo "Installing Vault"
+          echo "=========================================="
+
+          for playbook in $(echo "$PLAYBOOKS" | jq -r '.[]'); do
+            echo ""
+            echo ">>> Running: $playbook"
+            echo "----------------------------------------"
+
+            ansible-playbook "$playbook" \
+              -i "localhost," \
+              -e ansible_connection=local \
+              -e target_hosts=localhost \
+              -e inventory_secret_name="${{ inputs.inventory_key }}" \
+              -e install_mode="${{ inputs.mode }}"
+
+            echo "<<< Completed: $playbook"
+          done
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Write Vault install state to BWS
+        run: |
+          APP="vault"
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          SECRET_ID=$(bws secret list --output json | jq -r --arg k "$INVENTORY_KEY" \
+            '.[] | select(.key==$k) | .id')
+          CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          VAULT_NODEPORT=$(echo "$REGISTRY" | jq -r '.apps.vault.nodeport // 30820')
+
+          VAULT_NAMESPACE=$(echo "$REGISTRY" | jq -r '.apps.vault.namespace // "vault"')
+
+          APP_STATE=$(jq -n \
+            --arg status "installed" \
+            --arg url "http://127.0.0.1:${VAULT_NODEPORT}" \
+            --argjson nodeport "$VAULT_NODEPORT" \
+            --arg ns "$VAULT_NAMESPACE" \
+            --arg svc_name "vault" \
+            --argjson svc_port 8200 \
+            '{
+              status: $status,
+              url: $url,
+              nodeport: $nodeport,
+              namespace: $ns,
+              service_name: $svc_name,
+              service_port: $svc_port,
+              installed_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+            }')
+
+          UPDATED=$(echo "$CURRENT" | jq -c \
+            --arg app "$APP" \
+            --argjson state "$APP_STATE" '
+            ._state.apps[$app] = (._state.apps[$app] // {} | . * $state) |
+            if ._state.apps.installed then
+              ._state.apps.installed |= if index($app) then . else . + [$app] end
+            else
+              ._state.apps.installed = [$app]
+            end
+          ')
+
+          # Write resolved config to _config.vault (registry defaults + any user overrides)
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          APP_CONFIG_DEFAULTS=$(echo "$REGISTRY" | jq -c --arg app "$APP" '
+            .apps[$app].variables // {} |
+            to_entries | map({key: .key, value: .value.default}) | from_entries')
+          EXISTING_OVERRIDES=$(echo "$CURRENT" | jq -c --arg app "$APP" '._config[$app] // .apps.config[$app] // {}')
+          # Sanitize: remove any values containing Jinja2 expressions
+          EXISTING_OVERRIDES=$(echo "$EXISTING_OVERRIDES" | jq -c 'with_entries(select(.value | tostring | test("\\{\\{") | not))')
+          RESOLVED_CONFIG=$(echo "$APP_CONFIG_DEFAULTS" | jq -c --argjson overrides "$EXISTING_OVERRIDES" '. * $overrides')
+          UPDATED=$(echo "$UPDATED" | jq -c \
+            --arg app "$APP" \
+            --argjson cfg "$RESOLVED_CONFIG" \
+            '._config[$app] = $cfg')
+          echo "  Config: $(echo "$RESOLVED_CONFIG" | jq 'length') resolved variables -> _config.$APP"
+
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "Vault install state + config written to BWS"
+
+  # Initialize and unseal Vault + write root token to BWS
+  init-vault:
+    needs: install-vault
+    if: |
+      always() &&
+      inputs.install_vault == true &&
+      needs.install-vault.result == 'success'
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize and unseal Vault
+        run: |
+          echo "=========================================="
+          echo "Initializing and Unsealing Vault"
+          echo "=========================================="
+
+          ansible-playbook vm-builder/vm-builder-templates/apps/vault/config/00-init-unseal.yml \
+            -i "localhost," \
+            -e ansible_connection=local \
+            -e target_hosts=localhost \
+            -e inventory_secret_name="${{ inputs.inventory_key }}"
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Consolidate vault root_token into _state.apps.vault
+        run: |
+          set -euo pipefail
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+          SECRET_ID=$(bws secret list --output json | jq -r --arg k "$INVENTORY_KEY" \
+            '.[] | select(.key==$k) | .id')
+          CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+          UPDATED=$(echo "$CURRENT" | jq -c '
+            ._state.apps.vault.root_token = ._state.vault.root_token
+          ')
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "Vault root_token copied to _state.apps.vault.root_token"
+
+  # Install External Secrets Operator (needs Vault initialized for future ClusterSecretStore)
+  install-eso:
+    needs: init-vault
+    if: |
+      always() &&
+      inputs.install_vault == true &&
+      (needs.init-vault.result == 'success' || needs.init-vault.result == 'skipped')
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get ESO install playbooks
+        id: eso_playbooks
+        run: |
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          PLAYBOOKS=$(echo "$REGISTRY" | jq -c '.apps["external-secrets"].install_playbooks // []')
+          echo "playbooks=$PLAYBOOKS" >> "$GITHUB_OUTPUT"
+
+      - name: Install External Secrets Operator (install playbooks only)
+        run: |
+          PLAYBOOKS='${{ steps.eso_playbooks.outputs.playbooks }}'
+
+          echo "=========================================="
+          echo "Installing External Secrets Operator"
+          echo "=========================================="
+
+          for playbook in $(echo "$PLAYBOOKS" | jq -r '.[]'); do
+            echo ""
+            echo ">>> Running: $playbook"
+            echo "----------------------------------------"
+
+            ansible-playbook "$playbook" \
+              -i "localhost," \
+              -e ansible_connection=local \
+              -e target_hosts=localhost \
+              -e inventory_secret_name="${{ inputs.inventory_key }}" \
+              -e install_mode="${{ inputs.mode }}"
+
+            echo "<<< Completed: $playbook"
+          done
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Write External Secrets state to BWS
+        run: |
+          APP="external-secrets"
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          SECRET_ID=$(bws secret list --output json | jq -r --arg k "$INVENTORY_KEY" \
+            '.[] | select(.key==$k) | .id')
+          CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          ESO_NAMESPACE=$(echo "$REGISTRY" | jq -r '.apps["external-secrets"].namespace // "external-secrets"')
+
+          APP_STATE=$(jq -n \
+            --arg status "installed" \
+            --arg ns "$ESO_NAMESPACE" \
+            --arg svc_name "external-secrets-webhook" \
+            --argjson svc_port 443 \
+            '{
+              status: $status,
+              url: ("http://external-secrets-webhook." + $ns + ".svc:443"),
+              namespace: $ns,
+              service_name: $svc_name,
+              service_port: $svc_port,
+              installed_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+            }')
+
+          UPDATED=$(echo "$CURRENT" | jq -c \
+            --arg app "$APP" \
+            --argjson state "$APP_STATE" '
+            ._state.apps[$app] = (._state.apps[$app] // {} | . * $state) |
+            if ._state.apps.installed then
+              ._state.apps.installed |= if index($app) then . else . + [$app] end
+            else
+              ._state.apps.installed = [$app]
+            end
+          ')
+
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "External Secrets state written to BWS"
+
+  # ============================================================
+  # SHARED STORAGE (runs parallel with vault chain)
+  # ============================================================
+
+  install-media-storage:
+    needs: [prepare, install-longhorn]
+    if: needs.prepare.outputs.needs_shared_storage == 'true'
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      - name: Deploy storage mounts from inventory
+        id: deploy_storage
+        run: |
+          MOUNTS='${{ needs.prepare.outputs.storage_mounts }}'
+          LOCATION='${{ needs.prepare.outputs.storage_location }}'
+          MOUNT_COUNT=$(echo "$MOUNTS" | jq 'length')
+          ACTIVE_MOUNTS="[]"
+
+          echo "=========================================="
+          echo "Deploying $MOUNT_COUNT storage mount(s)"
+          echo "Location: $LOCATION"
+          echo "=========================================="
+
+          # Read network-shares secret for credential resolution
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SHARES_DATA=""
+          if [ -n "$LOCATION" ]; then
+            SHARES_SECRET_ID=$(id_for "network-shares/$LOCATION")
+            if [ -n "$SHARES_SECRET_ID" ]; then
+              SHARES_DATA=$(get_val "$SHARES_SECRET_ID")
+            else
+              echo "WARNING: No BWS secret found for network-shares/$LOCATION"
+            fi
+          else
+            echo "WARNING: storage.location is empty in inventory -- will try inline credentials"
+          fi
+
+          for i in $(seq 0 $((MOUNT_COUNT - 1))); do
+            MOUNT=$(echo "$MOUNTS" | jq -c ".[$i]")
+            SHARE_ID=$(echo "$MOUNT" | jq -r '.share_id')
+            MOUNT_TYPE=$(echo "$MOUNT" | jq -r '.mount_type')
+            SOURCE=$(echo "$MOUNT" | jq -r '.source')
+            MOUNT_POINT=$(echo "$MOUNT" | jq -r '.mount_point')
+
+            echo ""
+            echo ">>> Mount $((i+1))/$MOUNT_COUNT: $SHARE_ID ($MOUNT_TYPE)"
+            echo "    Source: $SOURCE -> $MOUNT_POINT"
+
+            EXTRA_VARS="-e media_storage_backend=$MOUNT_TYPE"
+
+            if [ "$MOUNT_TYPE" = "nfs" ]; then
+              NFS_SERVER=$(echo "$SOURCE" | cut -d: -f1)
+              NFS_PATH=$(echo "$SOURCE" | cut -d: -f2-)
+              EXTRA_VARS="$EXTRA_VARS -e nfs_server=$NFS_SERVER -e nfs_path=$NFS_PATH"
+
+            elif [ "$MOUNT_TYPE" = "smb" ]; then
+              SMB_SERVER=$(echo "$SOURCE" | sed 's|^//||' | cut -d/ -f1)
+              SMB_SHARE="${SOURCE#//*/}"
+
+              # Try 1: Resolve credentials from network-shares/{location}
+              SMB_USERNAME=""
+              SMB_PASSWORD=""
+              if [ -n "$SHARES_DATA" ]; then
+                CREDS=$(echo "$SHARES_DATA" | jq -r --arg id "$SHARE_ID" \
+                  '.shares[] | select(.id==$id) | .credentials // empty')
+                SMB_USERNAME=$(echo "$CREDS" | jq -r '.username // empty' 2>/dev/null)
+                SMB_PASSWORD=$(echo "$CREDS" | jq -r '.password // empty' 2>/dev/null)
+              fi
+
+              # Try 2: Inline credentials from storage.mounts[].credentials in inventory
+              if [ -z "$SMB_USERNAME" ] || [ -z "$SMB_PASSWORD" ]; then
+                SMB_USERNAME=$(echo "$MOUNT" | jq -r '.credentials.username // empty' 2>/dev/null)
+                SMB_PASSWORD=$(echo "$MOUNT" | jq -r '.credentials.password // empty' 2>/dev/null)
+              fi
+
+              if [ -z "$SMB_USERNAME" ] || [ -z "$SMB_PASSWORD" ]; then
+                echo "ERROR: No credentials for SMB share $SHARE_ID"
+                echo "  Checked: network-shares/$LOCATION (BWS) and inline mount credentials"
+                echo "  Fix: Add credentials via VM Builder GUI Storage page or BWS"
+                continue
+              fi
+
+              echo "::add-mask::$SMB_USERNAME"
+              echo "::add-mask::$SMB_PASSWORD"
+              EXTRA_VARS="$EXTRA_VARS -e smb_server=$SMB_SERVER -e smb_share=$SMB_SHARE"
+              EXTRA_VARS="$EXTRA_VARS -e smb_username=$SMB_USERNAME -e smb_password=$SMB_PASSWORD"
+            fi
+
+            # shellcheck disable=SC2086
+            ansible-playbook vm-builder/vm-builder-templates/apps/media-shared/install/01-deploy.yml \
+              -i "localhost," \
+              -e ansible_connection=local \
+              -e target_hosts=localhost \
+              -e mount_point="$MOUNT_POINT" \
+              -e install_mode="${{ inputs.mode }}" \
+              $EXTRA_VARS || {
+                echo "WARNING: Mount $SHARE_ID failed, continuing..."
+                continue
+              }
+
+            # Build active mount entry for DR writeback
+            ACTIVE_MOUNT=$(jq -n \
+              --arg sid "$SHARE_ID" \
+              --arg mt "$MOUNT_TYPE" \
+              --arg src "$SOURCE" \
+              --arg mp "$MOUNT_POINT" \
+              --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{share_id: $sid, mount_type: $mt, source: $src, mount_point: $mp, deployed_at: $ts, status: "mounted"}')
+            ACTIVE_MOUNTS=$(echo "$ACTIVE_MOUNTS" | jq --argjson m "$ACTIVE_MOUNT" '. + [$m]')
+
+            echo "<<< Mount $SHARE_ID deployed successfully"
+          done
+
+          echo "active_mounts=$(echo "$ACTIVE_MOUNTS" | jq -c '.')" >> "$GITHUB_OUTPUT"
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+
+      - name: Write active mounts to VM inventory (DR writeback)
+        run: |
+          ACTIVE_MOUNTS='${{ steps.deploy_storage.outputs.active_mounts }}'
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+          CURRENT=$(get_val "$SECRET_ID")
+
+          UPDATED=$(echo "$CURRENT" | jq -c --argjson mounts "$ACTIVE_MOUNTS" \
+            '._state.storage.active_mounts = $mounts')
+
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "DR writeback: _state.storage.active_mounts updated with $(echo "$ACTIVE_MOUNTS" | jq 'length') mount(s)"
+
+  # ============================================================
+  # APP INSTALLATION — single job, parallel background processes
+  # All dynamic apps launch in parallel as background subshells.
+  # Media-shared PVC is already Bound (install-media-storage job
+  # completes before this job starts via the needs chain).
+  # One checkout, one BWS read, parallel ansible-playbook runs,
+  # sequential state collection, single batch BWS write.
+  # ============================================================
+
+  install-all-apps:
+    needs: [prepare, install-longhorn, install-media-storage, install-eso]
+    if: |
+      always() &&
+      needs.prepare.outputs.dynamic_apps != '[]' &&
+      needs.install-longhorn.result == 'success' &&
+      (needs.install-media-storage.result == 'success' || needs.install-media-storage.result == 'skipped') &&
+      (needs.install-eso.result == 'success' || needs.install-eso.result == 'skipped')
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      # ── Step 1: Checkout + Setup (ONCE) ─────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bws
+        with:
+          bws_access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+
+      # ── Step 2: Pre-cache BWS inventory (1 API call) ───────────
+      - name: Pre-cache BWS inventory
+        id: cache_inventory
+        run: |
+          set -euo pipefail
+          INVENTORY_KEY="${{ inputs.inventory_key }}"
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+          SECRET_ID=$(id_for "$INVENTORY_KEY")
+          echo "secret_id=$SECRET_ID" >> "$GITHUB_OUTPUT"
+
+          INVENTORY=$(get_val "$SECRET_ID")
+          echo "$INVENTORY" > /tmp/bws-inventory.json
+          echo "BWS inventory cached to /tmp/bws-inventory.json ($(echo "$INVENTORY" | jq 'length') top-level keys)"
+
+      # ── Step 3: Pre-extract per-app configs (local jq, 0 BWS calls)
+      - name: Pre-extract per-app configs from cached inventory
+        run: |
+          set -euo pipefail
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          DYNAMIC_APPS='${{ needs.prepare.outputs.dynamic_apps }}'
+          INVENTORY=$(cat /tmp/bws-inventory.json)
+          INGRESS_DOMAIN=$(echo "$INVENTORY" | jq -r '.ingress.domain // empty')
+
+          for APP in $(echo "$DYNAMIC_APPS" | jq -r '.[]'); do
+            # Start from registry defaults — always the full var set
+            REGISTRY_DEFAULTS=$(echo "$REGISTRY" | jq -c --arg app "$APP" '
+              .apps[$app].variables // {} |
+              to_entries | map({key: .key, value: .value.default}) | from_entries')
+
+            # User config from BWS inventory (may be empty on first deploy)
+            BWS_CONFIG=$(echo "$INVENTORY" | jq -c --arg app "$APP" '._config[$app] // {}')
+
+            if [ "$BWS_CONFIG" = "{}" ] || [ "$BWS_CONFIG" = "null" ]; then
+              echo "  $APP: first deploy — seeded from registry defaults ($(echo "$REGISTRY_DEFAULTS" | jq 'length') vars)"
+            else
+              # Sanitize: remove stale Jinja2 expressions from BWS values
+              BWS_CONFIG=$(echo "$BWS_CONFIG" | jq -c 'with_entries(select(.value | tostring | test("\\{\\{") | not))')
+              echo "  $APP: merged BWS overrides ($(echo "$BWS_CONFIG" | jq 'length') keys) onto registry defaults"
+            fi
+
+            # Merge: registry defaults as base, BWS config wins on conflicts
+            APP_CONFIG=$(echo "$REGISTRY_DEFAULTS" | jq -c --argjson bws "$BWS_CONFIG" '. * $bws')
+
+            # Inject ingress.domain for J2 templates that reference {{ domain }}
+            if [ -n "$INGRESS_DOMAIN" ]; then
+              APP_CONFIG=$(echo "$APP_CONFIG" | jq -c --arg d "$INGRESS_DOMAIN" '.domain = $d')
+            fi
+
+            # Strip null values AND placeholder credential strings.
+            # Null extra-vars override set_fact (priority 22 > 19) and prevent
+            # credential generation logic from working. Placeholder strings like
+            # "auto-generated" have the same effect — they override the lookup('password')
+            # call in vars blocks, producing literal "auto-generated" as the password.
+            APP_CONFIG=$(echo "$APP_CONFIG" | jq -c 'with_entries(select(.value != null and .value != "auto-generated"))')
+
+            echo "$APP_CONFIG" > "/tmp/app-config-${APP}.json"
+          done
+          echo "Pre-extracted configs for $(echo "$DYNAMIC_APPS" | jq 'length') apps"
+
+      # ── Step 4: Determine skip list (local jq, 0 BWS calls) ────
+      - name: Determine skip list from cached inventory
+        id: skip_list
+        run: |
+          set -euo pipefail
+          MODE="${{ inputs.mode }}"
+          DYNAMIC_APPS='${{ needs.prepare.outputs.dynamic_apps }}'
+          INVENTORY=$(cat /tmp/bws-inventory.json)
+          SKIP_LIST="[]"
+
+          if [ "$MODE" != "full" ]; then
+            for APP in $(echo "$DYNAMIC_APPS" | jq -r '.[]'); do
+              APP_STATUS=$(echo "$INVENTORY" | jq -r --arg app "$APP" '._state.apps[$app].status // ""')
+              if [ "$APP_STATUS" = "installed" ] || [ "$APP_STATUS" = "ready" ]; then
+                SKIP_LIST=$(echo "$SKIP_LIST" | jq -c --arg app "$APP" '. + [$app]')
+                echo "SKIP: $APP (status=$APP_STATUS, mode=rebuild)"
+              fi
+            done
+          fi
+
+          echo "skip_list=$SKIP_LIST" >> "$GITHUB_OUTPUT"
+          SKIP_COUNT=$(echo "$SKIP_LIST" | jq 'length')
+          echo "Skip list: $SKIP_COUNT apps"
+
+      # ── Step 5: Pre-create namespaces (eliminates race conditions)
+      - name: Pre-create namespaces for all dynamic apps
+        run: |
+          set -euo pipefail
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          DYNAMIC_APPS='${{ needs.prepare.outputs.dynamic_apps }}'
+
+          # Get unique namespaces for all dynamic apps
+          NAMESPACES=$(echo "$REGISTRY" | jq -r --argjson apps "$DYNAMIC_APPS" '
+            [.apps | to_entries[] |
+              select(.key as $k | $apps | index($k)) |
+              .value.namespace // "default"] | unique | .[]')
+
+          for NS in $NAMESPACES; do
+            if [ "$NS" != "default" ]; then
+              kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+              echo "  Ensured namespace: $NS"
+            fi
+          done
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+      # ── Step 6: Parallel install — all dynamic apps ────────────
+      - name: Install all dynamic apps in parallel
+        run: |
+          set -euo pipefail
+          DYNAMIC_APPS='${{ needs.prepare.outputs.dynamic_apps }}'
+          SKIP_LIST='${{ steps.skip_list.outputs.skip_list }}'
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          # All dynamic apps minus skip list
+          INSTALL_APPS=$(echo "$DYNAMIC_APPS" | jq -c --argjson skip "$SKIP_LIST" '
+            [.[] | select(. as $a | $skip | index($a) | not)]')
+
+          INSTALL_COUNT=$(echo "$INSTALL_APPS" | jq 'length')
+          echo "=========================================="
+          echo "Installing $INSTALL_COUNT apps in parallel"
+          echo "Apps: $(echo "$INSTALL_APPS" | jq -r 'join(", ")')"
+          echo "=========================================="
+
+          SECRET_ID='${{ steps.cache_inventory.outputs.secret_id }}'
+          REGISTRY_JSON="vm-builder/vm-builder-templates/registry.json"
+          source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
+
+          for APP in $(echo "$INSTALL_APPS" | jq -r '.[]'); do
+            (
+              PLAYBOOKS=$(echo "$REGISTRY" | jq -r --arg app "$APP" '.apps[$app].install_playbooks // [] | .[]')
+              PLAYBOOK_COUNT=$(echo "$REGISTRY" | jq -r --arg app "$APP" '.apps[$app].install_count // 0')
+              echo "[$APP] Starting install ($PLAYBOOK_COUNT playbooks)"
+
+              EXIT_CODE=0
+              for playbook in $PLAYBOOKS; do
+                echo "[$APP] >>> $playbook"
+                ansible-playbook "$playbook" \
+                  -i "localhost," \
+                  -e ansible_connection=local \
+                  -e target_hosts=localhost \
+                  -e inventory_secret_name="${{ inputs.inventory_key }}" \
+                  -e install_mode="${{ inputs.mode }}" \
+                  -e "@/tmp/app-config-${APP}.json" || { EXIT_CODE=$?; break; }
+                echo "[$APP] <<< $playbook"
+              done
+
+              echo $EXIT_CODE > "/tmp/install-exit-${APP}"
+              if [ $EXIT_CODE -eq 0 ]; then
+                echo "[$APP] Install SUCCESS"
+
+                # Collect cluster state + credentials, then write to BWS immediately.
+                # This makes the app visible in the GUI as soon as it's installed.
+                echo "[$APP] Collecting cluster state..."
+                "$GITHUB_WORKSPACE/.github/scripts/sync-app-state.sh" "$APP" "$REGISTRY_JSON" || true
+
+                echo "[$APP] Writing state + config to BWS..."
+                write_app_to_inventory "$APP" "$SECRET_ID" || true
+              else
+                echo "[$APP] Install FAILED (exit=$EXIT_CODE)"
+              fi
+            ) > "/tmp/install-log-${APP}.txt" 2>&1 &
+          done
+
+          echo "Waiting for all installs to complete..."
+          wait
+          echo "All installs complete."
+        env:
+          ANSIBLE_STDOUT_CALLBACK: unixy
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+      # ── Step 7: Display install logs ────────────────────────────
+      - name: Display per-app install logs
+        if: always()
+        run: |
+          set -euo pipefail
+          DYNAMIC_APPS='${{ needs.prepare.outputs.dynamic_apps }}'
+          SKIP_LIST='${{ steps.skip_list.outputs.skip_list }}'
+          FAILED_APPS="[]"
+          INSTALLED_APPS="[]"
+
+          for APP in $(echo "$DYNAMIC_APPS" | jq -r '.[]'); do
+            # Check if skipped
+            IS_SKIPPED=$(echo "$SKIP_LIST" | jq -r --arg app "$APP" 'if index($app) then "true" else "false" end')
+            if [ "$IS_SKIPPED" = "true" ]; then
+              echo "::group::${APP} (SKIPPED — already installed)"
+              echo "App was already installed, skipping."
+              echo "::endgroup::"
+              continue
+            fi
+
+            EXIT_CODE=$(cat "/tmp/install-exit-${APP}" 2>/dev/null || echo "unknown")
+
+            if [ "$EXIT_CODE" = "0" ]; then
+              STATUS="SUCCESS"
+              INSTALLED_APPS=$(echo "$INSTALLED_APPS" | jq -c --arg app "$APP" '. + [$app]')
+            else
+              STATUS="FAILED"
+              FAILED_APPS=$(echo "$FAILED_APPS" | jq -c --arg app "$APP" '. + [$app]')
+            fi
+
+            echo "::group::${APP} (exit: ${EXIT_CODE}, ${STATUS})"
+            if [ -f "/tmp/install-log-${APP}.txt" ]; then
+              cat "/tmp/install-log-${APP}.txt"
+            else
+              echo "(no log file found)"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "installed_apps=$INSTALLED_APPS" >> "$GITHUB_OUTPUT"
+          echo "failed_apps=$FAILED_APPS" >> "$GITHUB_OUTPUT"
+
+          INSTALLED_COUNT=$(echo "$INSTALLED_APPS" | jq 'length')
+          FAILED_COUNT=$(echo "$FAILED_APPS" | jq 'length')
+          SKIPPED_COUNT=$(echo "$SKIP_LIST" | jq 'length')
+
+          echo "=========================================="
+          echo "Install Summary"
+          echo "=========================================="
+          echo "  Installed: $INSTALLED_COUNT"
+          echo "  Failed:    $FAILED_COUNT"
+          echo "  Skipped:   $SKIPPED_COUNT"
+          if [ "$FAILED_COUNT" -gt 0 ]; then
+            echo "  Failed apps: $(echo "$FAILED_APPS" | jq -r 'join(", ")')"
+            for FAPP in $(echo "$FAILED_APPS" | jq -r '.[]'); do
+              echo "::error::Install FAILED: $FAPP (exit=$(cat "/tmp/install-exit-${FAPP}" 2>/dev/null || echo unknown))"
+            done
+          fi
+          echo "=========================================="
+
+          # Fail the step if any apps failed — makes the job show as failed in Actions UI
+          if [ "$FAILED_COUNT" -gt 0 ]; then
+            echo "ERROR: $FAILED_COUNT app(s) failed to install"
+            exit 1
+          fi
+        id: install_summary
+
+      # ── Step 8: Verify BWS + display access URLs ─────────────
+      # State + config were written per-app inside each install subshell.
+      # This step verifies BWS state and displays Tailscale-accessible URLs.
+      - name: Verify BWS state + display access URLs
+        if: always()
+        run: |
+          set -euo pipefail
+          SECRET_ID='${{ steps.cache_inventory.outputs.secret_id }}'
+          INSTALLED_APPS='${{ steps.install_summary.outputs.installed_apps }}'
+          INSTALLED_COUNT=$(echo "$INSTALLED_APPS" | jq 'length')
+
+          if [ "$INSTALLED_COUNT" -eq 0 ]; then
+            echo "No apps installed — skipping BWS verify"
+            exit 0
+          fi
+
+          sleep 1
+          INVENTORY=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+          INVENTORY_SIZE=$(echo "$INVENTORY" | wc -c | tr -d ' ')
+          BWS_APPS=$(echo "$INVENTORY" | jq -r '._state.apps.installed // [] | length')
+          CONFIG_APPS=$(echo "$INVENTORY" | jq -r '._config // {} | keys | length')
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+
+          echo "=========================================="
+          echo "BWS Inventory Verification"
+          echo "=========================================="
+          echo "  Inventory size: ${INVENTORY_SIZE} chars"
+          echo "  Apps in _state.installed: $BWS_APPS"
+          echo "  Apps in _config: $CONFIG_APPS"
+          echo "  Apps installed this run: $INSTALLED_COUNT"
+          echo ""
+
+          # Check for apps that installed but didn't make it to BWS
+          for APP in $(echo "$INSTALLED_APPS" | jq -r '.[]'); do
+            APP_IN_BWS=$(echo "$INVENTORY" | jq -r --arg app "$APP" '._state.apps[$app].status // "missing"')
+            APP_HAS_CONFIG=$(echo "$INVENTORY" | jq -r --arg app "$APP" '._config[$app] // null | if . then "yes" else "no" end')
+            if [ "$APP_IN_BWS" = "missing" ]; then
+              echo "::warning::$APP installed OK but missing from BWS _state"
+            fi
+            echo "  $APP: state=$APP_IN_BWS, config=$APP_HAS_CONFIG"
+          done
+
+          # ── Display Tailscale access URLs ──
+          echo ""
+          echo "=========================================="
+          echo "App Access URLs (Tailscale: ${TAILSCALE_IP})"
+          echo "=========================================="
+          echo ""
+
+          ALL_APPS=$(echo "$INVENTORY" | jq -r '._state.apps.installed // [] | .[]')
+          for APP in $ALL_APPS; do
+            DISPLAY_NAME=$(echo "$REGISTRY" | jq -r --arg app "$APP" '.apps[$app].display_name // $app')
+            NODEPORT=$(echo "$INVENTORY" | jq -r --arg app "$APP" '._state.apps[$app].nodeport // null')
+            HAS_CREDS=$(echo "$INVENTORY" | jq -r --arg app "$APP" '
+              ._state.apps[$app] |
+              [if .admin_password then "pass" else empty end,
+               if .api_key then "api_key" else empty end,
+               if .root_token then "token" else empty end] |
+              if length > 0 then "(" + join(", ") + ")" else "" end')
+
+            if [ "$NODEPORT" != "null" ] && [ -n "$NODEPORT" ]; then
+              printf "  %-22s http://%s:%s %s\n" "$DISPLAY_NAME:" "$TAILSCALE_IP" "$NODEPORT" "$HAS_CREDS"
+            else
+              printf "  %-22s (no NodePort) %s\n" "$DISPLAY_NAME:" "$HAS_CREDS"
+            fi
+          done
+
+          echo ""
+          echo "=========================================="
+
+  # ============================================================
+  # STATE WRITEBACK
+  # ============================================================
+
+  write-phase3-state:
+    needs: [prepare, install-k3s, install-longhorn, install-media-storage, install-vault, init-vault, install-eso, install-all-apps]
+    if: |
+      always() &&
+      needs.install-k3s.result == 'success' &&
+      needs.install-longhorn.result == 'success'
+    runs-on: [self-hosted, '${{ inputs.vm_hostname }}']
+    env:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Write Phase 3 completion to BWS
+        run: |
+          # Get current inventory
+          SECRET_ID=$(bws secret list --output json | jq -r --arg k "${{ inputs.inventory_key }}" \
+            '.[] | select(.key==$k) | .id')
+
+          CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+
+          # Get K3s info
+          K3S_VERSION=$(k3s --version | head -1 | awk '{print $3}')
+          NODE_TOKEN=$(sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
+
+          # Discover k3s CIDRs from cluster
+          # Pod CIDR: read from node spec (per-node /24 allocation implies cluster /16)
+          NODE_POD_CIDR=$(kubectl get nodes -o jsonpath='{.items[0].spec.podCIDR}' 2>/dev/null || true)
+          if [ -n "$NODE_POD_CIDR" ]; then
+            # Node gets e.g. 10.42.0.0/24 — cluster CIDR is the /16 supernet
+            POD_CIDR=$(echo "$NODE_POD_CIDR" | sed 's|\([0-9]*\.[0-9]*\)\.[0-9]*\.[0-9]*/[0-9]*|\1.0.0/16|')
+          else
+            POD_CIDR="10.42.0.0/16"
+          fi
+          # Service CIDR: infer from kubernetes service ClusterIP (always .1 in the range)
+          K8S_SVC_IP=$(kubectl get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+          if [ -n "$K8S_SVC_IP" ]; then
+            # e.g. 10.43.0.1 -> 10.43.0.0/16
+            SERVICE_CIDR=$(echo "$K8S_SVC_IP" | awk -F. '{print $1"."$2".0.0/16"}')
+          else
+            SERVICE_CIDR="10.43.0.0/16"
+          fi
+          echo "Discovered k3s CIDRs: pod=$POD_CIDR service=$SERVICE_CIDR"
+
+          # Update with Phase 3 info (preserve existing _state.apps.installed)
+          # Use -c for compact JSON — inventory is near 25K BWS limit
+          UPDATED=$(echo "$CURRENT" | jq -c \
+            --arg ver "$K3S_VERSION" \
+            --arg token "$NODE_TOKEN" \
+            --arg pod_cidr "$POD_CIDR" \
+            --arg svc_cidr "$SERVICE_CIDR" '
+            ._state.k3s.version = $ver |
+            ._state.k3s.cluster_token = $token |
+            ._state.k3s.pod_cidr = $pod_cidr |
+            ._state.k3s.service_cidr = $svc_cidr |
+            .bootstrap.phase_completed = "3" |
+            .bootstrap.ready_for_phase = "production" |
+            .bootstrap.k3s_installed_at = (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+          ')
+
+          FINAL_SIZE=$(echo "$UPDATED" | wc -c | tr -d ' ')
+          echo "Inventory size after phase 3 metadata: ${FINAL_SIZE} chars"
+
+          # Write back
+          bws secret edit --value "$UPDATED" "$SECRET_ID"
+          echo "Phase 3 completion written to BWS"
+
+      - name: Display summary
+        run: |
+          TAILSCALE_IP=$(tailscale ip -4)
+          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+
+          # Get installed apps from BWS state
+          SECRET_ID=$(bws secret list --output json | jq -r --arg k "${{ inputs.inventory_key }}" \
+            '.[] | select(.key==$k) | .id')
+          CURRENT=$(bws secret get "$SECRET_ID" --output json | jq -r '.value')
+          INSTALLED_APPS=$(echo "$CURRENT" | jq -r '._state.apps.installed // [] | .[]')
+
+          echo "=========================================="
+          echo "Phase 3 Complete - K3s Cluster Ready"
+          echo "=========================================="
+          echo ""
+          echo "Infrastructure:"
+          echo "  K3s: $(k3s --version | head -1)"
+          echo "  Longhorn: Deployed"
+          echo "  Vault: $(echo "$CURRENT" | jq -r 'if ._state.vault.initialized then "Initialized + Unsealed" else "Not installed" end')"
+          echo "  ESO: $(echo "$CURRENT" | jq -r 'if ._state.apps["external-secrets"] then "Deployed" else "Not installed" end')"
+          echo ""
+          echo "Deployed Apps & Access URLs:"
+          echo "----------------------------------------"
+
+          for app in $INSTALLED_APPS; do
+            DISPLAY_NAME=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].display_name // $app')
+            NODEPORT=$(echo "$REGISTRY" | jq -r --arg app "$app" '.apps[$app].nodeport')
+            HAS_KEY=$(echo "$CURRENT" | jq -r --arg app "$app" 'if ._state.apps[$app].api_key then "key extracted" else "" end')
+            if [ "$NODEPORT" != "null" ] && [ -n "$NODEPORT" ]; then
+              printf "  %-20s http://%s:%s %s\n" "$DISPLAY_NAME:" "$TAILSCALE_IP" "$NODEPORT" "$HAS_KEY"
+            fi
+          done
+
+          echo "----------------------------------------"
+          echo ""
+          echo "Secrets:"
+          echo "  BWS: API keys written to _state.apps.{app}.api_key"
+          echo "  Vault: Secrets synced to secret/data/homelab/"
+          echo ""
+          echo "Running Pods:"
+          kubectl get pods -A | grep -v "kube-system\|longhorn-system" | head -20 || true
+          echo ""
+          echo "=========================================="
+          echo "VM: ${{ inputs.vm_hostname }}"
+          echo "Tailscale IP: ${TAILSCALE_IP}"
+          echo "=========================================="
