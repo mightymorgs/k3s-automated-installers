@@ -2,9 +2,9 @@
 
 ## The Problem
 
-Setting up a k3s cluster with 32 interconnected apps requires hundreds of manual decisions: which apps talk to which, what URLs and API keys to pass, which ports to expose, what order to install, how to verify everything works. A single media stack (sonarr + radarr + prowlarr + sabnzbd + jellyfin) needs 12+ wiring playbooks, each with 10-20 fields that must be exactly right.
+Setting up a k3s cluster with interconnected apps requires hundreds of manual decisions: which apps talk to which, what URLs and API keys to pass, which ports to expose, what order to install, how to verify everything works. A single media stack (sonarr + radarr + prowlarr + sabnzbd + jellyfin) needs 12+ wiring playbooks, each with 10-20 fields that must be exactly right.
 
-Today these playbooks are hand-written. Adding a new app means hours of reading docs, writing YAML, debugging connections, and testing. The 22 known cross-app wiring targets alone represent thousands of lines of manually authored Ansible.
+Today these playbooks are hand-written. Adding a new app means hours of reading docs, writing YAML, debugging connections, and testing. This doesn't scale — every new app multiplies the manual wiring effort with every other app it connects to.
 
 ## The Insight
 
@@ -15,7 +15,7 @@ All the knowledge needed to wire these apps already exists in machine-readable f
 - **CRD schemas** tell you what an operator needs and what it produces — a cert-manager Certificate needs an Issuer and produces a Secret
 - **OpenAPI specs** tell you exactly what fields a POST endpoint expects, what types they are, and what the response contains
 
-The pipeline extracts this knowledge, unifies it in a graph, and mechanically generates the same playbooks a human would write — but deterministically, validated, and for all 32 apps at once.
+The pipeline extracts this knowledge, unifies it in a graph, and mechanically generates the same playbooks a human would write — but deterministically, validated, and for ANY app connected to ANY other app. Point it at a Helm chart and an OpenAPI spec, and it produces working playbooks. The 32-app portfolio is the baseline we validate against, not the limit.
 
 ## The Canonical Facts Model
 
@@ -72,7 +72,7 @@ The resolver finds all providers for a required capability and presents valid al
 
 ## The Three-Way Join
 
-No single source covers all 22 wiring targets. The power comes from combining them:
+No single source covers all cross-app wiring. The power comes from combining them:
 
 ```
 CRD schema:    GrafanaDatasource has a `url` field (string)
@@ -184,5 +184,6 @@ This is not an LLM generating infrastructure code. This is a **compiler**:
 4. **Repairable** — if validation fails, the LLM reclassifies fields (not regenerates code)
 5. **Self-contained** — no Docker, no Neo4j, no external services needed for development
 6. **Incremental** — add a new app to the manifest, run the pipeline, get working playbooks
+7. **Universal** — works for ANY app with a Helm chart, OpenAPI spec, or Docker Compose file — not limited to a fixed app list
 
-The end state: `pip install`, point at a Helm chart, get a fully wired app with install + config + ingress playbooks, molecule-tested, ready to deploy on any k3s cluster.
+The end state: `pip install`, point at a Helm chart, get a fully wired app with install + config + ingress playbooks, molecule-tested, ready to deploy on any k3s cluster. The 32-app portfolio is the test suite, not the boundary.
