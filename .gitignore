@@ -21,3 +21,6 @@ catalog/specs/helm/
 catalog/skills/openapi/
 catalog/skills/crd/
 catalog/skills/helm/
+
+# Git worktrees
+.worktrees/
