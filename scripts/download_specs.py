@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 # Ensure repo root is on sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "platform-tools" / "idi"))
 
 from idi.generation.download_specs import cli
 
