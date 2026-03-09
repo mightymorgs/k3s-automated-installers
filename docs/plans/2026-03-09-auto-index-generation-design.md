@@ -235,6 +235,36 @@ All files include:
 - CGC mode flag (enriched vs AST-only)
 - Module/file counts
 
+## Verified Setup (2026-03-09)
+
+Installation and indexing verified on Python 3.12.11 / macOS arm64:
+
+```bash
+# Install (into existing .venv)
+.venv/bin/pip install codegraphcontext falkordblite
+# codegraphcontext-0.2.8, falkordblite-0.9.0
+
+# Index (~99 seconds for full repo)
+.venv/bin/cgc index .
+# "Successfully finished indexing: . in 98.51 seconds"
+
+# Verify
+.venv/bin/cgc list
+# Shows: k3s-automated-installers | Project
+
+# Analysis
+.venv/bin/cgc analyze calls cli          # ✅ Works — shows download_all, generate_all, etc.
+.venv/bin/cgc analyze callers generate_all  # ✅ Works — shows 2 callers
+.venv/bin/cgc analyze dead-code          # ⚠️ FalkorDB query compat issue (CGC bug, non-blocking)
+```
+
+**Notes:**
+- CGC auto-detected FalkorDB as the backend (configured in `~/.codegraphcontext/.env`)
+- Graph stored in `~/.codegraphcontext/` — no repo-local artifacts, no `.gitignore` changes needed
+- CGC also indexed `.worktrees/cfm-core/` (harmless duplication, functions show up twice)
+- FalkorDB Lite's actual Python modules are `redislite` and `dummy` (it embeds a Redis-compatible server)
+- The `falkordb` Python client connects to it; no separate container needed
+
 ## What's NOT in Scope
 
 - Terraform/HCL indexing (defer to future issue)
