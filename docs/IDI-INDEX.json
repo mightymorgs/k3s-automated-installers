@@ -1,0 +1,2501 @@
+{
+  "package": "idi",
+  "generated_at": "2026-03-09",
+  "total_modules": 53,
+  "cgc_mode": true,
+  "git": {
+    "commit": "1b3af6b3482ffd49e291730fc1d41626ba25b04a",
+    "branch": "main",
+    "dirty": true
+  },
+  "surface_dirs": [
+    "generation",
+    "generation/adapters",
+    "generation/dep_adapters",
+    "generation/crd",
+    "enrichment",
+    "common"
+  ],
+  "sections": {
+    "modules": [
+      {
+        "path": "__init__.py",
+        "group": "Top-Level Module",
+        "docstring": "IDI (Intent-Driven Infrastructure) — deterministic automation from natural language.",
+        "tags": []
+      },
+      {
+        "path": "common/__init__.py",
+        "group": "Common Utilities",
+        "docstring": "IDI common utilities — path normalization, schema validation.",
+        "tags": []
+      },
+      {
+        "path": "common/paths.py",
+        "group": "Common Utilities",
+        "docstring": "Path normalization for skill operation paths.",
+        "tags": []
+      },
+      {
+        "path": "common/validation.py",
+        "group": "Common Utilities",
+        "docstring": "Schema validation for skill JSON files.",
+        "tags": []
+      },
+      {
+        "path": "enrichment/__init__.py",
+        "group": "Enrichment — Context7 Cross-App Extraction",
+        "docstring": "Context7-based enrichment pipeline for cross-app dependency extraction.",
+        "tags": []
+      },
+      {
+        "path": "enrichment/context7.py",
+        "group": "Enrichment — Context7 Cross-App Extraction",
+        "docstring": "Context7 API client -- search libraries and fetch documentation snippets.",
+        "tags": []
+      },
+      {
+        "path": "enrichment/schemas.py",
+        "group": "Enrichment — Context7 Cross-App Extraction",
+        "docstring": "Pydantic schemas for Haiku structured extraction output.",
+        "tags": [
+          "model"
+        ]
+      },
+      {
+        "path": "generation/__init__.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "IDI generation — OpenAPI-to-skill generation pipeline and adapters.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/__init__.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "Schema family adapters for FK detection and response schema extraction.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/aws_query.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "AWS Query protocol schema adapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/cloudflare.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "Cloudflare API adapter for response unwrapping and FK detection.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/github_openapi.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "GitHub Pseudo-OpenAPI adapter for FK detection.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/kubernetes_crd.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "Kubernetes CRD schema adapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/openapi_rest.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "OpenAPI REST schema adapter for FK detection.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/swagger2.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "Swagger 2.0 schema adapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/adapters/vault.py",
+        "group": "generation/adapters/ — Schema Family Adapters",
+        "docstring": "HashiCorp Vault API adapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/changelog.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Change detection, versioning, and idempotency analysis for skills.",
+        "tags": []
+      },
+      {
+        "path": "generation/cli.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Generation orchestration and CLI entry point.",
+        "tags": [
+          "entrypoint"
+        ]
+      },
+      {
+        "path": "generation/constants.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Shared constants for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/context.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Shared state container for skill generation.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd/__init__.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "Package init for crd/.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd/field_classifier.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "RESTler-adapted field classifier for CRD schemas.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd/odg_builder.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "CRD Operation Dependency Graph — producer-consumer matching.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd/output_writer.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "CRD skill JSON output writer.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd/schema_loader.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "CRD schema loader — fetch ArtifactHub Helm charts, extract CRD schemas + values.yaml.",
+        "tags": [
+          "model"
+        ]
+      },
+      {
+        "path": "generation/crd/side_effect_registry.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "Operator side-effect registry — layered classification for *Name fields.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd_schemas.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Fetch CRD JSON Schemas from datreeio/CRDs-catalog and wrap as OpenAPI.",
+        "tags": [
+          "io_boundary",
+          "model"
+        ]
+      },
+      {
+        "path": "generation/dep_adapters/__init__.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Pluggable dependency detection adapters.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/base.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Base protocol and data types for dependency adapters.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/body_fk.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Body schema FK field detection with recursive tree traversal.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/crd_dep.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "CRD bridge dep adapter -- delegates to KubernetesCrdAdapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/discriminator.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Structural adapter: OpenAPI discriminator keyword detection.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/generic_odg.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Generic ODG heuristic adapter (Layer 1).",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/merge.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Confidence-based merge and post-merge filtering for dep adapters.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/naming.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Naming convention detection and word splitting.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/obj_pattern.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Structural adapter: Django REST Framework _obj field pattern.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/output_detection.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Response ID field output detection for write operations.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/path_deps.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Path parameter parent resource detection.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/query_fk.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Query parameter FK detection adapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/registry.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "Dependency adapter registry: discovery + detect orchestration.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/target_inference.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "RESTler-style target resource inference from field names.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/yaml_adapter.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "YAML-based dependency adapter loader (Layer 2).",
+        "tags": []
+      },
+      {
+        "path": "generation/download_specs.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Download OpenAPI specs from a manifest file.",
+        "tags": [
+          "io_boundary"
+        ]
+      },
+      {
+        "path": "generation/fact_model.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Canonical fact model with URI-based references.",
+        "tags": [
+          "model"
+        ]
+      },
+      {
+        "path": "generation/fact_registry.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Fact registry using canonical FactRef model.",
+        "tags": []
+      },
+      {
+        "path": "generation/field_extractor.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Field extraction from OpenAPI schemas for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/generate_all.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Manifest-driven batch skill generation.",
+        "tags": []
+      },
+      {
+        "path": "generation/output_writer.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "JSON output writing for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/path_extractor.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Path and operation extraction for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/polymorphic.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Resource name extraction for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/resource_namer.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Resource naming logic for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/spec_loader.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Load and inspect OpenAPI specifications for skill generation.",
+        "tags": [
+          "io_boundary"
+        ]
+      },
+      {
+        "path": "generation/utils.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Pure utility functions for skill generation.",
+        "tags": []
+      }
+    ],
+    "entry_points": [
+      {
+        "name": "idi-generate",
+        "type": "cli",
+        "module": "idi.generation.generate_all:cli",
+        "file": "generation/generate_all.py"
+      },
+      {
+        "name": "idi-download",
+        "type": "cli",
+        "module": "idi.generation.download_specs:cli",
+        "file": "generation/download_specs.py"
+      }
+    ],
+    "symbols": [
+      {
+        "name": "normalize_op_path",
+        "file": "common/paths.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.common.paths:normalize_op_path",
+        "line_start": 17,
+        "line_end": 66
+      },
+      {
+        "name": "validate_field",
+        "file": "common/validation.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.common.validation:validate_field",
+        "line_start": 63,
+        "line_end": 72
+      },
+      {
+        "name": "validate_manifest",
+        "file": "common/validation.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.common.validation:validate_manifest",
+        "line_start": 39,
+        "line_end": 48
+      },
+      {
+        "name": "validate_operation",
+        "file": "common/validation.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.common.validation:validate_operation",
+        "line_start": 51,
+        "line_end": 60
+      },
+      {
+        "name": "fetch_snippets",
+        "file": "enrichment/context7.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.enrichment.context7:fetch_snippets",
+        "line_start": 20,
+        "line_end": 30
+      },
+      {
+        "name": "search_library",
+        "file": "enrichment/context7.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.enrichment.context7:search_library",
+        "line_start": 9,
+        "line_end": 17
+      },
+      {
+        "name": "CrossAppEdge",
+        "file": "enrichment/schemas.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.enrichment.schemas:CrossAppEdge",
+        "line_start": 7,
+        "line_end": 20
+      },
+      {
+        "name": "ServiceCrossDepExtraction",
+        "file": "enrichment/schemas.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.enrichment.schemas:ServiceCrossDepExtraction",
+        "line_start": 23,
+        "line_end": 27
+      },
+      {
+        "name": "AwsQueryAdapter",
+        "file": "generation/adapters/aws_query.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.aws_query:AwsQueryAdapter",
+        "line_start": 95,
+        "line_end": 339
+      },
+      {
+        "name": "AwsQueryAdapter.action_to_operation",
+        "file": "generation/adapters/aws_query.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.aws_query:AwsQueryAdapter",
+        "line_start": 294,
+        "line_end": 306
+      },
+      {
+        "name": "AwsQueryAdapter.action_to_resource",
+        "file": "generation/adapters/aws_query.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.aws_query:AwsQueryAdapter",
+        "line_start": 308,
+        "line_end": 339
+      },
+      {
+        "name": "AwsQueryAdapter.extract_field_refs",
+        "file": "generation/adapters/aws_query.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.aws_query:AwsQueryAdapter",
+        "line_start": 111,
+        "line_end": 137
+      },
+      {
+        "name": "AwsQueryAdapter.extract_outputs",
+        "file": "generation/adapters/aws_query.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.aws_query:AwsQueryAdapter",
+        "line_start": 250,
+        "line_end": 292
+      },
+      {
+        "name": "CloudflareAdapter",
+        "file": "generation/adapters/cloudflare.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.cloudflare:CloudflareAdapter",
+        "line_start": 39,
+        "line_end": 299
+      },
+      {
+        "name": "CloudflareAdapter.extract_path_parameters_as_outputs",
+        "file": "generation/adapters/cloudflare.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.cloudflare:CloudflareAdapter",
+        "line_start": 221,
+        "line_end": 260
+      },
+      {
+        "name": "CloudflareAdapter.extract_response_schema",
+        "file": "generation/adapters/cloudflare.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.cloudflare:CloudflareAdapter",
+        "line_start": 61,
+        "line_end": 124
+      },
+      {
+        "name": "CloudflareAdapter.is_cloudflare_wrapper_field",
+        "file": "generation/adapters/cloudflare.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.cloudflare:CloudflareAdapter",
+        "line_start": 290,
+        "line_end": 299
+      },
+      {
+        "name": "CloudflareAdapter.normalize_resource_name",
+        "file": "generation/adapters/cloudflare.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.cloudflare:CloudflareAdapter",
+        "line_start": 262,
+        "line_end": 287
+      },
+      {
+        "name": "GitHubFactRef",
+        "file": "generation/adapters/github_openapi.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.github_openapi:GitHubFactRef",
+        "line_start": 34,
+        "line_end": 53
+      },
+      {
+        "name": "GitHubOpenApiAdapter",
+        "file": "generation/adapters/github_openapi.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.github_openapi:GitHubOpenApiAdapter",
+        "line_start": 56,
+        "line_end": 400
+      },
+      {
+        "name": "GitHubOpenApiAdapter.extract_field_refs",
+        "file": "generation/adapters/github_openapi.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.github_openapi:GitHubOpenApiAdapter",
+        "line_start": 77,
+        "line_end": 138
+      },
+      {
+        "name": "GitHubOpenApiAdapter.extract_outputs",
+        "file": "generation/adapters/github_openapi.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.github_openapi:GitHubOpenApiAdapter",
+        "line_start": 140,
+        "line_end": 193
+      },
+      {
+        "name": "GitHubOpenApiAdapter.extract_path_params_as_refs",
+        "file": "generation/adapters/github_openapi.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.github_openapi:GitHubOpenApiAdapter",
+        "line_start": 195,
+        "line_end": 238
+      },
+      {
+        "name": "KubernetesCrdAdapter",
+        "file": "generation/adapters/kubernetes_crd.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
+        "line_start": 130,
+        "line_end": 378
+      },
+      {
+        "name": "KubernetesCrdAdapter.extract_field_refs",
+        "file": "generation/adapters/kubernetes_crd.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
+        "line_start": 143,
+        "line_end": 246
+      },
+      {
+        "name": "KubernetesCrdAdapter.extract_outputs",
+        "file": "generation/adapters/kubernetes_crd.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
+        "line_start": 309,
+        "line_end": 366
+      },
+      {
+        "name": "KubernetesCrdAdapter.is_namespaced",
+        "file": "generation/adapters/kubernetes_crd.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
+        "line_start": 368,
+        "line_end": 378
+      },
+      {
+        "name": "OpenApiRestAdapter",
+        "file": "generation/adapters/openapi_rest.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.openapi_rest:OpenApiRestAdapter",
+        "line_start": 40,
+        "line_end": 283
+      },
+      {
+        "name": "OpenApiRestAdapter.extract_field_refs",
+        "file": "generation/adapters/openapi_rest.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.openapi_rest:OpenApiRestAdapter",
+        "line_start": 57,
+        "line_end": 123
+      },
+      {
+        "name": "OpenApiRestAdapter.extract_outputs",
+        "file": "generation/adapters/openapi_rest.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.openapi_rest:OpenApiRestAdapter",
+        "line_start": 233,
+        "line_end": 283
+      },
+      {
+        "name": "Swagger2Adapter",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:Swagger2Adapter",
+        "line_start": 60,
+        "line_end": 335
+      },
+      {
+        "name": "normalize_ref_to_resource",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:normalize_ref_to_resource",
+        "line_start": 30,
+        "line_end": 57
+      },
+      {
+        "name": "Swagger2Adapter.extract_field_refs",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:Swagger2Adapter",
+        "line_start": 89,
+        "line_end": 154
+      },
+      {
+        "name": "Swagger2Adapter.extract_operation_refs",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:Swagger2Adapter",
+        "line_start": 156,
+        "line_end": 203
+      },
+      {
+        "name": "Swagger2Adapter.extract_outputs",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:Swagger2Adapter",
+        "line_start": 205,
+        "line_end": 284
+      },
+      {
+        "name": "Swagger2Adapter.is_swagger2",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:Swagger2Adapter",
+        "line_start": 78,
+        "line_end": 87
+      },
+      {
+        "name": "Swagger2Adapter.to_intermediate",
+        "file": "generation/adapters/swagger2.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.swagger2:Swagger2Adapter",
+        "line_start": 286,
+        "line_end": 335
+      },
+      {
+        "name": "VaultAdapter",
+        "file": "generation/adapters/vault.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 78,
+        "line_end": 477
+      },
+      {
+        "name": "VaultAdapter.detect_backend_type",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 97,
+        "line_end": 145
+      },
+      {
+        "name": "VaultAdapter.extract_field_refs",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 324,
+        "line_end": 395
+      },
+      {
+        "name": "VaultAdapter.extract_mount_dependencies",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 450,
+        "line_end": 477
+      },
+      {
+        "name": "VaultAdapter.extract_outputs",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 401,
+        "line_end": 444
+      },
+      {
+        "name": "VaultAdapter.extract_response_schema",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 184,
+        "line_end": 250
+      },
+      {
+        "name": "VaultAdapter.handle_auth_backend",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 287,
+        "line_end": 318
+      },
+      {
+        "name": "VaultAdapter.handle_kv_backend",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 256,
+        "line_end": 281
+      },
+      {
+        "name": "VaultAdapter.parameterize_mount_point",
+        "file": "generation/adapters/vault.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.adapters.vault:VaultAdapter",
+        "line_start": 151,
+        "line_end": 178
+      },
+      {
+        "name": "compute_content_hash",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:compute_content_hash",
+        "line_start": 244,
+        "line_end": 253
+      },
+      {
+        "name": "compute_semantic_version",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:compute_semantic_version",
+        "line_start": 97,
+        "line_end": 134
+      },
+      {
+        "name": "compute_skill_version",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:compute_skill_version",
+        "line_start": 137,
+        "line_end": 183
+      },
+      {
+        "name": "detect_changes",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:detect_changes",
+        "line_start": 21,
+        "line_end": 91
+      },
+      {
+        "name": "determine_idempotency",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:determine_idempotency",
+        "line_start": 259,
+        "line_end": 292
+      },
+      {
+        "name": "extract_existence_check",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:extract_existence_check",
+        "line_start": 332,
+        "line_end": 450
+      },
+      {
+        "name": "find_check_skill",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:find_check_skill",
+        "line_start": 298,
+        "line_end": 326
+      },
+      {
+        "name": "get_previous_skill_metadata",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:get_previous_skill_metadata",
+        "line_start": 205,
+        "line_end": 238
+      },
+      {
+        "name": "get_schema_version",
+        "file": "generation/changelog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.changelog:get_schema_version",
+        "line_start": 189,
+        "line_end": 199
+      },
+      {
+        "name": "generate",
+        "file": "generation/cli.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "idi.generation.cli:generate",
+        "line_start": 40,
+        "line_end": 115
+      },
+      {
+        "name": "main",
+        "file": "generation/cli.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "idi.generation.cli:main",
+        "line_start": 416,
+        "line_end": 451
+      },
+      {
+        "name": "parse_args",
+        "file": "generation/cli.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "idi.generation.cli:parse_args",
+        "line_start": 392,
+        "line_end": 413
+      },
+      {
+        "name": "filter_polymorphic_targets",
+        "file": "generation/constants.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.constants:filter_polymorphic_targets",
+        "line_start": 150,
+        "line_end": 187
+      },
+      {
+        "name": "get_valid_targets_for_field",
+        "file": "generation/constants.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.constants:get_valid_targets_for_field",
+        "line_start": 190,
+        "line_end": 204
+      },
+      {
+        "name": "GeneratorContext",
+        "file": "generation/context.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.context:GeneratorContext",
+        "line_start": 16,
+        "line_end": 58
+      },
+      {
+        "name": "ClassifiedField",
+        "file": "generation/crd/field_classifier.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.field_classifier:ClassifiedField",
+        "line_start": 26,
+        "line_end": 37
+      },
+      {
+        "name": "classify_fields",
+        "file": "generation/crd/field_classifier.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.field_classifier:classify_fields",
+        "line_start": 40,
+        "line_end": 78
+      },
+      {
+        "name": "CrdDependency",
+        "file": "generation/crd/odg_builder.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.odg_builder:CrdDependency",
+        "line_start": 15,
+        "line_end": 25
+      },
+      {
+        "name": "CrdProduces",
+        "file": "generation/crd/odg_builder.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.odg_builder:CrdProduces",
+        "line_start": 29,
+        "line_end": 37
+      },
+      {
+        "name": "build_odg",
+        "file": "generation/crd/odg_builder.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.odg_builder:build_odg",
+        "line_start": 40,
+        "line_end": 80
+      },
+      {
+        "name": "build_produces",
+        "file": "generation/crd/odg_builder.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.odg_builder:build_produces",
+        "line_start": 83,
+        "line_end": 113
+      },
+      {
+        "name": "build_crd_skill_json",
+        "file": "generation/crd/output_writer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.output_writer:build_crd_skill_json",
+        "line_start": 43,
+        "line_end": 107
+      },
+      {
+        "name": "build_helm_spec_json",
+        "file": "generation/crd/output_writer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.output_writer:build_helm_spec_json",
+        "line_start": 110,
+        "line_end": 159
+      },
+      {
+        "name": "write_crd_skill",
+        "file": "generation/crd/output_writer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.output_writer:write_crd_skill",
+        "line_start": 162,
+        "line_end": 188
+      },
+      {
+        "name": "write_helm_spec",
+        "file": "generation/crd/output_writer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.output_writer:write_helm_spec",
+        "line_start": 191,
+        "line_end": 219
+      },
+      {
+        "name": "extract_crds_from_chart",
+        "file": "generation/crd/schema_loader.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_loader:extract_crds_from_chart",
+        "line_start": 38,
+        "line_end": 72
+      },
+      {
+        "name": "extract_spec_properties",
+        "file": "generation/crd/schema_loader.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_loader:extract_spec_properties",
+        "line_start": 30,
+        "line_end": 35
+      },
+      {
+        "name": "load_crd_schemas",
+        "file": "generation/crd/schema_loader.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_loader:load_crd_schemas",
+        "line_start": 124,
+        "line_end": 148
+      },
+      {
+        "name": "strip_helm_directives",
+        "file": "generation/crd/schema_loader.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_loader:strip_helm_directives",
+        "line_start": 25,
+        "line_end": 27
+      },
+      {
+        "name": "classify_name_field",
+        "file": "generation/crd/side_effect_registry.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.side_effect_registry:classify_name_field",
+        "line_start": 76,
+        "line_end": 103
+      },
+      {
+        "name": "get_side_effects",
+        "file": "generation/crd/side_effect_registry.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.side_effect_registry:get_side_effects",
+        "line_start": 56,
+        "line_end": 58
+      },
+      {
+        "name": "is_output_by_description",
+        "file": "generation/crd/side_effect_registry.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.side_effect_registry:is_output_by_description",
+        "line_start": 61,
+        "line_end": 73
+      },
+      {
+        "name": "build_crd_paths",
+        "file": "generation/crd_schemas.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary",
+          "model"
+        ],
+        "import_path": "idi.generation.crd_schemas:build_crd_paths",
+        "line_start": 131,
+        "line_end": 328
+      },
+      {
+        "name": "build_openapi_from_datreeio",
+        "file": "generation/crd_schemas.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary",
+          "model"
+        ],
+        "import_path": "idi.generation.crd_schemas:build_openapi_from_datreeio",
+        "line_start": 336,
+        "line_end": 423
+      },
+      {
+        "name": "clean_schema",
+        "file": "generation/crd_schemas.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary",
+          "model"
+        ],
+        "import_path": "idi.generation.crd_schemas:clean_schema",
+        "line_start": 92,
+        "line_end": 123
+      },
+      {
+        "name": "convert_crd_service",
+        "file": "generation/crd_schemas.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary",
+          "model"
+        ],
+        "import_path": "idi.generation.crd_schemas:convert_crd_service",
+        "line_start": 431,
+        "line_end": 465
+      },
+      {
+        "name": "fetch_crd_schema",
+        "file": "generation/crd_schemas.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary",
+          "model"
+        ],
+        "import_path": "idi.generation.crd_schemas:fetch_crd_schema",
+        "line_start": 67,
+        "line_end": 89
+      },
+      {
+        "name": "DepAdapter",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:DepAdapter",
+        "line_start": 49,
+        "line_end": 68
+      },
+      {
+        "name": "Dependency",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:Dependency",
+        "line_start": 24,
+        "line_end": 35
+      },
+      {
+        "name": "OperationInfo",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:OperationInfo",
+        "line_start": 9,
+        "line_end": 20
+      },
+      {
+        "name": "Output",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:Output",
+        "line_start": 39,
+        "line_end": 45
+      },
+      {
+        "name": "DepAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:DepAdapter",
+        "line_start": 57,
+        "line_end": 62
+      },
+      {
+        "name": "DepAdapter.detect_outputs",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:DepAdapter",
+        "line_start": 64,
+        "line_end": 68
+      },
+      {
+        "name": "DepAdapter.matches",
+        "file": "generation/dep_adapters/base.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.base:DepAdapter",
+        "line_start": 55,
+        "line_end": 55
+      },
+      {
+        "name": "detect_body_deps",
+        "file": "generation/dep_adapters/body_fk.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.body_fk:detect_body_deps",
+        "line_start": 34,
+        "line_end": 61
+      },
+      {
+        "name": "CrdDepAdapter.name",
+        "file": "generation/dep_adapters/crd_dep.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
+        "line_start": 39,
+        "line_end": 39
+      },
+      {
+        "name": "CrdDepAdapter.priority",
+        "file": "generation/dep_adapters/crd_dep.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
+        "line_start": 40,
+        "line_end": 40
+      },
+      {
+        "name": "CrdDepAdapter",
+        "file": "generation/dep_adapters/crd_dep.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
+        "line_start": 36,
+        "line_end": 190
+      },
+      {
+        "name": "CrdDepAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/crd_dep.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
+        "line_start": 49,
+        "line_end": 76
+      },
+      {
+        "name": "CrdDepAdapter.detect_outputs",
+        "file": "generation/dep_adapters/crd_dep.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
+        "line_start": 170,
+        "line_end": 190
+      },
+      {
+        "name": "CrdDepAdapter.matches",
+        "file": "generation/dep_adapters/crd_dep.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
+        "line_start": 42,
+        "line_end": 47
+      },
+      {
+        "name": "DiscriminatorAdapter.name",
+        "file": "generation/dep_adapters/discriminator.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.discriminator:DiscriminatorAdapter",
+        "line_start": 14,
+        "line_end": 14
+      },
+      {
+        "name": "DiscriminatorAdapter.priority",
+        "file": "generation/dep_adapters/discriminator.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.discriminator:DiscriminatorAdapter",
+        "line_start": 15,
+        "line_end": 15
+      },
+      {
+        "name": "DiscriminatorAdapter",
+        "file": "generation/dep_adapters/discriminator.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.discriminator:DiscriminatorAdapter",
+        "line_start": 13,
+        "line_end": 42
+      },
+      {
+        "name": "DiscriminatorAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/discriminator.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.discriminator:DiscriminatorAdapter",
+        "line_start": 20,
+        "line_end": 39
+      },
+      {
+        "name": "DiscriminatorAdapter.detect_outputs",
+        "file": "generation/dep_adapters/discriminator.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.discriminator:DiscriminatorAdapter",
+        "line_start": 41,
+        "line_end": 42
+      },
+      {
+        "name": "DiscriminatorAdapter.matches",
+        "file": "generation/dep_adapters/discriminator.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.discriminator:DiscriminatorAdapter",
+        "line_start": 17,
+        "line_end": 18
+      },
+      {
+        "name": "GenericODGAdapter.name",
+        "file": "generation/dep_adapters/generic_odg.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.generic_odg:GenericODGAdapter",
+        "line_start": 22,
+        "line_end": 22
+      },
+      {
+        "name": "GenericODGAdapter.priority",
+        "file": "generation/dep_adapters/generic_odg.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.generic_odg:GenericODGAdapter",
+        "line_start": 23,
+        "line_end": 23
+      },
+      {
+        "name": "GenericODGAdapter",
+        "file": "generation/dep_adapters/generic_odg.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.generic_odg:GenericODGAdapter",
+        "line_start": 19,
+        "line_end": 40
+      },
+      {
+        "name": "GenericODGAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/generic_odg.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.generic_odg:GenericODGAdapter",
+        "line_start": 28,
+        "line_end": 37
+      },
+      {
+        "name": "GenericODGAdapter.detect_outputs",
+        "file": "generation/dep_adapters/generic_odg.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.generic_odg:GenericODGAdapter",
+        "line_start": 39,
+        "line_end": 40
+      },
+      {
+        "name": "GenericODGAdapter.matches",
+        "file": "generation/dep_adapters/generic_odg.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.generic_odg:GenericODGAdapter",
+        "line_start": 25,
+        "line_end": 26
+      },
+      {
+        "name": "filter_self_refs",
+        "file": "generation/dep_adapters/merge.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.merge:filter_self_refs",
+        "line_start": 28,
+        "line_end": 33
+      },
+      {
+        "name": "merge_deps",
+        "file": "generation/dep_adapters/merge.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.merge:merge_deps",
+        "line_start": 7,
+        "line_end": 15
+      },
+      {
+        "name": "merge_outputs",
+        "file": "generation/dep_adapters/merge.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.merge:merge_outputs",
+        "line_start": 18,
+        "line_end": 25
+      },
+      {
+        "name": "Convention.CAMEL",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:Convention",
+        "line_start": 23,
+        "line_end": 23
+      },
+      {
+        "name": "Convention.KEBAB",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:Convention",
+        "line_start": 26,
+        "line_end": 26
+      },
+      {
+        "name": "Convention.PASCAL",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:Convention",
+        "line_start": 24,
+        "line_end": 24
+      },
+      {
+        "name": "Convention.SNAKE",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:Convention",
+        "line_start": 25,
+        "line_end": 25
+      },
+      {
+        "name": "Convention",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:Convention",
+        "line_start": 22,
+        "line_end": 26
+      },
+      {
+        "name": "detect_convention",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:detect_convention",
+        "line_start": 40,
+        "line_end": 58
+      },
+      {
+        "name": "normalize",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:normalize",
+        "line_start": 74,
+        "line_end": 80
+      },
+      {
+        "name": "singularize",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:singularize",
+        "line_start": 83,
+        "line_end": 86
+      },
+      {
+        "name": "split_words",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:split_words",
+        "line_start": 61,
+        "line_end": 71
+      },
+      {
+        "name": "stem",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:stem",
+        "line_start": 89,
+        "line_end": 99
+      },
+      {
+        "name": "stem_token",
+        "file": "generation/dep_adapters/naming.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.naming:stem_token",
+        "line_start": 102,
+        "line_end": 104
+      },
+      {
+        "name": "ObjPatternAdapter.name",
+        "file": "generation/dep_adapters/obj_pattern.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.obj_pattern:ObjPatternAdapter",
+        "line_start": 15,
+        "line_end": 15
+      },
+      {
+        "name": "ObjPatternAdapter.priority",
+        "file": "generation/dep_adapters/obj_pattern.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.obj_pattern:ObjPatternAdapter",
+        "line_start": 16,
+        "line_end": 16
+      },
+      {
+        "name": "ObjPatternAdapter",
+        "file": "generation/dep_adapters/obj_pattern.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.obj_pattern:ObjPatternAdapter",
+        "line_start": 14,
+        "line_end": 57
+      },
+      {
+        "name": "ObjPatternAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/obj_pattern.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.obj_pattern:ObjPatternAdapter",
+        "line_start": 36,
+        "line_end": 54
+      },
+      {
+        "name": "ObjPatternAdapter.detect_outputs",
+        "file": "generation/dep_adapters/obj_pattern.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.obj_pattern:ObjPatternAdapter",
+        "line_start": 56,
+        "line_end": 57
+      },
+      {
+        "name": "ObjPatternAdapter.matches",
+        "file": "generation/dep_adapters/obj_pattern.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.obj_pattern:ObjPatternAdapter",
+        "line_start": 18,
+        "line_end": 34
+      },
+      {
+        "name": "detect_outputs",
+        "file": "generation/dep_adapters/output_detection.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.output_detection:detect_outputs",
+        "line_start": 25,
+        "line_end": 61
+      },
+      {
+        "name": "detect_path_deps",
+        "file": "generation/dep_adapters/path_deps.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.path_deps:detect_path_deps",
+        "line_start": 16,
+        "line_end": 60
+      },
+      {
+        "name": "detect_query_deps",
+        "file": "generation/dep_adapters/query_fk.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.query_fk:detect_query_deps",
+        "line_start": 55,
+        "line_end": 122
+      },
+      {
+        "name": "DepAdapterRegistry",
+        "file": "generation/dep_adapters/registry.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.registry:DepAdapterRegistry",
+        "line_start": 20,
+        "line_end": 99
+      },
+      {
+        "name": "DepAdapterRegistry.detect",
+        "file": "generation/dep_adapters/registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.registry:DepAdapterRegistry",
+        "line_start": 81,
+        "line_end": 99
+      },
+      {
+        "name": "DepAdapterRegistry.get_adapters_for",
+        "file": "generation/dep_adapters/registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.registry:DepAdapterRegistry",
+        "line_start": 74,
+        "line_end": 79
+      },
+      {
+        "name": "infer_target",
+        "file": "generation/dep_adapters/target_inference.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.target_inference:infer_target",
+        "line_start": 61,
+        "line_end": 103
+      },
+      {
+        "name": "YamlDepAdapter",
+        "file": "generation/dep_adapters/yaml_adapter.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.yaml_adapter:YamlDepAdapter",
+        "line_start": 15,
+        "line_end": 80
+      },
+      {
+        "name": "YamlDepAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/yaml_adapter.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.yaml_adapter:YamlDepAdapter",
+        "line_start": 44,
+        "line_end": 64
+      },
+      {
+        "name": "YamlDepAdapter.detect_outputs",
+        "file": "generation/dep_adapters/yaml_adapter.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.yaml_adapter:YamlDepAdapter",
+        "line_start": 66,
+        "line_end": 80
+      },
+      {
+        "name": "YamlDepAdapter.from_file",
+        "file": "generation/dep_adapters/yaml_adapter.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.yaml_adapter:YamlDepAdapter",
+        "line_start": 26,
+        "line_end": 31
+      },
+      {
+        "name": "YamlDepAdapter.matches",
+        "file": "generation/dep_adapters/yaml_adapter.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.yaml_adapter:YamlDepAdapter",
+        "line_start": 33,
+        "line_end": 42
+      },
+      {
+        "name": "cli",
+        "file": "generation/download_specs.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.download_specs:cli",
+        "line_start": 278,
+        "line_end": 338
+      },
+      {
+        "name": "download_all",
+        "file": "generation/download_specs.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.download_specs:download_all",
+        "line_start": 193,
+        "line_end": 270
+      },
+      {
+        "name": "download_spec",
+        "file": "generation/download_specs.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.download_specs:download_spec",
+        "line_start": 109,
+        "line_end": 146
+      },
+      {
+        "name": "list_services",
+        "file": "generation/download_specs.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.download_specs:list_services",
+        "line_start": 154,
+        "line_end": 185
+      },
+      {
+        "name": "load_manifest",
+        "file": "generation/download_specs.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.download_specs:load_manifest",
+        "line_start": 28,
+        "line_end": 52
+      },
+      {
+        "name": "validate_spec",
+        "file": "generation/download_specs.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.download_specs:validate_spec",
+        "line_start": 60,
+        "line_end": 101
+      },
+      {
+        "name": "LineageType.COPY",
+        "file": "generation/fact_model.py",
+        "kind": "attribute",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:LineageType",
+        "line_start": 56,
+        "line_end": 56
+      },
+      {
+        "name": "LineageType.REFERENCE",
+        "file": "generation/fact_model.py",
+        "kind": "attribute",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:LineageType",
+        "line_start": 62,
+        "line_end": 62
+      },
+      {
+        "name": "LineageType.TRANSFORM",
+        "file": "generation/fact_model.py",
+        "kind": "attribute",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:LineageType",
+        "line_start": 59,
+        "line_end": 59
+      },
+      {
+        "name": "AliasRegistry",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:AliasRegistry",
+        "line_start": 212,
+        "line_end": 250
+      },
+      {
+        "name": "FactGraph",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactGraph",
+        "line_start": 295,
+        "line_end": 348
+      },
+      {
+        "name": "FactRef",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactRef",
+        "line_start": 78,
+        "line_end": 126
+      },
+      {
+        "name": "InvalidFactUri",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:InvalidFactUri",
+        "line_start": 72,
+        "line_end": 74
+      },
+      {
+        "name": "LineageType",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:LineageType",
+        "line_start": 50,
+        "line_end": 63
+      },
+      {
+        "name": "ProducedFact",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:ProducedFact",
+        "line_start": 264,
+        "line_end": 276
+      },
+      {
+        "name": "RequiredFact",
+        "file": "generation/fact_model.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:RequiredFact",
+        "line_start": 280,
+        "line_end": 292
+      },
+      {
+        "name": "camel_to_snake",
+        "file": "generation/fact_model.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:camel_to_snake",
+        "line_start": 179,
+        "line_end": 188
+      },
+      {
+        "name": "canonicalize_field",
+        "file": "generation/fact_model.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:canonicalize_field",
+        "line_start": 35,
+        "line_end": 45
+      },
+      {
+        "name": "from_legacy",
+        "file": "generation/fact_model.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:from_legacy",
+        "line_start": 152,
+        "line_end": 174
+      },
+      {
+        "name": "normalize_field",
+        "file": "generation/fact_model.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:normalize_field",
+        "line_start": 191,
+        "line_end": 197
+      },
+      {
+        "name": "parse_fact_uri",
+        "file": "generation/fact_model.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:parse_fact_uri",
+        "line_start": 129,
+        "line_end": 149
+      },
+      {
+        "name": "strip_id_suffix",
+        "file": "generation/fact_model.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:strip_id_suffix",
+        "line_start": 200,
+        "line_end": 209
+      },
+      {
+        "name": "AliasRegistry.get_alias",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:AliasRegistry",
+        "line_start": 244,
+        "line_end": 250
+      },
+      {
+        "name": "AliasRegistry.register",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:AliasRegistry",
+        "line_start": 222,
+        "line_end": 234
+      },
+      {
+        "name": "AliasRegistry.resolve",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:AliasRegistry",
+        "line_start": 236,
+        "line_end": 242
+      },
+      {
+        "name": "FactGraph.add_produced",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactGraph",
+        "line_start": 314,
+        "line_end": 319
+      },
+      {
+        "name": "FactGraph.add_required",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactGraph",
+        "line_start": 321,
+        "line_end": 326
+      },
+      {
+        "name": "FactGraph.find_consumers",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactGraph",
+        "line_start": 333,
+        "line_end": 336
+      },
+      {
+        "name": "FactGraph.find_producers",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactGraph",
+        "line_start": 328,
+        "line_end": 331
+      },
+      {
+        "name": "FactGraph.get_producer",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactGraph",
+        "line_start": 338,
+        "line_end": 348
+      },
+      {
+        "name": "FactRef.matches_canonical",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactRef",
+        "line_start": 104,
+        "line_end": 114
+      },
+      {
+        "name": "FactRef.to_legacy",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactRef",
+        "line_start": 100,
+        "line_end": 102
+      },
+      {
+        "name": "FactRef.to_uri",
+        "file": "generation/fact_model.py",
+        "kind": "method",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.fact_model:FactRef",
+        "line_start": 96,
+        "line_end": 98
+      },
+      {
+        "name": "FactRegistry",
+        "file": "generation/fact_registry.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 13,
+        "line_end": 176
+      },
+      {
+        "name": "FactRegistry.build_from_directory",
+        "file": "generation/fact_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 109,
+        "line_end": 155
+      },
+      {
+        "name": "FactRegistry.find_all_producers",
+        "file": "generation/fact_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 69,
+        "line_end": 78
+      },
+      {
+        "name": "FactRegistry.find_producer",
+        "file": "generation/fact_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 56,
+        "line_end": 67
+      },
+      {
+        "name": "FactRegistry.get_facts_for_service",
+        "file": "generation/fact_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 80,
+        "line_end": 91
+      },
+      {
+        "name": "FactRegistry.register_output",
+        "file": "generation/fact_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 24,
+        "line_end": 54
+      },
+      {
+        "name": "FactRegistry.to_legacy_format",
+        "file": "generation/fact_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.fact_registry:FactRegistry",
+        "line_start": 93,
+        "line_end": 106
+      },
+      {
+        "name": "build_heuristic_outputs",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:build_heuristic_outputs",
+        "line_start": 528,
+        "line_end": 618
+      },
+      {
+        "name": "compute_raw_api_tokens",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:compute_raw_api_tokens",
+        "line_start": 488,
+        "line_end": 513
+      },
+      {
+        "name": "extract_enum_values",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:extract_enum_values",
+        "line_start": 160,
+        "line_end": 189
+      },
+      {
+        "name": "extract_request_fields",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:extract_request_fields",
+        "line_start": 197,
+        "line_end": 329
+      },
+      {
+        "name": "extract_response_fields",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:extract_response_fields",
+        "line_start": 337,
+        "line_end": 429
+      },
+      {
+        "name": "extract_schema_fields",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:extract_schema_fields",
+        "line_start": 30,
+        "line_end": 94
+      },
+      {
+        "name": "fields_from_schema",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:fields_from_schema",
+        "line_start": 437,
+        "line_end": 480
+      },
+      {
+        "name": "get_field_type",
+        "file": "generation/field_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.field_extractor:get_field_type",
+        "line_start": 102,
+        "line_end": 152
+      },
+      {
+        "name": "cli",
+        "file": "generation/generate_all.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.generate_all:cli",
+        "line_start": 392,
+        "line_end": 471
+      },
+      {
+        "name": "generate_all",
+        "file": "generation/generate_all.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.generate_all:generate_all",
+        "line_start": 306,
+        "line_end": 349
+      },
+      {
+        "name": "generate_service",
+        "file": "generation/generate_all.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.generate_all:generate_service",
+        "line_start": 58,
+        "line_end": 130
+      },
+      {
+        "name": "list_services",
+        "file": "generation/generate_all.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.generate_all:list_services",
+        "line_start": 357,
+        "line_end": 384
+      },
+      {
+        "name": "load_manifest",
+        "file": "generation/generate_all.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.generate_all:load_manifest",
+        "line_start": 26,
+        "line_end": 50
+      },
+      {
+        "name": "emit_field",
+        "file": "generation/output_writer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.output_writer:emit_field",
+        "line_start": 238,
+        "line_end": 286
+      },
+      {
+        "name": "emit_resource",
+        "file": "generation/output_writer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.output_writer:emit_resource",
+        "line_start": 51,
+        "line_end": 235
+      },
+      {
+        "name": "extract_aws_operation",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:extract_aws_operation",
+        "line_start": 111,
+        "line_end": 168
+      },
+      {
+        "name": "extract_k8s_metadata",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:extract_k8s_metadata",
+        "line_start": 221,
+        "line_end": 273
+      },
+      {
+        "name": "extract_k8s_operation",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:extract_k8s_operation",
+        "line_start": 276,
+        "line_end": 343
+      },
+      {
+        "name": "extract_operation_info",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:extract_operation_info",
+        "line_start": 351,
+        "line_end": 403
+      },
+      {
+        "name": "extract_parameters",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:extract_parameters",
+        "line_start": 406,
+        "line_end": 500
+      },
+      {
+        "name": "extract_rest_operation",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:extract_rest_operation",
+        "line_start": 28,
+        "line_end": 67
+      },
+      {
+        "name": "resource_to_kind",
+        "file": "generation/path_extractor.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.path_extractor:resource_to_kind",
+        "line_start": 176,
+        "line_end": 218
+      },
+      {
+        "name": "get_all_resource_names",
+        "file": "generation/polymorphic.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.polymorphic:get_all_resource_names",
+        "line_start": 27,
+        "line_end": 91
+      },
+      {
+        "name": "build_resource_name",
+        "file": "generation/resource_namer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.resource_namer:build_resource_name",
+        "line_start": 72,
+        "line_end": 107
+      },
+      {
+        "name": "detect_ambiguous_leaves",
+        "file": "generation/resource_namer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.resource_namer:detect_ambiguous_leaves",
+        "line_start": 33,
+        "line_end": 69
+      },
+      {
+        "name": "extract_known_resources",
+        "file": "generation/resource_namer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.resource_namer:extract_known_resources",
+        "line_start": 110,
+        "line_end": 155
+      },
+      {
+        "name": "strip_api_version_prefix",
+        "file": "generation/resource_namer.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.resource_namer:strip_api_version_prefix",
+        "line_start": 158,
+        "line_end": 187
+      },
+      {
+        "name": "create_context",
+        "file": "generation/spec_loader.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.spec_loader:create_context",
+        "line_start": 242,
+        "line_end": 285
+      },
+      {
+        "name": "derive_api_name",
+        "file": "generation/spec_loader.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.spec_loader:derive_api_name",
+        "line_start": 165,
+        "line_end": 180
+      },
+      {
+        "name": "detect_style",
+        "file": "generation/spec_loader.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.spec_loader:detect_style",
+        "line_start": 183,
+        "line_end": 202
+      },
+      {
+        "name": "load_spec",
+        "file": "generation/spec_loader.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "idi.generation.spec_loader:load_spec",
+        "line_start": 103,
+        "line_end": 158
+      },
+      {
+        "name": "camel_to_snake",
+        "file": "generation/utils.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.utils:camel_to_snake",
+        "line_start": 73,
+        "line_end": 83
+      },
+      {
+        "name": "clean_description",
+        "file": "generation/utils.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.utils:clean_description",
+        "line_start": 129,
+        "line_end": 159
+      },
+      {
+        "name": "compute_json_content_hash",
+        "file": "generation/utils.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.utils:compute_json_content_hash",
+        "line_start": 47,
+        "line_end": 68
+      },
+      {
+        "name": "fact_uri",
+        "file": "generation/utils.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.utils:fact_uri",
+        "line_start": 86,
+        "line_end": 103
+      },
+      {
+        "name": "normalize_for_hash",
+        "file": "generation/utils.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.utils:normalize_for_hash",
+        "line_start": 16,
+        "line_end": 44
+      },
+      {
+        "name": "sanitize_name",
+        "file": "generation/utils.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.utils:sanitize_name",
+        "line_start": 106,
+        "line_end": 126
+      }
+    ],
+    "cheat_sheet": [
+      {
+        "task": "Add new OpenAPI spec",
+        "description": "`catalog/manifest.yaml` + `idi/generation/adapters/` if new format"
+      },
+      {
+        "task": "Add dependency adapter",
+        "description": "`idi/generation/dep_adapters/` (new module) + register in `merge.py`"
+      },
+      {
+        "task": "Add CRD schema handler",
+        "description": "`idi/generation/crd/` (new module)"
+      },
+      {
+        "task": "Add schema family adapter",
+        "description": "`idi/generation/adapters/` (new module)"
+      },
+      {
+        "task": "Add Context7 enrichment",
+        "description": "`idi/enrichment/` (new module)"
+      }
+    ],
+    "task_map": [
+      {
+        "task": "Add new OpenAPI spec",
+        "files": [
+          "generation/adapters/"
+        ],
+        "description": "`catalog/manifest.yaml` + `idi/generation/adapters/` if new format"
+      },
+      {
+        "task": "Add dependency adapter",
+        "files": [
+          "generation/dep_adapters/",
+          "generation/dep_adapters/merge.py"
+        ],
+        "description": "`idi/generation/dep_adapters/` (new module) + register in `merge.py`"
+      },
+      {
+        "task": "Add CRD schema handler",
+        "files": [
+          "generation/crd/"
+        ],
+        "description": "`idi/generation/crd/` (new module)"
+      },
+      {
+        "task": "Add schema family adapter",
+        "files": [
+          "generation/adapters/"
+        ],
+        "description": "`idi/generation/adapters/` (new module)"
+      },
+      {
+        "task": "Add Context7 enrichment",
+        "files": [
+          "enrichment/"
+        ],
+        "description": "`idi/enrichment/` (new module)"
+      }
+    ]
+  }
+}

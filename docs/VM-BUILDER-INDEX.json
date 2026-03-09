@@ -1,0 +1,5730 @@
+{
+  "package": "vm_builder",
+  "generated_at": "2026-03-09",
+  "total_modules": 300,
+  "cgc_mode": true,
+  "git": {
+    "commit": "1b3af6b3482ffd49e291730fc1d41626ba25b04a",
+    "branch": "main",
+    "dirty": true
+  },
+  "surface_dirs": [
+    "core",
+    "api/routes",
+    "api",
+    "cli_atomic",
+    "commands"
+  ],
+  "sections": {
+    "modules": [
+      {
+        "path": "__init__.py",
+        "group": "Top-Level Modules",
+        "docstring": "vm-builder: CLI tool for BWS inventory management and VM deployment orchestration.",
+        "tags": []
+      },
+      {
+        "path": "api/__init__.py",
+        "group": "API — FastAPI Application",
+        "docstring": "FastAPI application for vm-builder web UI.",
+        "tags": []
+      },
+      {
+        "path": "api/app.py",
+        "group": "API — FastAPI Application",
+        "docstring": "FastAPI application factory.",
+        "tags": [
+          "entrypoint"
+        ]
+      },
+      {
+        "path": "api/deps.py",
+        "group": "API — FastAPI Application",
+        "docstring": "Shared dependencies for API routes.",
+        "tags": [
+          "io_boundary"
+        ]
+      },
+      {
+        "path": "api/middleware.py",
+        "group": "API — FastAPI Application",
+        "docstring": "FastAPI audit middleware.",
+        "tags": []
+      },
+      {
+        "path": "api/routes/__init__.py",
+        "group": "api/routes/",
+        "docstring": "API route modules.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/health.py",
+        "group": "api/routes/",
+        "docstring": "Health check endpoint.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/hypervisor.py",
+        "group": "api/routes/",
+        "docstring": "Hypervisor API routes.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/init.py",
+        "group": "api/routes/",
+        "docstring": "Init (shared secrets) API routes.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/registry.py",
+        "group": "api/routes/",
+        "docstring": "App registry API routes.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/schema_routes.py",
+        "group": "api/routes/",
+        "docstring": "Schema and validation API routes.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/storage.py",
+        "group": "api/routes/",
+        "docstring": "Storage verification API routes -- remote NFS/SMB detection and browsing.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/vm.py",
+        "group": "api/routes/",
+        "docstring": "VM management API routes.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/vm_apps.py",
+        "group": "api/routes/",
+        "docstring": "VM app management API routes -- install, list, uninstall apps on running VMs.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/vm_config.py",
+        "group": "api/routes/",
+        "docstring": "Per-app config lifecycle API routes.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/vm_health.py",
+        "group": "api/routes/",
+        "docstring": "VM health check API routes -- Tailscale-based online/offline status.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "api/routes/webhook.py",
+        "group": "api/routes/",
+        "docstring": "GitHub webhook endpoint for auto-refresh on push.",
+        "tags": [
+          "api_route"
+        ]
+      },
+      {
+        "path": "bws.py",
+        "group": "Top-Level Modules",
+        "docstring": "BWS (Bitwarden Secrets Manager) CLI wrapper.",
+        "tags": [
+          "io_boundary"
+        ]
+      },
+      {
+        "path": "bws_parts/__init__.py",
+        "group": "BWS Parts",
+        "docstring": "Atomic function modules for BWS CLI wrapper operations.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/cache.py",
+        "group": "BWS Parts",
+        "docstring": "In-memory TTL cache for BWS secrets.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/check_prerequisites.py",
+        "group": "BWS Parts",
+        "docstring": "Prerequisite checks for BWS CLI access.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/create_secret.py",
+        "group": "BWS Parts",
+        "docstring": "Create-secret operation for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/delete_secret.py",
+        "group": "BWS Parts",
+        "docstring": "Delete-secret operation for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/edit_secret.py",
+        "group": "BWS Parts",
+        "docstring": "Edit-secret operation for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/get_secret.py",
+        "group": "BWS Parts",
+        "docstring": "Get-secret-by-key operation for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/get_secret_by_id.py",
+        "group": "BWS Parts",
+        "docstring": "Get-secret-by-id operation for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/list_secrets.py",
+        "group": "BWS Parts",
+        "docstring": "List-secrets operation for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "bws_parts/secret_exists.py",
+        "group": "BWS Parts",
+        "docstring": "Secret-existence check for BWS CLI wrapper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "cli.py",
+        "group": "Top-Level Modules",
+        "docstring": "Thin vm-builder CLI entrypoint.",
+        "tags": []
+      },
+      {
+        "path": "cli_atomic/__init__.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Atomic CLI registration modules for vm-builder.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/group.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Root Click group for vm-builder CLI.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/health_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for the ``health`` CLI command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/hypervisor_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for ``hypervisor`` CLI command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/ingress_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for ``ingress`` CLI command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/init_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for the ``init`` CLI command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/registry_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for ``registry`` CLI command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/scaffold_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Register scaffold command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/schema_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for ``schema`` CLI command group.",
+        "tags": [
+          "cli_wrapper",
+          "model"
+        ]
+      },
+      {
+        "path": "cli_atomic/storage_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for ``storage`` CLI command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/validate_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for the ``validate`` CLI command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "cli_atomic/vm_command.py",
+        "group": "CLI Atomic — Command Registration",
+        "docstring": "Registration for ``vm`` CLI command group.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/__init__.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Command modules for vm-builder CLI.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/health.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Health command wrapper.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/health_cmd/__init__.py",
+        "group": "commands/health_cmd/",
+        "docstring": "Atomic health command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/health_cmd/run.py",
+        "group": "commands/health_cmd/",
+        "docstring": "Health command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/hypervisor.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Hypervisor command wrapper.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/hypervisor_cmd/__init__.py",
+        "group": "commands/hypervisor_cmd/",
+        "docstring": "Atomic hypervisor command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/hypervisor_cmd/list_show.py",
+        "group": "commands/hypervisor_cmd/",
+        "docstring": "Hypervisor list and show command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/hypervisor_cmd/prompts.py",
+        "group": "commands/hypervisor_cmd/",
+        "docstring": "Prompt resolution for hypervisor bootstrap command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/hypervisor_cmd/run.py",
+        "group": "commands/hypervisor_cmd/",
+        "docstring": "Main hypervisor bootstrap command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/ingress.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Ingress command wrappers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/ingress_cmd/__init__.py",
+        "group": "commands/ingress_cmd/",
+        "docstring": "Atomic ingress command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/ingress_cmd/run.py",
+        "group": "commands/ingress_cmd/",
+        "docstring": "Ingress command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Init command wrapper.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init_cmd/__init__.py",
+        "group": "commands/init_cmd/",
+        "docstring": "Atomic init command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init_cmd/config.py",
+        "group": "commands/init_cmd/",
+        "docstring": "Configuration loading for init command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init_cmd/output.py",
+        "group": "commands/init_cmd/",
+        "docstring": "Output helpers for init command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init_cmd/prompts.py",
+        "group": "commands/init_cmd/",
+        "docstring": "Interactive prompts for init command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init_cmd/run.py",
+        "group": "commands/init_cmd/",
+        "docstring": "Main init command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/init_cmd/status.py",
+        "group": "commands/init_cmd/",
+        "docstring": "Init status command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/registry.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Registry command wrappers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/registry_cmd/__init__.py",
+        "group": "commands/registry_cmd/",
+        "docstring": "Atomic registry command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/registry_cmd/deps.py",
+        "group": "commands/registry_cmd/",
+        "docstring": "Registry command handlers -- dependency and lifecycle operations.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/registry_cmd/run.py",
+        "group": "commands/registry_cmd/",
+        "docstring": "Registry command handlers -- listing and query operations.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/schema.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Schema command wrappers.",
+        "tags": [
+          "cli_wrapper",
+          "model"
+        ]
+      },
+      {
+        "path": "commands/schema_cmd/__init__.py",
+        "group": "commands/schema_cmd/",
+        "docstring": "Atomic schema command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/schema_cmd/run.py",
+        "group": "commands/schema_cmd/",
+        "docstring": "Schema command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/storage.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Storage command wrappers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/storage_cmd/__init__.py",
+        "group": "commands/storage_cmd/",
+        "docstring": "Atomic storage command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/storage_cmd/run.py",
+        "group": "commands/storage_cmd/",
+        "docstring": "Storage command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/validate.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "Validate command wrapper.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/validate_cmd/__init__.py",
+        "group": "commands/validate_cmd/",
+        "docstring": "Atomic validate command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/validate_cmd/output.py",
+        "group": "commands/validate_cmd/",
+        "docstring": "Output helpers for validate command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/validate_cmd/run.py",
+        "group": "commands/validate_cmd/",
+        "docstring": "Main validate command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm.py",
+        "group": "Commands — CLI Command Implementation",
+        "docstring": "VM command wrappers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/__init__.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Atomic VM command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/apply_commands.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "CLI commands for live config preview and apply.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/apps.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "App management command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/common.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Shared helpers for VM CLI command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/config_commands.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "CLI commands for per-app config management.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/create.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Create VM inventory command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/create_request.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Request construction utilities for VM create command.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/delete.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Delete VM inventory command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/deploy.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Deploy VM command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/destroy.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Destroy VM command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/health.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "VM health status command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/list.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "List VM inventories command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/output.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Output formatting helpers for VM CLI command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/phase.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Phase trigger command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/regenerate_keypair.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Regenerate SSH keypair command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/show.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Show VM inventory command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/update.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "Update VM inventory command handler.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "commands/vm_cmd/workers.py",
+        "group": "commands/vm_cmd/",
+        "docstring": "K3s worker node command handlers.",
+        "tags": [
+          "cli_wrapper"
+        ]
+      },
+      {
+        "path": "core/__init__.py",
+        "group": "Core — Service Layer",
+        "docstring": "Core service layer -- pure business logic, no Click, no HTTP.",
+        "tags": []
+      },
+      {
+        "path": "core/app_install_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "App install service -- install/configure apps on running VMs.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/compute_install_delta.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Install delta computation for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/get_latest_run_url.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "GitHub run URL helper for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/install_apps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App install orchestrator for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/list_installed_apps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Installed-app listing for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/trigger_config_workflow.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Config workflow trigger for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/trigger_install_workflow.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Install workflow trigger for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/uninstall_app.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App uninstall operation for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/app_install_service_parts/update_inventory_apps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Inventory app-state updater for AppInstallService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit.py",
+        "group": "Core — Service Layer",
+        "docstring": "Audit logger with automatic secrets redaction for vm-builder.",
+        "tags": []
+      },
+      {
+        "path": "core/audit_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic function modules for audit logging.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/check_allowed_write_path.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "BWS write-path guard for audit-integrated secret writes.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants and regex patterns for audit redaction.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/init_logger.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Initializer method for AuditLogger.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/log.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Core log write method for AuditLogger.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/log_api_request.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "API-request convenience logger method.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/log_bws_write.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "BWS-write convenience logger method.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/log_gh_trigger.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "GitHub workflow-trigger convenience logger method.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/log_httpx_call.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "HTTP-call convenience logger method.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/redact_obj.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Object-level redaction helper for audit logging.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/audit_parts/redact_secrets.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Secret redaction logic for audit logging.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Config service -- per-app config lifecycle (get, update, reset).",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Config service parts — atomic modules for per-app config lifecycle.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/apply_live.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Apply rendered config to a live VM via kubectl over SSH.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/get_all_overrides.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "List all apps with override counts for a VM.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/get_app_config.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Get full config state for an app: config, overrides, defaults.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/preview_changes.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Preview config changes by rendering J2 templates and diffing against k8s-base.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/reset_field.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Reset a single config field to its template default.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/trigger_live_update.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Trigger the live-config-update workflow for a single app.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/config_service_parts/update_field.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Update a single config field for an app and track as override.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/errors.py",
+        "group": "Core — Service Layer",
+        "docstring": "Domain error classes for the VM builder.",
+        "tags": []
+      },
+      {
+        "path": "core/health_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Health service -- Tailscale-based VM health checks.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/health_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for HealthService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/health_service_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants for HealthService operations.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/health_service_parts/get_tailscale_access_token.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "OAuth token exchange for Tailscale API calls.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/health_service_parts/get_tailscale_devices.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Tailscale device list fetch for HealthService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/health_service_parts/get_vm_health.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Top-level health orchestration for HealthService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/health_service_parts/match_devices_to_vms.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Device-to-VM matching for HealthService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Hypervisor service -- bootstrap script generation. Pure logic, no Click.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for HypervisorService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/check_prerequisites.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Prerequisite checks for HypervisorService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants for HypervisorService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/create_github_runner_token.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "GitHub runner registration token generation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/create_hypervisor_inventory.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor inventory create/update operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/create_tailscale_auth_key.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Tailscale auth key generation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/generate_bootstrap_script.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor bootstrap script generation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/get_hypervisor.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor read operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/get_tailscale_access_token.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Tailscale OAuth token exchange.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/list_hypervisors.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor list operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/trigger_phase0.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor phase0 workflow dispatch operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/hypervisor_service_parts/write_bootstrap_script.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Bootstrap script file writer.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/init_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Init service -- shared secrets management.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/init_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for InitService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/init_service_parts/check_prerequisites.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Prerequisite checks for InitService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/init_service_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants for InitService operations.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/init_service_parts/get_existing_secrets.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Existing-secret status checks for InitService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/init_service_parts/write_secrets.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Shared-secret write orchestration for InitService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models.py",
+        "group": "Core — Service Layer",
+        "docstring": "Pydantic models shared by CLI and API layers.",
+        "tags": []
+      },
+      {
+        "path": "core/models_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic model modules for vm_builder.core.models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/app_batch.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Batch app-installation models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/app_workflows.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Single-app install/configure workflow models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/config.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Config lifecycle models for per-app _config and _overrides.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/hypervisor.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor-related models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/ingress.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Ingress validation models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/network_shares.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Network share and inventory-storage models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/prerequisites.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Prerequisite-check models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/refresh.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry refresh models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/secrets.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Shared-secret and secret-write models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/storage.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Storage verification models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/models_parts/vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM lifecycle and inventory models.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/refresh_coordinator.py",
+        "group": "Core — Service Layer",
+        "docstring": "Refresh coordinator -- serializes repo pull + registry reload with debounce.",
+        "tags": []
+      },
+      {
+        "path": "core/refresh_poller.py",
+        "group": "Core — Service Layer",
+        "docstring": "Polling background task for auto-refresh when webhooks are unavailable.",
+        "tags": []
+      },
+      {
+        "path": "core/registry_generator.py",
+        "group": "Core — Service Layer",
+        "docstring": "Registry generator -- scans app directories and produces registry JSON.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic function modules for registry_generator.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/build_app_record.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App-record construction for discovered app metadata.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/build_provides_map.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Capability-map construction for registry generation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants used by registry generation functions.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/discover_apps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App discovery from templates directory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/extract_playbook_metadata.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Playbook metadata extraction helper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/find_all_playbooks.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "All-playbook discovery for an app directory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/find_config_playbooks.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Config-playbook discovery for an app directory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/find_entry_playbook.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Entry-playbook discovery for an app directory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/find_install_playbooks.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Install-playbook discovery for an app directory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/generate_registry.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Top-level registry document generation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/relative_template_path.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Relative-path helper with optional prefix for registry paths.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/resolve_dependencies.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Dependency resolution from capabilities to app IDs.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/topological_sort.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Topological sort helper for app install order.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_generator_parts/write_registry.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry JSON write helper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Registry service -- app registry queries. Pure logic, reads JSON file.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/check_installable.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Installability checks for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/derive_variables.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Variable derivation helpers for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/enrich_app.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App enrichment for RegistryService responses.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/generate_registry.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry generation flow for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/get_app.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Single-app lookup for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/humanize.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Field-label helper for RegistryService variable derivation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/list_apps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App listing for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/load_registry.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry loader/cache for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/refresh_registry.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry refresh flow for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/registry_path.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry-path selector for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/reload_registry.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry cache reset for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/resolve_deps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Dependency resolution for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/registry_service_parts/set_repo_path.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Repository-path setter for RegistryService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Repo service -- clone/pull enterprise repo at startup.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/clone_repo.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Clone operation for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/ensure_repo.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Repo availability/sync entrypoint for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/get_registry_path.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Registry path lookup for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/get_templates_dir.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Templates-directory lookup for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/models.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Data models for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/repo_service_parts/pull_repo.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Pull operation for RepoService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Scaffold pipeline components for app onboarding.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/compose_parser.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Extract wiring edges from Docker Compose files.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/compose_sources.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Fetch Docker Compose files from GitHub repos using raw content API.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/config_generator.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Generate Phase 4 config playbooks from Compose wiring edges.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/helm_downloader.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Download Helm charts and render via helm template.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/j2_converter.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Convert K8s manifests to Jinja2 templates with BWS variable placeholders.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/kustomize_generator.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Generate kustomization.yaml from classified workload manifests.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/manifest_classifier.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Classify K8s manifests by Kind and assign golden-master numeric prefixes.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/metadata_generator.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Generate playbook metadata headers and .idi-meta.yaml sidecar stubs.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/playbook_generator.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Generate golden-master-compliant install/verify/uninstall playbooks.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/pushsecret_generator.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Detect secrets in manifests and generate PushSecret CRD templates.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_parts/statefulset_converter.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Convert Helm Deployment resources to StatefulSets.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/scaffold_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Scaffold service -- orchestrates all scaffold_parts into a single pipeline.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/storage_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Remote storage detection and verification via SSH.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/browse_path.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Path browsing operation for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/bws_get_network_shares.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "BWS network-shares read helper for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/detect_mounts.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Mount detection operation for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/ensure_mount.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Ensure a network share is mounted on the hypervisor before browsing.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/list_network_shares.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Network-shares list operation for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/list_remote_contents.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Remote contents helper for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/resolve_credentials.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Network-share credentials resolver for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/save_network_shares.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Network-shares save operation for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/ssh_cmd.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "SSH command helper for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/verify_nfs.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "NFS verification operation for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/verify_smb.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "SMB verification operation for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/storage_service_parts/verify_storage.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Storage verification dispatcher for StorageService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "Template service -- Jinja2 variable extraction from app templates.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic function modules for template_service.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants used across template_service atomic functions.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/discover_app_templates.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Template discovery for a single app directory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/enrich_with_bws_state.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "BWS-secret enrichment for extracted template variables.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/extract_app_variables.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Merged Jinja2 variable extraction for an app.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/extract_defaults.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Default-value extraction helper for Jinja2 templates.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/extract_jinja2_variables.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Single-template Jinja2 variable extraction.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/humanize.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Humanization helper for template variable labels.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/is_ansible_builtin.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Ansible built-in variable detection helper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/template_service_parts/scan_playbook_template_refs.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Playbook scan helper for template src references.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service.py",
+        "group": "Core — Service Layer",
+        "docstring": "VM service -- inventory CRUD and deployment. Pure logic, no Click.",
+        "tags": [
+          "service"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Atomic operation modules for VmService.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/auto_detect_hypervisor.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Hypervisor auto-detection for VM operations.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/build_inventory.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Inventory building for VM service.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/check_prerequisites.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Prerequisite checks for VM service.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/configure_app.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App configure workflow operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/constants.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Constants for VM service operations.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/create_vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM create operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/create_worker.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "K3s worker creation operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/delete_vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM delete operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/deploy_vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM deploy operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/destroy_vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM destroy workflow trigger.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/drain_k3s_node.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "K3s worker drain helper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/fetch_latest_run.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "GitHub workflow run lookup helper.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/generate_ssh_keypair.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "SSH key generation for VM service.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/get_vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM read operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/inject_platform_deps.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Auto-inject platform dependencies (traefik, authentik) based on registry metadata.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/install_app.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "App install workflow operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/list_vms.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM list operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/next_worker_index.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Worker index helper for VM service.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/persist_cluster_token.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Persist K3s cluster token operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/populate_config.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Build _config and _overrides dicts for BWS inventory.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/regenerate_vm_keypair.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM keypair regeneration operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/trigger_phase3.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Phase 3 (Install Apps) workflow trigger.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/trigger_phase4.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Phase 4 (Configure Apps) workflow trigger.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/trigger_phase5.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Phase 5 (Ingress + SSO) workflow trigger.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/update_vm.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "VM update operation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/vm_service_parts/validate_ingress.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Ingress validation helper for VM service.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/webhook_verify.py",
+        "group": "Core — Service Layer",
+        "docstring": "GitHub webhook HMAC-SHA256 signature verification.",
+        "tags": []
+      },
+      {
+        "path": "core/wiring_compiler_parts/__init__.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Wiring compiler — deterministic Phase 4 playbook generation from OpenAPI specs.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/wiring_compiler_parts/exceptions.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Stub playbook and exception sidecar generation for failed wiring edges.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/wiring_compiler_parts/repair.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "LLM repair loop for wiring playbooks that fail validation.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/wiring_compiler_parts/sidecar.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Sidecar generation for .wiring-template.json and .wiring-exception.json files.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/wiring_compiler_parts/validator.py",
+        "group": "Core Atomic Parts — Service Implementations",
+        "docstring": "Tier 1 and Tier 2 validation for wiring-compiler-generated playbooks.",
+        "tags": [
+          "atomic_part"
+        ]
+      },
+      {
+        "path": "core/workflow_names.py",
+        "group": "Core — Service Layer",
+        "docstring": "Canonical GitHub Actions workflow name registry.",
+        "tags": []
+      },
+      {
+        "path": "schema.py",
+        "group": "Top-Level Modules",
+        "docstring": "Inventory schema v3.1/v3.2/v3.3 definitions and validation.",
+        "tags": [
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/__init__.py",
+        "group": "Schema Parts",
+        "docstring": "Atomic function modules for schema validation utilities.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/constants.py",
+        "group": "Schema Parts",
+        "docstring": "Shared schema constants and resource preset tables.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/get_resource_defaults.py",
+        "group": "Schema Parts",
+        "docstring": "Resource defaults accessor by app category.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/get_size_preset.py",
+        "group": "Schema Parts",
+        "docstring": "Size preset accessor for VM hardware defaults.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/inventory_schema.py",
+        "group": "Schema Parts",
+        "docstring": "TypedDict definitions for VM inventory schemas.",
+        "tags": [
+          "atomic_part",
+          "model",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/migrate_inventory.py",
+        "group": "Schema Parts",
+        "docstring": "Schema migration helper for inventory documents.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/parse_vm_name.py",
+        "group": "Schema Parts",
+        "docstring": "VM name parsing and component validation.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "schema_parts/validate_inventory.py",
+        "group": "Schema Parts",
+        "docstring": "Inventory validation across supported schema versions.",
+        "tags": [
+          "atomic_part",
+          "model"
+        ]
+      },
+      {
+        "path": "template_sidecars/__init__.py",
+        "group": "Template Sidecars",
+        "docstring": "Template sidecar generation package for VM Builder templates.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/app.py",
+        "group": "Template Sidecars",
+        "docstring": "App-level sidecar generation.",
+        "tags": [
+          "entrypoint"
+        ]
+      },
+      {
+        "path": "template_sidecars/cli.py",
+        "group": "Template Sidecars",
+        "docstring": "CLI entry point for template sidecar generation.",
+        "tags": [
+          "entrypoint"
+        ]
+      },
+      {
+        "path": "template_sidecars/constants.py",
+        "group": "Template Sidecars",
+        "docstring": "Constants for VM Builder template sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/detect_template.py",
+        "group": "Template Sidecars",
+        "docstring": "Template reference detection for template sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/detect_uri.py",
+        "group": "Template Sidecars",
+        "docstring": "URI call and cross-service dependency detection for sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/detect_wiring.py",
+        "group": "Template Sidecars",
+        "docstring": "BWS wiring detection for template sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/metadata.py",
+        "group": "Template Sidecars",
+        "docstring": "Playbook metadata extraction for template sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/orchestrator.py",
+        "group": "Template Sidecars",
+        "docstring": "Batch orchestration for template sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/phase.py",
+        "group": "Template Sidecars",
+        "docstring": "Phase directory traversal for template sidecar generation.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/sidecar.py",
+        "group": "Template Sidecars",
+        "docstring": "Phase-level sidecar payload construction.",
+        "tags": []
+      },
+      {
+        "path": "template_sidecars/summarize.py",
+        "group": "Template Sidecars",
+        "docstring": "File summarization helpers for template sidecar entries.",
+        "tags": []
+      }
+    ],
+    "entry_points": [
+      {
+        "name": "vm-builder",
+        "type": "cli",
+        "module": "vm_builder.cli:main",
+        "file": "cli.py"
+      },
+      {
+        "name": "vm_builder.api.app:app",
+        "type": "asgi",
+        "module": "vm_builder.api.app",
+        "file": "api/app.py",
+        "framework": "FastAPI"
+      }
+    ],
+    "symbols": [
+      {
+        "name": "create_app",
+        "file": "api/app.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "vm_builder.api.app:create_app",
+        "line_start": 144,
+        "line_end": 234
+      },
+      {
+        "name": "lifespan",
+        "file": "api/app.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "vm_builder.api.app:lifespan",
+        "line_start": 71,
+        "line_end": 141
+      },
+      {
+        "name": "load_bws_config",
+        "file": "api/app.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "vm_builder.api.app:load_bws_config",
+        "line_start": 37,
+        "line_end": 53
+      },
+      {
+        "name": "reload_bws_config",
+        "file": "api/app.py",
+        "kind": "function",
+        "tags": [
+          "entrypoint"
+        ],
+        "import_path": "vm_builder.api.app:reload_bws_config",
+        "line_start": 56,
+        "line_end": 67
+      },
+      {
+        "name": "get_app_install_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_app_install_service",
+        "line_start": 148,
+        "line_end": 151
+      },
+      {
+        "name": "get_audit_logger",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_audit_logger",
+        "line_start": 142,
+        "line_end": 144
+      },
+      {
+        "name": "get_health_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_health_service",
+        "line_start": 126,
+        "line_end": 127
+      },
+      {
+        "name": "get_hypervisor_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_hypervisor_service",
+        "line_start": 32,
+        "line_end": 33
+      },
+      {
+        "name": "get_init_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_init_service",
+        "line_start": 27,
+        "line_end": 28
+      },
+      {
+        "name": "get_refresh_coordinator",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_refresh_coordinator",
+        "line_start": 131,
+        "line_end": 138
+      },
+      {
+        "name": "get_registry_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_registry_service",
+        "line_start": 62,
+        "line_end": 122
+      },
+      {
+        "name": "get_repo_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_repo_service",
+        "line_start": 42,
+        "line_end": 47
+      },
+      {
+        "name": "get_repo_status",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_repo_status",
+        "line_start": 50,
+        "line_end": 52
+      },
+      {
+        "name": "get_storage_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_storage_service",
+        "line_start": 155,
+        "line_end": 158
+      },
+      {
+        "name": "get_vm_service",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:get_vm_service",
+        "line_start": 37,
+        "line_end": 38
+      },
+      {
+        "name": "set_repo_status",
+        "file": "api/deps.py",
+        "kind": "function",
+        "tags": [
+          "io_boundary"
+        ],
+        "import_path": "vm_builder.api.deps:set_repo_status",
+        "line_start": 55,
+        "line_end": 58
+      },
+      {
+        "name": "AuditMiddleware",
+        "file": "api/middleware.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.api.middleware:AuditMiddleware",
+        "line_start": 29,
+        "line_end": 119
+      },
+      {
+        "name": "AuditMiddleware.dispatch",
+        "file": "api/middleware.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.api.middleware:AuditMiddleware",
+        "line_start": 41,
+        "line_end": 119
+      },
+      {
+        "name": "health_check",
+        "file": "api/routes/health.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.health:health_check",
+        "line_start": 13,
+        "line_end": 70
+      },
+      {
+        "name": "generate_bootstrap",
+        "file": "api/routes/hypervisor.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.hypervisor:generate_bootstrap",
+        "line_start": 31,
+        "line_end": 48
+      },
+      {
+        "name": "get_hypervisor",
+        "file": "api/routes/hypervisor.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.hypervisor:get_hypervisor",
+        "line_start": 21,
+        "line_end": 27
+      },
+      {
+        "name": "list_hypervisors",
+        "file": "api/routes/hypervisor.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.hypervisor:list_hypervisors",
+        "line_start": 14,
+        "line_end": 17
+      },
+      {
+        "name": "trigger_phase0",
+        "file": "api/routes/hypervisor.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.hypervisor:trigger_phase0",
+        "line_start": 52,
+        "line_end": 72
+      },
+      {
+        "name": "InitSecretsRequest",
+        "file": "api/routes/init.py",
+        "kind": "class",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.init:InitSecretsRequest",
+        "line_start": 14,
+        "line_end": 23
+      },
+      {
+        "name": "create_shared_secrets",
+        "file": "api/routes/init.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.init:create_shared_secrets",
+        "line_start": 34,
+        "line_end": 47
+      },
+      {
+        "name": "get_init_status",
+        "file": "api/routes/init.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.init:get_init_status",
+        "line_start": 27,
+        "line_end": 30
+      },
+      {
+        "name": "ResolveRequest",
+        "file": "api/routes/registry.py",
+        "kind": "class",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:ResolveRequest",
+        "line_start": 14,
+        "line_end": 15
+      },
+      {
+        "name": "check_installable",
+        "file": "api/routes/registry.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:check_installable",
+        "line_start": 110,
+        "line_end": 122
+      },
+      {
+        "name": "generate_registry",
+        "file": "api/routes/registry.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:generate_registry",
+        "line_start": 44,
+        "line_end": 52
+      },
+      {
+        "name": "get_app",
+        "file": "api/routes/registry.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:get_app",
+        "line_start": 25,
+        "line_end": 30
+      },
+      {
+        "name": "list_apps",
+        "file": "api/routes/registry.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:list_apps",
+        "line_start": 19,
+        "line_end": 21
+      },
+      {
+        "name": "refresh_registry",
+        "file": "api/routes/registry.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:refresh_registry",
+        "line_start": 56,
+        "line_end": 106
+      },
+      {
+        "name": "resolve_deps",
+        "file": "api/routes/registry.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.registry:resolve_deps",
+        "line_start": 34,
+        "line_end": 40
+      },
+      {
+        "name": "ValidateNameRequest",
+        "file": "api/routes/schema_routes.py",
+        "kind": "class",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.schema_routes:ValidateNameRequest",
+        "line_start": 16,
+        "line_end": 17
+      },
+      {
+        "name": "get_platforms",
+        "file": "api/routes/schema_routes.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.schema_routes:get_platforms",
+        "line_start": 37,
+        "line_end": 44
+      },
+      {
+        "name": "get_resource_defaults",
+        "file": "api/routes/schema_routes.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.schema_routes:get_resource_defaults",
+        "line_start": 58,
+        "line_end": 80
+      },
+      {
+        "name": "get_sizes",
+        "file": "api/routes/schema_routes.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.schema_routes:get_sizes",
+        "line_start": 21,
+        "line_end": 33
+      },
+      {
+        "name": "validate_name",
+        "file": "api/routes/schema_routes.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.schema_routes:validate_name",
+        "line_start": 48,
+        "line_end": 54
+      },
+      {
+        "name": "browse_directory",
+        "file": "api/routes/storage.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.storage:browse_directory",
+        "line_start": 38,
+        "line_end": 64
+      },
+      {
+        "name": "get_network_shares",
+        "file": "api/routes/storage.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.storage:get_network_shares",
+        "line_start": 84,
+        "line_end": 98
+      },
+      {
+        "name": "list_mounts",
+        "file": "api/routes/storage.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.storage:list_mounts",
+        "line_start": 23,
+        "line_end": 34
+      },
+      {
+        "name": "save_network_shares",
+        "file": "api/routes/storage.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.storage:save_network_shares",
+        "line_start": 102,
+        "line_end": 117
+      },
+      {
+        "name": "verify_storage",
+        "file": "api/routes/storage.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.storage:verify_storage",
+        "line_start": 68,
+        "line_end": 80
+      },
+      {
+        "name": "configure_app",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:configure_app",
+        "line_start": 165,
+        "line_end": 187
+      },
+      {
+        "name": "create_vm",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:create_vm",
+        "line_start": 41,
+        "line_end": 50
+      },
+      {
+        "name": "create_worker",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:create_worker",
+        "line_start": 191,
+        "line_end": 200
+      },
+      {
+        "name": "delete_vm",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:delete_vm",
+        "line_start": 54,
+        "line_end": 57
+      },
+      {
+        "name": "deploy_vm",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:deploy_vm",
+        "line_start": 75,
+        "line_end": 78
+      },
+      {
+        "name": "destroy_vm",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:destroy_vm",
+        "line_start": 82,
+        "line_end": 95
+      },
+      {
+        "name": "get_tailnet_name",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:get_tailnet_name",
+        "line_start": 236,
+        "line_end": 255
+      },
+      {
+        "name": "get_vm",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:get_vm",
+        "line_start": 34,
+        "line_end": 37
+      },
+      {
+        "name": "install_app",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:install_app",
+        "line_start": 135,
+        "line_end": 161
+      },
+      {
+        "name": "list_vms",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:list_vms",
+        "line_start": 27,
+        "line_end": 30
+      },
+      {
+        "name": "list_workers",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:list_workers",
+        "line_start": 204,
+        "line_end": 212
+      },
+      {
+        "name": "persist_cluster_token",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:persist_cluster_token",
+        "line_start": 216,
+        "line_end": 220
+      },
+      {
+        "name": "regenerate_keypair",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:regenerate_keypair",
+        "line_start": 68,
+        "line_end": 71
+      },
+      {
+        "name": "trigger_configure_apps",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:trigger_configure_apps",
+        "line_start": 111,
+        "line_end": 119
+      },
+      {
+        "name": "trigger_ingress_sso",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:trigger_ingress_sso",
+        "line_start": 123,
+        "line_end": 131
+      },
+      {
+        "name": "trigger_install_apps",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:trigger_install_apps",
+        "line_start": 99,
+        "line_end": 107
+      },
+      {
+        "name": "update_vm",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:update_vm",
+        "line_start": 61,
+        "line_end": 64
+      },
+      {
+        "name": "validate_ingress",
+        "file": "api/routes/vm.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm:validate_ingress",
+        "line_start": 224,
+        "line_end": 232
+      },
+      {
+        "name": "install_apps",
+        "file": "api/routes/vm_apps.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_apps:install_apps",
+        "line_start": 23,
+        "line_end": 32
+      },
+      {
+        "name": "list_installed_apps",
+        "file": "api/routes/vm_apps.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_apps:list_installed_apps",
+        "line_start": 15,
+        "line_end": 19
+      },
+      {
+        "name": "uninstall_app",
+        "file": "api/routes/vm_apps.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_apps:uninstall_app",
+        "line_start": 36,
+        "line_end": 46
+      },
+      {
+        "name": "apply_config_live",
+        "file": "api/routes/vm_config.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_config:apply_config_live",
+        "line_start": 84,
+        "line_end": 93
+      },
+      {
+        "name": "get_app_config",
+        "file": "api/routes/vm_config.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_config:get_app_config",
+        "line_start": 43,
+        "line_end": 49
+      },
+      {
+        "name": "preview_config_changes",
+        "file": "api/routes/vm_config.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_config:preview_config_changes",
+        "line_start": 75,
+        "line_end": 80
+      },
+      {
+        "name": "reset_config_field",
+        "file": "api/routes/vm_config.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_config:reset_config_field",
+        "line_start": 66,
+        "line_end": 71
+      },
+      {
+        "name": "update_config_field",
+        "file": "api/routes/vm_config.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_config:update_config_field",
+        "line_start": 53,
+        "line_end": 62
+      },
+      {
+        "name": "get_vm_health",
+        "file": "api/routes/vm_health.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.vm_health:get_vm_health",
+        "line_start": 13,
+        "line_end": 31
+      },
+      {
+        "name": "get_refresh_coordinator",
+        "file": "api/routes/webhook.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.webhook:get_refresh_coordinator",
+        "line_start": 17,
+        "line_end": 23
+      },
+      {
+        "name": "github_webhook",
+        "file": "api/routes/webhook.py",
+        "kind": "function",
+        "tags": [
+          "api_route"
+        ],
+        "import_path": "vm_builder.api.routes.webhook:github_webhook",
+        "line_start": 27,
+        "line_end": 83
+      },
+      {
+        "name": "main",
+        "file": "cli_atomic/group.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.group:main",
+        "line_start": 13,
+        "line_end": 15
+      },
+      {
+        "name": "register_health_command",
+        "file": "cli_atomic/health_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.health_command:register_health_command",
+        "line_start": 10,
+        "line_end": 16
+      },
+      {
+        "name": "register_hypervisor_group",
+        "file": "cli_atomic/hypervisor_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.hypervisor_command:register_hypervisor_group",
+        "line_start": 14,
+        "line_end": 59
+      },
+      {
+        "name": "register_ingress_group",
+        "file": "cli_atomic/ingress_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.ingress_command:register_ingress_group",
+        "line_start": 10,
+        "line_end": 31
+      },
+      {
+        "name": "register_init_group",
+        "file": "cli_atomic/init_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.init_command:register_init_group",
+        "line_start": 10,
+        "line_end": 30
+      },
+      {
+        "name": "register_registry_group",
+        "file": "cli_atomic/registry_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.registry_command:register_registry_group",
+        "line_start": 20,
+        "line_end": 96
+      },
+      {
+        "name": "register_scaffold_group",
+        "file": "cli_atomic/scaffold_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.scaffold_command:register_scaffold_group",
+        "line_start": 10,
+        "line_end": 44
+      },
+      {
+        "name": "register_schema_group",
+        "file": "cli_atomic/schema_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper",
+          "model"
+        ],
+        "import_path": "vm_builder.cli_atomic.schema_command:register_schema_group",
+        "line_start": 15,
+        "line_end": 43
+      },
+      {
+        "name": "register_storage_group",
+        "file": "cli_atomic/storage_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.storage_command:register_storage_group",
+        "line_start": 10,
+        "line_end": 41
+      },
+      {
+        "name": "register_validate_command",
+        "file": "cli_atomic/validate_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.validate_command:register_validate_command",
+        "line_start": 10,
+        "line_end": 17
+      },
+      {
+        "name": "register_vm_group",
+        "file": "cli_atomic/vm_command.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.cli_atomic.vm_command:register_vm_group",
+        "line_start": 38,
+        "line_end": 257
+      },
+      {
+        "name": "show_system_health",
+        "file": "commands/health_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.health_cmd.run:show_system_health",
+        "line_start": 15,
+        "line_end": 52
+      },
+      {
+        "name": "list_hypervisors",
+        "file": "commands/hypervisor_cmd/list_show.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.hypervisor_cmd.list_show:list_hypervisors",
+        "line_start": 16,
+        "line_end": 61
+      },
+      {
+        "name": "show_hypervisor",
+        "file": "commands/hypervisor_cmd/list_show.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.hypervisor_cmd.list_show:show_hypervisor",
+        "line_start": 64,
+        "line_end": 87
+      },
+      {
+        "name": "resolve_hypervisor_config",
+        "file": "commands/hypervisor_cmd/prompts.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.hypervisor_cmd.prompts:resolve_hypervisor_config",
+        "line_start": 10,
+        "line_end": 32
+      },
+      {
+        "name": "generate_bootstrap_script",
+        "file": "commands/hypervisor_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.hypervisor_cmd.run:generate_bootstrap_script",
+        "line_start": 11,
+        "line_end": 47
+      },
+      {
+        "name": "show_tailnet",
+        "file": "commands/ingress_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.ingress_cmd.run:show_tailnet",
+        "line_start": 37,
+        "line_end": 52
+      },
+      {
+        "name": "validate_ingress",
+        "file": "commands/ingress_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.ingress_cmd.run:validate_ingress",
+        "line_start": 11,
+        "line_end": 34
+      },
+      {
+        "name": "load_config",
+        "file": "commands/init_cmd/config.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.config:load_config",
+        "line_start": 12,
+        "line_end": 28
+      },
+      {
+        "name": "print_banner",
+        "file": "commands/init_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.output:print_banner",
+        "line_start": 10,
+        "line_end": 15
+      },
+      {
+        "name": "print_results",
+        "file": "commands/init_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.output:print_results",
+        "line_start": 31,
+        "line_end": 44
+      },
+      {
+        "name": "print_summary",
+        "file": "commands/init_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.output:print_summary",
+        "line_start": 18,
+        "line_end": 28
+      },
+      {
+        "name": "collect_shared_secrets",
+        "file": "commands/init_cmd/prompts.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.prompts:collect_shared_secrets",
+        "line_start": 169,
+        "line_end": 179
+      },
+      {
+        "name": "init_shared_secrets",
+        "file": "commands/init_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.run:init_shared_secrets",
+        "line_start": 15,
+        "line_end": 34
+      },
+      {
+        "name": "show_init_status",
+        "file": "commands/init_cmd/status.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.init_cmd.status:show_init_status",
+        "line_start": 14,
+        "line_end": 50
+      },
+      {
+        "name": "check_installable",
+        "file": "commands/registry_cmd/deps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.registry_cmd.deps:check_installable",
+        "line_start": 70,
+        "line_end": 99
+      },
+      {
+        "name": "refresh_registry",
+        "file": "commands/registry_cmd/deps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.registry_cmd.deps:refresh_registry",
+        "line_start": 39,
+        "line_end": 67
+      },
+      {
+        "name": "resolve_registry_deps",
+        "file": "commands/registry_cmd/deps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.registry_cmd.deps:resolve_registry_deps",
+        "line_start": 12,
+        "line_end": 36
+      },
+      {
+        "name": "list_registry_apps",
+        "file": "commands/registry_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.registry_cmd.run:list_registry_apps",
+        "line_start": 39,
+        "line_end": 72
+      },
+      {
+        "name": "show_registry_app",
+        "file": "commands/registry_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.registry_cmd.run:show_registry_app",
+        "line_start": 75,
+        "line_end": 105
+      },
+      {
+        "name": "show_platforms",
+        "file": "commands/schema_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.schema_cmd.run:show_platforms",
+        "line_start": 63,
+        "line_end": 78
+      },
+      {
+        "name": "show_resource_defaults",
+        "file": "commands/schema_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.schema_cmd.run:show_resource_defaults",
+        "line_start": 101,
+        "line_end": 120
+      },
+      {
+        "name": "show_sizes",
+        "file": "commands/schema_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.schema_cmd.run:show_sizes",
+        "line_start": 28,
+        "line_end": 60
+      },
+      {
+        "name": "validate_name",
+        "file": "commands/schema_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.schema_cmd.run:validate_name",
+        "line_start": 81,
+        "line_end": 98
+      },
+      {
+        "name": "browse_path",
+        "file": "commands/storage_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.storage_cmd.run:browse_path",
+        "line_start": 58,
+        "line_end": 82
+      },
+      {
+        "name": "list_mounts",
+        "file": "commands/storage_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.storage_cmd.run:list_mounts",
+        "line_start": 22,
+        "line_end": 55
+      },
+      {
+        "name": "verify_storage",
+        "file": "commands/storage_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.storage_cmd.run:verify_storage",
+        "line_start": 85,
+        "line_end": 111
+      },
+      {
+        "name": "print_validation_failure",
+        "file": "commands/validate_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.validate_cmd.output:print_validation_failure",
+        "line_start": 38,
+        "line_end": 47
+      },
+      {
+        "name": "print_validation_success",
+        "file": "commands/validate_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.validate_cmd.output:print_validation_success",
+        "line_start": 8,
+        "line_end": 35
+      },
+      {
+        "name": "validate_vm_inventory",
+        "file": "commands/validate_cmd/run.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.validate_cmd.run:validate_vm_inventory",
+        "line_start": 15,
+        "line_end": 43
+      },
+      {
+        "name": "apps_apply",
+        "file": "commands/vm_cmd/apply_commands.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.apply_commands:apps_apply",
+        "line_start": 45,
+        "line_end": 78
+      },
+      {
+        "name": "apps_preview",
+        "file": "commands/vm_cmd/apply_commands.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.apply_commands:apps_preview",
+        "line_start": 24,
+        "line_end": 42
+      },
+      {
+        "name": "configure_app",
+        "file": "commands/vm_cmd/apps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.apps:configure_app",
+        "line_start": 83,
+        "line_end": 100
+      },
+      {
+        "name": "install_apps",
+        "file": "commands/vm_cmd/apps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.apps:install_apps",
+        "line_start": 56,
+        "line_end": 80
+      },
+      {
+        "name": "list_apps",
+        "file": "commands/vm_cmd/apps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.apps:list_apps",
+        "line_start": 28,
+        "line_end": 53
+      },
+      {
+        "name": "uninstall_app",
+        "file": "commands/vm_cmd/apps.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.apps:uninstall_app",
+        "line_start": 103,
+        "line_end": 123
+      },
+      {
+        "name": "ensure_vm_prerequisites",
+        "file": "commands/vm_cmd/common.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.common:ensure_vm_prerequisites",
+        "line_start": 18,
+        "line_end": 24
+      },
+      {
+        "name": "print_banner",
+        "file": "commands/vm_cmd/common.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.common:print_banner",
+        "line_start": 10,
+        "line_end": 15
+      },
+      {
+        "name": "config_get",
+        "file": "commands/vm_cmd/config_commands.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.config_commands:config_get",
+        "line_start": 24,
+        "line_end": 52
+      },
+      {
+        "name": "config_list",
+        "file": "commands/vm_cmd/config_commands.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.config_commands:config_list",
+        "line_start": 70,
+        "line_end": 88
+      },
+      {
+        "name": "config_reset",
+        "file": "commands/vm_cmd/config_commands.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.config_commands:config_reset",
+        "line_start": 62,
+        "line_end": 67
+      },
+      {
+        "name": "config_set",
+        "file": "commands/vm_cmd/config_commands.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.config_commands:config_set",
+        "line_start": 55,
+        "line_end": 59
+      },
+      {
+        "name": "create_vm_inventory",
+        "file": "commands/vm_cmd/create.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.create:create_vm_inventory",
+        "line_start": 13,
+        "line_end": 33
+      },
+      {
+        "name": "build_request",
+        "file": "commands/vm_cmd/create_request.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.create_request:build_request",
+        "line_start": 36,
+        "line_end": 62
+      },
+      {
+        "name": "load_config",
+        "file": "commands/vm_cmd/create_request.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.create_request:load_config",
+        "line_start": 16,
+        "line_end": 33
+      },
+      {
+        "name": "delete_vm_inventory",
+        "file": "commands/vm_cmd/delete.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.delete:delete_vm_inventory",
+        "line_start": 12,
+        "line_end": 35
+      },
+      {
+        "name": "deploy_vm",
+        "file": "commands/vm_cmd/deploy.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.deploy:deploy_vm",
+        "line_start": 12,
+        "line_end": 24
+      },
+      {
+        "name": "destroy_vm",
+        "file": "commands/vm_cmd/destroy.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.destroy:destroy_vm",
+        "line_start": 11,
+        "line_end": 35
+      },
+      {
+        "name": "show_vm_health",
+        "file": "commands/vm_cmd/health.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.health:show_vm_health",
+        "line_start": 15,
+        "line_end": 49
+      },
+      {
+        "name": "list_vms",
+        "file": "commands/vm_cmd/list.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.list:list_vms",
+        "line_start": 12,
+        "line_end": 24
+      },
+      {
+        "name": "print_create_inputs",
+        "file": "commands/vm_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.output:print_create_inputs",
+        "line_start": 16,
+        "line_end": 21
+      },
+      {
+        "name": "print_create_result",
+        "file": "commands/vm_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.output:print_create_result",
+        "line_start": 24,
+        "line_end": 44
+      },
+      {
+        "name": "print_delete_preview",
+        "file": "commands/vm_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.output:print_delete_preview",
+        "line_start": 75,
+        "line_end": 86
+      },
+      {
+        "name": "print_deploy_result",
+        "file": "commands/vm_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.output:print_deploy_result",
+        "line_start": 89,
+        "line_end": 98
+      },
+      {
+        "name": "print_vm_list",
+        "file": "commands/vm_cmd/output.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.output:print_vm_list",
+        "line_start": 47,
+        "line_end": 72
+      },
+      {
+        "name": "trigger_phase",
+        "file": "commands/vm_cmd/phase.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.phase:trigger_phase",
+        "line_start": 17,
+        "line_end": 38
+      },
+      {
+        "name": "regenerate_keypair",
+        "file": "commands/vm_cmd/regenerate_keypair.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.regenerate_keypair:regenerate_keypair",
+        "line_start": 11,
+        "line_end": 26
+      },
+      {
+        "name": "show_vm",
+        "file": "commands/vm_cmd/show.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.show:show_vm",
+        "line_start": 13,
+        "line_end": 55
+      },
+      {
+        "name": "update_vm",
+        "file": "commands/vm_cmd/update.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.update:update_vm",
+        "line_start": 15,
+        "line_end": 51
+      },
+      {
+        "name": "create_worker",
+        "file": "commands/vm_cmd/workers.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.workers:create_worker",
+        "line_start": 49,
+        "line_end": 79
+      },
+      {
+        "name": "list_workers",
+        "file": "commands/vm_cmd/workers.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.workers:list_workers",
+        "line_start": 18,
+        "line_end": 46
+      },
+      {
+        "name": "persist_worker_token",
+        "file": "commands/vm_cmd/workers.py",
+        "kind": "function",
+        "tags": [
+          "cli_wrapper"
+        ],
+        "import_path": "vm_builder.commands.vm_cmd.workers:persist_worker_token",
+        "line_start": 82,
+        "line_end": 96
+      },
+      {
+        "name": "AppInstallService.compute_install_delta",
+        "file": "core/app_install_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.app_install_service:AppInstallService",
+        "line_start": 64,
+        "line_end": 64
+      },
+      {
+        "name": "AppInstallService.install_apps",
+        "file": "core/app_install_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.app_install_service:AppInstallService",
+        "line_start": 69,
+        "line_end": 69
+      },
+      {
+        "name": "AppInstallService.list_installed_apps",
+        "file": "core/app_install_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.app_install_service:AppInstallService",
+        "line_start": 65,
+        "line_end": 65
+      },
+      {
+        "name": "AppInstallService.uninstall_app",
+        "file": "core/app_install_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.app_install_service:AppInstallService",
+        "line_start": 70,
+        "line_end": 70
+      },
+      {
+        "name": "AppInstallService",
+        "file": "core/app_install_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.app_install_service:AppInstallService",
+        "line_start": 57,
+        "line_end": 74
+      },
+      {
+        "name": "AuditLogger.log",
+        "file": "core/audit.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.audit:AuditLogger",
+        "line_start": 48,
+        "line_end": 48
+      },
+      {
+        "name": "AuditLogger.log_api_request",
+        "file": "core/audit.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.audit:AuditLogger",
+        "line_start": 49,
+        "line_end": 49
+      },
+      {
+        "name": "AuditLogger.log_bws_write",
+        "file": "core/audit.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.audit:AuditLogger",
+        "line_start": 50,
+        "line_end": 50
+      },
+      {
+        "name": "AuditLogger.log_gh_trigger",
+        "file": "core/audit.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.audit:AuditLogger",
+        "line_start": 51,
+        "line_end": 51
+      },
+      {
+        "name": "AuditLogger.log_httpx_call",
+        "file": "core/audit.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.audit:AuditLogger",
+        "line_start": 52,
+        "line_end": 52
+      },
+      {
+        "name": "AuditLogger",
+        "file": "core/audit.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.audit:AuditLogger",
+        "line_start": 43,
+        "line_end": 52
+      },
+      {
+        "name": "ConfigService.apply_live",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 49,
+        "line_end": 49
+      },
+      {
+        "name": "ConfigService.get_all_overrides",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 47,
+        "line_end": 47
+      },
+      {
+        "name": "ConfigService.get_app_config",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 44,
+        "line_end": 44
+      },
+      {
+        "name": "ConfigService.preview_changes",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 48,
+        "line_end": 48
+      },
+      {
+        "name": "ConfigService.reset_field",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 46,
+        "line_end": 46
+      },
+      {
+        "name": "ConfigService.trigger_live_update",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 50,
+        "line_end": 50
+      },
+      {
+        "name": "ConfigService.update_field",
+        "file": "core/config_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 45,
+        "line_end": 45
+      },
+      {
+        "name": "ConfigService",
+        "file": "core/config_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.config_service:ConfigService",
+        "line_start": 22,
+        "line_end": 50
+      },
+      {
+        "name": "AppNotFoundError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:AppNotFoundError",
+        "line_start": 61,
+        "line_end": 61
+      },
+      {
+        "name": "AppNotFoundError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:AppNotFoundError",
+        "line_start": 60,
+        "line_end": 60
+      },
+      {
+        "name": "AppNotFoundError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:AppNotFoundError",
+        "line_start": 62,
+        "line_end": 62
+      },
+      {
+        "name": "AppNotFoundError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:AppNotFoundError",
+        "line_start": 59,
+        "line_end": 59
+      },
+      {
+        "name": "BwsNotAvailableError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsNotAvailableError",
+        "line_start": 109,
+        "line_end": 109
+      },
+      {
+        "name": "BwsNotAvailableError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsNotAvailableError",
+        "line_start": 108,
+        "line_end": 108
+      },
+      {
+        "name": "BwsNotAvailableError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsNotAvailableError",
+        "line_start": 110,
+        "line_end": 110
+      },
+      {
+        "name": "BwsNotAvailableError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsNotAvailableError",
+        "line_start": 107,
+        "line_end": 107
+      },
+      {
+        "name": "BwsSecretError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsSecretError",
+        "line_start": 116,
+        "line_end": 116
+      },
+      {
+        "name": "BwsSecretError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsSecretError",
+        "line_start": 115,
+        "line_end": 115
+      },
+      {
+        "name": "BwsSecretError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsSecretError",
+        "line_start": 117,
+        "line_end": 117
+      },
+      {
+        "name": "BwsSecretError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsSecretError",
+        "line_start": 114,
+        "line_end": 114
+      },
+      {
+        "name": "DependencyError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:DependencyError",
+        "line_start": 100,
+        "line_end": 100
+      },
+      {
+        "name": "DependencyError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:DependencyError",
+        "line_start": 99,
+        "line_end": 99
+      },
+      {
+        "name": "DependencyError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:DependencyError",
+        "line_start": 101,
+        "line_end": 101
+      },
+      {
+        "name": "DependencyError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:DependencyError",
+        "line_start": 98,
+        "line_end": 98
+      },
+      {
+        "name": "GhNotAvailableError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:GhNotAvailableError",
+        "line_start": 123,
+        "line_end": 123
+      },
+      {
+        "name": "GhNotAvailableError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:GhNotAvailableError",
+        "line_start": 122,
+        "line_end": 122
+      },
+      {
+        "name": "GhNotAvailableError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:GhNotAvailableError",
+        "line_start": 124,
+        "line_end": 124
+      },
+      {
+        "name": "GhNotAvailableError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:GhNotAvailableError",
+        "line_start": 121,
+        "line_end": 121
+      },
+      {
+        "name": "HypervisorNotFoundError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:HypervisorNotFoundError",
+        "line_start": 54,
+        "line_end": 54
+      },
+      {
+        "name": "HypervisorNotFoundError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:HypervisorNotFoundError",
+        "line_start": 53,
+        "line_end": 53
+      },
+      {
+        "name": "HypervisorNotFoundError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:HypervisorNotFoundError",
+        "line_start": 55,
+        "line_end": 55
+      },
+      {
+        "name": "HypervisorNotFoundError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:HypervisorNotFoundError",
+        "line_start": 52,
+        "line_end": 52
+      },
+      {
+        "name": "RegistrySyncError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RegistrySyncError",
+        "line_start": 137,
+        "line_end": 137
+      },
+      {
+        "name": "RegistrySyncError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RegistrySyncError",
+        "line_start": 136,
+        "line_end": 136
+      },
+      {
+        "name": "RegistrySyncError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RegistrySyncError",
+        "line_start": 138,
+        "line_end": 138
+      },
+      {
+        "name": "RegistrySyncError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RegistrySyncError",
+        "line_start": 135,
+        "line_end": 135
+      },
+      {
+        "name": "RemotePathNotFoundError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RemotePathNotFoundError",
+        "line_start": 68,
+        "line_end": 68
+      },
+      {
+        "name": "RemotePathNotFoundError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RemotePathNotFoundError",
+        "line_start": 67,
+        "line_end": 67
+      },
+      {
+        "name": "RemotePathNotFoundError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RemotePathNotFoundError",
+        "line_start": 69,
+        "line_end": 69
+      },
+      {
+        "name": "RemotePathNotFoundError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RemotePathNotFoundError",
+        "line_start": 66,
+        "line_end": 66
+      },
+      {
+        "name": "SshConnectionError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:SshConnectionError",
+        "line_start": 77,
+        "line_end": 77
+      },
+      {
+        "name": "SshConnectionError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:SshConnectionError",
+        "line_start": 76,
+        "line_end": 76
+      },
+      {
+        "name": "SshConnectionError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:SshConnectionError",
+        "line_start": 78,
+        "line_end": 78
+      },
+      {
+        "name": "SshConnectionError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:SshConnectionError",
+        "line_start": 75,
+        "line_end": 75
+      },
+      {
+        "name": "StorageConnectionError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:StorageConnectionError",
+        "line_start": 91,
+        "line_end": 91
+      },
+      {
+        "name": "StorageConnectionError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:StorageConnectionError",
+        "line_start": 90,
+        "line_end": 90
+      },
+      {
+        "name": "StorageConnectionError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:StorageConnectionError",
+        "line_start": 92,
+        "line_end": 92
+      },
+      {
+        "name": "StorageConnectionError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:StorageConnectionError",
+        "line_start": 89,
+        "line_end": 89
+      },
+      {
+        "name": "TailscaleError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:TailscaleError",
+        "line_start": 84,
+        "line_end": 84
+      },
+      {
+        "name": "TailscaleError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:TailscaleError",
+        "line_start": 83,
+        "line_end": 83
+      },
+      {
+        "name": "TailscaleError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:TailscaleError",
+        "line_start": 85,
+        "line_end": 85
+      },
+      {
+        "name": "TailscaleError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:TailscaleError",
+        "line_start": 82,
+        "line_end": 82
+      },
+      {
+        "name": "ValidationError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:ValidationError",
+        "line_start": 39,
+        "line_end": 39
+      },
+      {
+        "name": "ValidationError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:ValidationError",
+        "line_start": 38,
+        "line_end": 38
+      },
+      {
+        "name": "ValidationError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:ValidationError",
+        "line_start": 37,
+        "line_end": 37
+      },
+      {
+        "name": "VmNotFoundError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:VmNotFoundError",
+        "line_start": 47,
+        "line_end": 47
+      },
+      {
+        "name": "VmNotFoundError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:VmNotFoundError",
+        "line_start": 46,
+        "line_end": 46
+      },
+      {
+        "name": "VmNotFoundError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:VmNotFoundError",
+        "line_start": 48,
+        "line_end": 48
+      },
+      {
+        "name": "VmNotFoundError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:VmNotFoundError",
+        "line_start": 45,
+        "line_end": 45
+      },
+      {
+        "name": "WorkflowTriggerError.category",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:WorkflowTriggerError",
+        "line_start": 130,
+        "line_end": 130
+      },
+      {
+        "name": "WorkflowTriggerError.code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:WorkflowTriggerError",
+        "line_start": 129,
+        "line_end": 129
+      },
+      {
+        "name": "WorkflowTriggerError.hint",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:WorkflowTriggerError",
+        "line_start": 131,
+        "line_end": 131
+      },
+      {
+        "name": "WorkflowTriggerError.status_code",
+        "file": "core/errors.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:WorkflowTriggerError",
+        "line_start": 128,
+        "line_end": 128
+      },
+      {
+        "name": "AppNotFoundError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:AppNotFoundError",
+        "line_start": 58,
+        "line_end": 62
+      },
+      {
+        "name": "BwsNotAvailableError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsNotAvailableError",
+        "line_start": 106,
+        "line_end": 110
+      },
+      {
+        "name": "BwsSecretError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:BwsSecretError",
+        "line_start": 113,
+        "line_end": 117
+      },
+      {
+        "name": "DependencyError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:DependencyError",
+        "line_start": 97,
+        "line_end": 101
+      },
+      {
+        "name": "GhNotAvailableError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:GhNotAvailableError",
+        "line_start": 120,
+        "line_end": 124
+      },
+      {
+        "name": "HypervisorNotFoundError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:HypervisorNotFoundError",
+        "line_start": 51,
+        "line_end": 55
+      },
+      {
+        "name": "RegistrySyncError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RegistrySyncError",
+        "line_start": 134,
+        "line_end": 138
+      },
+      {
+        "name": "RemotePathNotFoundError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:RemotePathNotFoundError",
+        "line_start": 65,
+        "line_end": 69
+      },
+      {
+        "name": "SshConnectionError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:SshConnectionError",
+        "line_start": 74,
+        "line_end": 78
+      },
+      {
+        "name": "StorageConnectionError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:StorageConnectionError",
+        "line_start": 88,
+        "line_end": 92
+      },
+      {
+        "name": "TailscaleError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:TailscaleError",
+        "line_start": 81,
+        "line_end": 85
+      },
+      {
+        "name": "ValidationError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:ValidationError",
+        "line_start": 36,
+        "line_end": 39
+      },
+      {
+        "name": "VmBuilderError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:VmBuilderError",
+        "line_start": 12,
+        "line_end": 31
+      },
+      {
+        "name": "VmNotFoundError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:VmNotFoundError",
+        "line_start": 44,
+        "line_end": 48
+      },
+      {
+        "name": "WorkflowTriggerError",
+        "file": "core/errors.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.errors:WorkflowTriggerError",
+        "line_start": 127,
+        "line_end": 131
+      },
+      {
+        "name": "HealthService.get_vm_health",
+        "file": "core/health_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.health_service:HealthService",
+        "line_start": 51,
+        "line_end": 51
+      },
+      {
+        "name": "HealthService",
+        "file": "core/health_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.health_service:HealthService",
+        "line_start": 42,
+        "line_end": 51
+      },
+      {
+        "name": "HypervisorService.check_prerequisites",
+        "file": "core/hypervisor_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 65,
+        "line_end": 65
+      },
+      {
+        "name": "HypervisorService.generate_bootstrap_script",
+        "file": "core/hypervisor_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 76,
+        "line_end": 76
+      },
+      {
+        "name": "HypervisorService.get_hypervisor",
+        "file": "core/hypervisor_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 68,
+        "line_end": 68
+      },
+      {
+        "name": "HypervisorService.list_hypervisors",
+        "file": "core/hypervisor_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 67,
+        "line_end": 67
+      },
+      {
+        "name": "HypervisorService.trigger_phase0",
+        "file": "core/hypervisor_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 78,
+        "line_end": 78
+      },
+      {
+        "name": "HypervisorService.write_bootstrap_script",
+        "file": "core/hypervisor_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 80,
+        "line_end": 80
+      },
+      {
+        "name": "HypervisorService",
+        "file": "core/hypervisor_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.hypervisor_service:HypervisorService",
+        "line_start": 59,
+        "line_end": 80
+      },
+      {
+        "name": "InitService.ALL_SECRET_PATHS",
+        "file": "core/init_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.init_service:InitService",
+        "line_start": 44,
+        "line_end": 44
+      },
+      {
+        "name": "InitService.check_prerequisites",
+        "file": "core/init_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.init_service:InitService",
+        "line_start": 46,
+        "line_end": 46
+      },
+      {
+        "name": "InitService.get_existing_secrets",
+        "file": "core/init_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.init_service:InitService",
+        "line_start": 47,
+        "line_end": 47
+      },
+      {
+        "name": "InitService.write_secrets",
+        "file": "core/init_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.init_service:InitService",
+        "line_start": 48,
+        "line_end": 48
+      },
+      {
+        "name": "InitService",
+        "file": "core/init_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.init_service:InitService",
+        "line_start": 41,
+        "line_end": 48
+      },
+      {
+        "name": "RefreshCoordinator",
+        "file": "core/refresh_coordinator.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.refresh_coordinator:RefreshCoordinator",
+        "line_start": 12,
+        "line_end": 79
+      },
+      {
+        "name": "RefreshCoordinator.refresh",
+        "file": "core/refresh_coordinator.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.core.refresh_coordinator:RefreshCoordinator",
+        "line_start": 32,
+        "line_end": 79
+      },
+      {
+        "name": "RefreshPoller",
+        "file": "core/refresh_poller.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.refresh_poller:RefreshPoller",
+        "line_start": 9,
+        "line_end": 61
+      },
+      {
+        "name": "RefreshPoller.start",
+        "file": "core/refresh_poller.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.core.refresh_poller:RefreshPoller",
+        "line_start": 29,
+        "line_end": 56
+      },
+      {
+        "name": "RefreshPoller.stop",
+        "file": "core/refresh_poller.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.core.refresh_poller:RefreshPoller",
+        "line_start": 58,
+        "line_end": 61
+      },
+      {
+        "name": "RegistryService.check_installable",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 57,
+        "line_end": 57
+      },
+      {
+        "name": "RegistryService.generate",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 49,
+        "line_end": 49
+      },
+      {
+        "name": "RegistryService.get_app",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 55,
+        "line_end": 55
+      },
+      {
+        "name": "RegistryService.list_apps",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 54,
+        "line_end": 54
+      },
+      {
+        "name": "RegistryService.refresh",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 50,
+        "line_end": 50
+      },
+      {
+        "name": "RegistryService.reload",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 47,
+        "line_end": 47
+      },
+      {
+        "name": "RegistryService.resolve_deps",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 56,
+        "line_end": 56
+      },
+      {
+        "name": "RegistryService.set_repo_path",
+        "file": "core/registry_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 43,
+        "line_end": 43
+      },
+      {
+        "name": "RegistryService",
+        "file": "core/registry_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.registry_service:RegistryService",
+        "line_start": 28,
+        "line_end": 57
+      },
+      {
+        "name": "RepoService.ensure_repo",
+        "file": "core/repo_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.repo_service:RepoService",
+        "line_start": 50,
+        "line_end": 50
+      },
+      {
+        "name": "RepoService.get_registry_path",
+        "file": "core/repo_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.repo_service:RepoService",
+        "line_start": 53,
+        "line_end": 53
+      },
+      {
+        "name": "RepoService.get_templates_dir",
+        "file": "core/repo_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.repo_service:RepoService",
+        "line_start": 54,
+        "line_end": 54
+      },
+      {
+        "name": "RepoService",
+        "file": "core/repo_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.repo_service:RepoService",
+        "line_start": 35,
+        "line_end": 54
+      },
+      {
+        "name": "ScaffoldService",
+        "file": "core/scaffold_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.scaffold_service:ScaffoldService",
+        "line_start": 49,
+        "line_end": 230
+      },
+      {
+        "name": "ScaffoldService.scaffold",
+        "file": "core/scaffold_service.py",
+        "kind": "method",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.scaffold_service:ScaffoldService",
+        "line_start": 52,
+        "line_end": 230
+      },
+      {
+        "name": "StorageService.browse_path",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 37,
+        "line_end": 37
+      },
+      {
+        "name": "StorageService.detect_mounts",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 35,
+        "line_end": 35
+      },
+      {
+        "name": "StorageService.ensure_mount",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 36,
+        "line_end": 36
+      },
+      {
+        "name": "StorageService.list_network_shares",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 45,
+        "line_end": 45
+      },
+      {
+        "name": "StorageService.resolve_credentials",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 47,
+        "line_end": 47
+      },
+      {
+        "name": "StorageService.save_network_shares",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 46,
+        "line_end": 46
+      },
+      {
+        "name": "StorageService.verify_storage",
+        "file": "core/storage_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 39,
+        "line_end": 39
+      },
+      {
+        "name": "StorageService",
+        "file": "core/storage_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.storage_service:StorageService",
+        "line_start": 27,
+        "line_end": 47
+      },
+      {
+        "name": "VmService.build_inventory",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 116,
+        "line_end": 116
+      },
+      {
+        "name": "VmService.check_prerequisites",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 112,
+        "line_end": 112
+      },
+      {
+        "name": "VmService.configure_app",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 132,
+        "line_end": 132
+      },
+      {
+        "name": "VmService.create_vm",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 117,
+        "line_end": 117
+      },
+      {
+        "name": "VmService.create_worker",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 127,
+        "line_end": 127
+      },
+      {
+        "name": "VmService.delete_vm",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 122,
+        "line_end": 122
+      },
+      {
+        "name": "VmService.deploy_vm",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 124,
+        "line_end": 124
+      },
+      {
+        "name": "VmService.destroy_vm",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 129,
+        "line_end": 129
+      },
+      {
+        "name": "VmService.generate_ssh_keypair",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 115,
+        "line_end": 115
+      },
+      {
+        "name": "VmService.get_vm",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 119,
+        "line_end": 119
+      },
+      {
+        "name": "VmService.install_app",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 131,
+        "line_end": 131
+      },
+      {
+        "name": "VmService.list_vms",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 118,
+        "line_end": 118
+      },
+      {
+        "name": "VmService.persist_cluster_token",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 125,
+        "line_end": 125
+      },
+      {
+        "name": "VmService.regenerate_vm_keypair",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 121,
+        "line_end": 121
+      },
+      {
+        "name": "VmService.trigger_phase3",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 135,
+        "line_end": 135
+      },
+      {
+        "name": "VmService.trigger_phase4",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 136,
+        "line_end": 136
+      },
+      {
+        "name": "VmService.trigger_phase5",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 137,
+        "line_end": 137
+      },
+      {
+        "name": "VmService.update_vm",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 120,
+        "line_end": 120
+      },
+      {
+        "name": "VmService.validate_ingress",
+        "file": "core/vm_service.py",
+        "kind": "attribute",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 133,
+        "line_end": 133
+      },
+      {
+        "name": "VmService",
+        "file": "core/vm_service.py",
+        "kind": "class",
+        "tags": [
+          "service"
+        ],
+        "import_path": "vm_builder.core.vm_service:VmService",
+        "line_start": 106,
+        "line_end": 140
+      },
+      {
+        "name": "WebhookVerificationError",
+        "file": "core/webhook_verify.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.webhook_verify:WebhookVerificationError",
+        "line_start": 7,
+        "line_end": 8
+      },
+      {
+        "name": "verify_github_signature",
+        "file": "core/webhook_verify.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "vm_builder.core.webhook_verify:verify_github_signature",
+        "line_start": 11,
+        "line_end": 51
+      },
+      {
+        "name": "WorkflowNames.CONFIGURE_APP",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 31,
+        "line_end": 31
+      },
+      {
+        "name": "WorkflowNames.DESTROY_VM",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 25,
+        "line_end": 25
+      },
+      {
+        "name": "WorkflowNames.HYPERVISOR_SETUP",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 16,
+        "line_end": 16
+      },
+      {
+        "name": "WorkflowNames.INSTALL_APP",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 30,
+        "line_end": 30
+      },
+      {
+        "name": "WorkflowNames.LIVE_CONFIG_UPDATE",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 27,
+        "line_end": 27
+      },
+      {
+        "name": "WorkflowNames.PHASE2_5_SELF_BOOTSTRAP",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 19,
+        "line_end": 19
+      },
+      {
+        "name": "WorkflowNames.PHASE2_PROVISION_VM",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 17,
+        "line_end": 17
+      },
+      {
+        "name": "WorkflowNames.PHASE2_PROVISION_VM_GCP",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 18,
+        "line_end": 18
+      },
+      {
+        "name": "WorkflowNames.PHASE3_DEPLOY_APPS",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 20,
+        "line_end": 20
+      },
+      {
+        "name": "WorkflowNames.PHASE4_CONFIGURE_APPS",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 21,
+        "line_end": 21
+      },
+      {
+        "name": "WorkflowNames.PHASE5_DEPLOY_INGRESS_SSO",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 22,
+        "line_end": 22
+      },
+      {
+        "name": "WorkflowNames.UNINSTALL_APP",
+        "file": "core/workflow_names.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 26,
+        "line_end": 26
+      },
+      {
+        "name": "WorkflowNames",
+        "file": "core/workflow_names.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 8,
+        "line_end": 77
+      },
+      {
+        "name": "WorkflowNames.all_workflows",
+        "file": "core/workflow_names.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 61,
+        "line_end": 66
+      },
+      {
+        "name": "WorkflowNames.install_workflows",
+        "file": "core/workflow_names.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 69,
+        "line_end": 77
+      },
+      {
+        "name": "WorkflowNames.provision",
+        "file": "core/workflow_names.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "vm_builder.core.workflow_names:WorkflowNames",
+        "line_start": 40,
+        "line_end": 58
+      }
+    ],
+    "cheat_sheet": [
+      {
+        "task": "Add API route",
+        "description": "`vm_builder/api/routes/` (new module) + register in `app.py`"
+      },
+      {
+        "task": "Add CLI command",
+        "description": "`vm_builder/cli_atomic/` (registration) + `vm_builder/commands/` (impl)"
+      },
+      {
+        "task": "Add service method",
+        "description": "`vm_builder/core/{svc}_service_parts/` (new part file) + facade re-export in `core/{svc}_service.py`"
+      },
+      {
+        "task": "Add new core service",
+        "description": "`vm_builder/core/` (facade) + `_parts/` subpackage + `api/deps.py` (DI)"
+      },
+      {
+        "task": "Add app to templates",
+        "description": "`vm-builder-templates/apps/{app}/` with `.idi-meta.yaml` sidecar"
+      },
+      {
+        "task": "Change VM schema",
+        "description": "`vm_builder/schema_parts/`"
+      },
+      {
+        "task": "Add template sidecar detector",
+        "description": "`vm_builder/template_sidecars/` (new module)"
+      }
+    ],
+    "task_map": [
+      {
+        "task": "Add API route",
+        "files": [
+          "api/routes/",
+          "api/app.py"
+        ],
+        "description": "`vm_builder/api/routes/` (new module) + register in `app.py`"
+      },
+      {
+        "task": "Add CLI command",
+        "files": [
+          "cli_atomic/",
+          "commands/"
+        ],
+        "description": "`vm_builder/cli_atomic/` (registration) + `vm_builder/commands/` (impl)"
+      },
+      {
+        "task": "Add service method",
+        "files": [
+          "core/"
+        ],
+        "description": "`vm_builder/core/{svc}_service_parts/` (new part file) + facade re-export in `core/{svc}_service.py`"
+      },
+      {
+        "task": "Add new core service",
+        "files": [
+          "core/",
+          "api/deps.py"
+        ],
+        "description": "`vm_builder/core/` (facade) + `_parts/` subpackage + `api/deps.py` (DI)"
+      },
+      {
+        "task": "Add app to templates",
+        "files": [],
+        "description": "`vm-builder-templates/apps/{app}/` with `.idi-meta.yaml` sidecar"
+      },
+      {
+        "task": "Change VM schema",
+        "files": [
+          "schema_parts/"
+        ],
+        "description": "`vm_builder/schema_parts/`"
+      },
+      {
+        "task": "Add template sidecar detector",
+        "files": [
+          "template_sidecars/"
+        ],
+        "description": "`vm_builder/template_sidecars/` (new module)"
+      }
+    ]
+  }
+}
