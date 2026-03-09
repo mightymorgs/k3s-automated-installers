@@ -6,7 +6,7 @@ k3s-automated-installers is a self-contained pipeline that converts infrastructu
 
 The core insight: infrastructure knowledge already exists in Helm charts, CRD schemas, Docker Compose files, and OpenAPI specs. Every Helm `values.yaml` contains real working defaults. Every Compose stack encodes proven cross-app wiring. Every CRD schema describes what an operator creates and consumes. An LLM trying to configure infrastructure from scratch wastes tokens reproducing knowledge that already exists in these sources.
 
-This system extracts that knowledge, unifies it through a lifecycle event graph, and emits playbooks with real defaults and real wiring — deterministically, with no manual authoring.
+This system extracts that knowledge, unifies it through an action graph, and emits playbooks with real defaults and real wiring — deterministically, with no manual authoring.
 
 ```
                     CATALOG (4 input sources)
@@ -26,14 +26,17 @@ This system extracts that knowledge, unifies it through a lifecycle event graph,
                                │
                                v
         ┌─────────────────────────────────────────────────────┐
-        │              LIFECYCLE EVENT SCHEMA                   │
+        │                ACTION GRAPH MODEL                    │
         │                                                      │
         │  Normalize all paradigms into one graph model:       │
         │                                                      │
-        │  LifecycleEvent → PRODUCES → Fact                    │
-        │  LifecycleEvent → CONSUMES → Fact                    │
-        │  LifecycleEvent → PROVIDES_CAPABILITY → Capability   │
-        │  LifecycleEvent → REQUIRES_CAPABILITY → Capability   │
+        │  Action → PRODUCES → Fact                            │
+        │  Action → CONSUMES → Fact                            │
+        │  Action → TARGETS → App                              │
+        │  Action → EMITS → Artifact                           │
+        │  Fact → BELONGS_TO → App                             │
+        │  Action → PROVIDES_CAPABILITY → Capability           │
+        │  Action → REQUIRES_CAPABILITY → Capability           │
         └──────────────────────┬───────────────────────────────┘
                                │
                                v

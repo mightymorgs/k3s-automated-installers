@@ -2,7 +2,26 @@
 
 > An executable dependency graph for fully programmatic multi-app k3s deployment. Actions and facts are first-class nodes. Edges encode consumption, production, ownership, and emission. The compiler walks the graph backwards from desired state and emits forward execution waves.
 
-## The Core Problem
+## The Problem
+
+Setting up a k3s cluster with interconnected apps requires hundreds of manual decisions: which apps talk to which, what URLs and API keys to pass, which ports to expose, what order to install, how to verify everything works. A single media stack (sonarr + radarr + prowlarr + sabnzbd + jellyfin) needs 12+ wiring playbooks, each with 10-20 fields that must be exactly right.
+
+Today these playbooks are hand-written. Adding a new app means hours of reading docs, writing YAML, debugging connections, and testing. This doesn't scale — every new app multiplies the manual wiring effort with every other app it connects to.
+
+## The Insight
+
+All the knowledge needed to wire these apps already exists in machine-readable form:
+
+- **Helm values.yaml** tells you what config knobs exist and what their defaults are
+- **Docker Compose files** from the community tell you which apps connect to which — someone already figured out that sonarr needs sabnzbd's URL and API key
+- **CRD schemas** tell you what an operator needs and what it produces — a cert-manager Certificate needs an Issuer and produces a Secret
+- **OpenAPI specs** tell you exactly what fields a POST endpoint expects, what types they are, and what the response contains
+
+The pipeline extracts this knowledge, unifies it in a graph, and mechanically generates the same playbooks a human would write — but deterministically, validated, and for ANY app connected to ANY other app. Point it at a Helm chart and an OpenAPI spec, and it produces working playbooks. The 32-app portfolio is the baseline we validate against, not the limit.
+
+## The Model
+
+Five node types. Seven edge types. One compiler.
 
 Installing 32 interconnected k3s apps requires hundreds of wiring decisions — sonarr needs sabnzbd's API key, grafana needs prometheus's endpoint, cert-manager needs vault's PKI mount. Each decision is a field in an API call, a CRD spec, or a config file. Each field's value comes from somewhere else in the stack.
 
@@ -28,10 +47,6 @@ The model borrows from two dependency resolution systems:
 **From Bazel:** Facts flow between actions as typed *providers* — not opaque blobs. Each fact has a shape (identity, addressability, credential). Actions declare typed inputs and outputs. Type mismatches are caught at compile time, not execution time.
 
 The hybrid: **Nix's content-addressed invalidation model + Bazel's typed provider contracts.**
-
-## The Model
-
-Five node types. Seven edge types. One compiler.
 
 ### Nodes
 
@@ -291,6 +306,58 @@ Confidence scoring from signal agreement:
 | CRD + Helm + Compose all agree | 0.95 | High confidence — three independent confirmations |
 | Two sources agree | 0.80 | Likely edge |
 | Single source only | 0.50 | Possible — needs verification |
+
+## Phase 3: Zero-Touch Installation (The Scaffold Pipeline)
+
+**Input:** Helm chart for an app
+**Output:** Golden-master-compliant install playbook + kustomize base + J2 templates
+
+We don't deploy with Helm. Helm is used as a **source** — `helm template` renders the chart to raw K8s manifests, then the scaffold pipeline converts those into kustomize + StatefulSets. This is deliberate: kustomize + StatefulSets enable non-destructive live updates to the cluster via `kubectl apply`. Helm's upgrade/rollback model would require tearing down and recreating resources. With kustomize, changing a var in BWS triggers a `kubectl apply` that patches only what changed — pods stay running, no downtime.
+
+The scaffold pipeline:
+
+```
+Helm chart (source only — not used for deployment)
+  → helm template (render to raw K8s manifests)
+  → classify manifests (Secrets/PVCs = protected, Deployments/Services = workload)
+  → convert Deployments → StatefulSets (persistent, rolling-update capable)
+  → convert manifests → J2 templates (parameterize with BWS vars)
+  → generate kustomize base (the actual deployment mechanism)
+  → generate golden-master install playbook:
+      - numeric-prefix ordering (<40 = always apply, ≥40 = kubectl_action)
+      - split-apply (Secrets always kubectl apply, workloads use kubectl_action)
+      - two-step wait (rollout status + pod ready)
+      - dry-run=server validation
+      - health check with retries
+  → generate PushSecret CRD template (if secrets detected)
+  → molecule test (Tier 1 + Tier 2)
+```
+
+The generated playbook follows the exact same patterns as the hand-written golden master at `apps/_golden-master/install/01-deploy.yml` (854 lines, 23 improvements).
+
+This is how install actions actually execute. The action graph declares `install.{app}` with its CONSUMES/PRODUCES edges; the scaffold pipeline is the mechanical process that turns a Helm chart into the Ansible playbook that fulfills that install action.
+
+## The Three-Way Join
+
+No single source covers all cross-app wiring. The power comes from combining them:
+
+```
+CRD schema:    GrafanaDatasource has a `url` field (string)
+Helm values:   grafana chart has `datasources[].url` knob
+Compose:       grafana env var GF_DATASOURCE_URL=http://prometheus:9090
+
+Result:        GrafanaDatasource.url → prometheus
+               (DEPENDS_ON, confidence: 0.95, source: crd+compose+helm)
+```
+
+| Wiring target | CRD | Helm | Compose | Discovered by |
+|--------------|-----|------|---------|---------------|
+| grafana→prometheus | GrafanaDatasource.url | datasources[].url | GF_DATASOURCE_URL | All three |
+| sonarr→sabnzbd | — | — | SABNZBD_URL | Compose only |
+| cert-manager→vault | ClusterIssuer.vault | issuer.vault.server | — | CRD + Helm |
+| loki→alertmanager | — | ruler.alertmanager_url | ALERTMANAGER_URL | Helm + Compose |
+
+CRDs define the WHAT (fields, types). Compose defines the WHO (which apps connect). Helm values define the HOW (what config knobs to turn). Together they give you everything needed to generate a wiring playbook.
 
 ## Content Addressing and Early Cutoff
 
@@ -936,15 +1003,62 @@ The graph is never the source of truth. The JSON files are. This means:
    Persist: resolved input_hash + output fact values for early cutoff on next run
 ```
 
-## Summary
+## The BWS Loop
+
+Bitwarden Secrets Manager is the state database for everything:
 
 ```
-Facts are the universal currency.
-Actions are the universal operation.
-The graph is the execution substrate — the compiler turns it into a plan.
-The compiler walks backwards from desired state and emits forward execution.
+Scaffold seeds BWS _config with all Helm chart vars + defaults
+Phase 3 installs apps → extracts API keys/URLs → writes to BWS _state
+Phase 4 reads BWS _state + _config → configures cross-app wiring → writes results back
+Phase 5 reads BWS _state + _config → configures ingress/SSO → writes results back
+GUI reads BWS → shows live state → user edits _config → triggers re-execution
 ```
 
-Dependencies alone describe structure. Actions + produced facts describe execution. And execution is what you actually need.
+Every Helm chart variable is written to BWS `_config` with its default value from `values.yaml`. This means every configurable knob for every app is available in BWS before the first deploy — the GUI can show them, the user can override them, and the playbooks consume them.
 
-Every action traces to a source (OpenAPI spec, CRD schema, Helm chart, Compose file) — though some action semantics are currently curated where full derivation is not yet implemented. Execution order traces to CONSUMES→Fact←PRODUCES chains. Fork points trace to Compose stack statistics with curated refinement. The 22 wiring targets exercise the model. The 32-app portfolio is the execution target. Implementation will teach more than another architectural rewrite.
+Every playbook variable comes from BWS via extra-vars. No hardcoded values. `_config` holds the template variable values (how it was built), `_state` holds runtime state (what's running now). The generated playbooks reference BWS vars using the pattern `{{ app_field }}` which maps to `_state.apps.{app}.{field}` or `_config.{app}.{field}`.
+
+### Dynamic Wiring at Runtime
+
+Playbooks don't run against a fixed app list. The Phase 4 workflow discovers what's installed at runtime:
+
+1. **Read BWS inventory** — query `_state.apps` for all entries with `status: installed`
+2. **Filter by `requires_apps`** — each wiring playbook declares which apps it needs (e.g., `05-wire-sabnzbd.yml` requires both `sonarr` and `sabnzbd`). A playbook only runs when ALL its required apps are present.
+3. **Parallel execution** — all eligible wiring playbooks run as parallel background subshells on the self-hosted runner
+4. **Per-app failure isolation** — one app's wiring failure doesn't block others
+
+This means the same generated playbooks work on any VM with any subset of apps installed. A VM with sonarr + radarr + sabnzbd gets the media wiring. A VM with grafana + prometheus + loki gets the monitoring wiring. No workflow changes needed — BWS inventory drives everything dynamically.
+
+### Live Configuration Updates
+
+When a user changes any value in BWS `_config` (via the GUI or API), only the delta is applied:
+
+1. **User edits a var** — e.g., changes `grafana.admin_password` in BWS `_config`
+2. **Workflow detects deviation** from defaults — only changed vars are passed as extra-vars
+3. **`kubectl apply` updates only those changes** — the playbook applies the diff, not a full redeploy
+4. **Wiring playbooks re-run with new values** — if the changed var affects cross-app wiring (e.g., a new API key), the relevant wiring playbooks pick up the new value automatically
+
+This is true live configuration. Edit a port, change a password, toggle a feature flag — the system converges to the new state without reinstalling anything. The playbooks are idempotent by design, so re-running with updated vars only touches what changed.
+
+## What Makes This Different
+
+This is not an LLM generating infrastructure code. This is a **compiler**:
+
+1. **Deterministic** — same inputs always produce the same playbooks
+2. **Validated** — every generated playbook passes molecule tests before output
+3. **Grounded** — every field value traces back to a real source (schema, compose file, Helm default)
+4. **Repairable** — if validation fails, the LLM reclassifies fields (not regenerates code)
+5. **Self-contained** — no Docker, no Neo4j, no external services needed for development
+6. **Incremental** — add a new app to the manifest, run the pipeline, get working playbooks
+7. **Universal** — works for ANY app with a Helm chart, OpenAPI spec, or Docker Compose file — not limited to a fixed app list
+
+The end state is a **package manager for k3s apps**. A catalogue of version-pinned applications, each containing pre-generated atomic skills, install playbooks, wiring playbooks, and ingress configuration. Adding an app to your cluster is:
+
+1. Select apps from the catalogue (GUI or CLI)
+2. Skills unpack into the skills directory, tree-sitter ingests them into the graph
+3. The graph resolves dependencies and cross-app wiring automatically
+4. Playbooks execute — install, configure, wire, expose — all dynamically based on which apps are selected
+5. BWS tracks state, any var change applies as a live delta
+
+No manual YAML. No reading docs to figure out which port sonarr needs to talk to prowlarr. The catalogue already knows, because it was compiled from Helm charts, CRD schemas, OpenAPI specs, and thousands of community Docker Compose stacks. The 32-app portfolio is the initial catalogue — it grows as new apps are added.
