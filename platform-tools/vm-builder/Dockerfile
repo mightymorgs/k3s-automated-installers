@@ -24,9 +24,9 @@ RUN ARCH=$(dpkg --print-architecture) && \
 FROM node:20-slim AS frontend
 
 WORKDIR /build
-COPY vm-builder/vm-builder-web/package.json vm-builder/vm-builder-web/package-lock.json* ./
+COPY platform-tools/vm-builder/vm-builder-web/package.json platform-tools/vm-builder/vm-builder-web/package-lock.json* ./
 RUN npm ci
-COPY vm-builder/vm-builder-web/ ./
+COPY platform-tools/vm-builder/vm-builder-web/ ./
 RUN npm run build
 
 # Stage 3: Runtime
@@ -45,10 +45,9 @@ COPY --from=binaries /usr/local/bin/gh /usr/local/bin/gh
 RUN useradd -r -m -s /bin/bash platform
 
 WORKDIR /app
-COPY pyproject.toml /app/
-COPY idi/ /app/idi/
-COPY vm-builder/vm_builder/ /app/vm_builder/
-COPY vm-builder/vm-builder-web/ /app/web/
+COPY platform-tools/vm-builder/pyproject.toml /app/
+COPY platform-tools/vm-builder/vm_builder/ /app/vm_builder/
+COPY platform-tools/vm-builder/vm-builder-web/ /app/web/
 COPY --from=frontend /build/dist /app/web/dist
 
 # Install package (includes vm-builder CLI entrypoint)
