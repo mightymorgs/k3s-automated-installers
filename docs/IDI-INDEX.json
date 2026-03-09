@@ -2,9 +2,9 @@
   "package": "idi",
   "generated_at": "2026-03-09",
   "total_modules": 53,
-  "cgc_mode": true,
+  "cgc_mode": false,
   "git": {
-    "commit": "3ba52f430ba8c96c4422b720a2fa4bc7d7e8d5c6",
+    "commit": "e7b739932b9f7b8142129203db20f3312d1eb2e9",
     "branch": "main",
     "dirty": true
   },
