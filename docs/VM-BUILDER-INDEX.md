@@ -985,6 +985,19 @@ cli_atomic/validate_command.py
       └── commands/validate_cmd/output.py → print_validation_result()
 ```
 
+### CGC Call Graph (dynamic)
+
+*Call chains extracted from CodeGraphContext FalkorDB graph.*
+
+**main() calls:** `parse_args`, `password_to_hmac`, `generate_password`, `generate_salt`, `writeToReadme`, `appToReadme`, `getAppsList`, `get`, `create_context`, `get_adapter`, `detect_style`, `_is_cloudflare_spec`, `_is_vault_spec`, `_extract_known_resources_simple`, `derive_api_name`
+  + 56 more
+
+**init_shared_secrets() calls:** `print_results`, `print_summary`, `to_bws_dict`, `collect_shared_secrets`, `_prompt_ansible`, `get`, `_prompt_console`, `_prompt_hashicorp`, `_prompt_github`, `_prompt_cloudflare`, `_prompt_terraform`, `_prompt_tailscale`, `print_banner`, `load_config`, `write_secrets`
+  + 16 more
+
+**create_vm() calls:** `list_secrets`, `get_cache`, `set_list`, `get_list`, `edit_secret`, `log_bws_write`, `invalidate_value`, `get_audit_logger`, `get_secret`, `get_secret_by_id`, `set_value`, `get_value`, `get`, `create_secret`, `check_allowed_write_path`
+  + 12 more
+
 ### Command Summary
 
 | CLI Command | Atomic Handler | Core Service | External I/O |

@@ -686,6 +686,16 @@ def _cgc_file_imports(driver: Any, module_name: str) -> list[str]:
         return []
 
 
+def _cgc_entry_point_chains(driver: Any, entry_funcs: list[str]) -> list[tuple[str, list[str]]]:
+    """Query CGC for call chains from multiple entry point functions."""
+    results = []
+    for func in entry_funcs:
+        callees = _cgc_call_chain(driver, func, max_depth=2)
+        if callees:
+            results.append((func, callees))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Section 2: Entry Point Map
 # ---------------------------------------------------------------------------
@@ -820,6 +830,21 @@ def generate_entry_point_map_idi(pkg_root: Path, cgc: Any) -> str:
             lines.append(line)
         lines.append("```")
         lines.append("")
+
+    # CGC-enriched call chains for key entry points
+    if cgc:
+        cgc_entries = ["cli", "generate_all", "download_all", "generate_service"]
+        cgc_chains = _cgc_entry_point_chains(cgc, cgc_entries)
+        if cgc_chains:
+            lines.append("### CGC Call Graph (dynamic)")
+            lines.append("")
+            lines.append("*Call chains extracted from CodeGraphContext FalkorDB graph.*")
+            lines.append("")
+            for func_name, callees in cgc_chains:
+                lines.append(f"**{func_name}() calls:** {', '.join(f'`{c}`' for c in callees[:15])}")
+                if len(callees) > 15:
+                    lines.append(f"  + {len(callees) - 15} more")
+                lines.append("")
 
     # Command Summary table
     lines.append("### Command Summary")
@@ -959,6 +984,21 @@ def generate_entry_point_map_vm(pkg_root: Path, cgc: Any) -> str:
             lines.append(line)
         lines.append("```")
         lines.append("")
+
+    # CGC-enriched call chains for key entry points
+    if cgc:
+        cgc_entries = ["main", "init_shared_secrets", "create_vm", "validate_playbook"]
+        cgc_chains = _cgc_entry_point_chains(cgc, cgc_entries)
+        if cgc_chains:
+            lines.append("### CGC Call Graph (dynamic)")
+            lines.append("")
+            lines.append("*Call chains extracted from CodeGraphContext FalkorDB graph.*")
+            lines.append("")
+            for func_name, callees in cgc_chains:
+                lines.append(f"**{func_name}() calls:** {', '.join(f'`{c}`' for c in callees[:15])}")
+                if len(callees) > 15:
+                    lines.append(f"  + {len(callees) - 15} more")
+                lines.append("")
 
     # Command Summary table
     lines.append("### Command Summary")

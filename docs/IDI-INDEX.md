@@ -408,6 +408,21 @@ enrichment/context7.py → extract cross-app dependencies
   └── Output: cross-app dependency YAML
 ```
 
+### CGC Call Graph (dynamic)
+
+*Call chains extracted from CodeGraphContext FalkorDB graph.*
+
+**cli() calls:** `parse_args`, `download_all`, `get`, `convert_crd_service`, `build_openapi_from_datreeio`, `build_crd_paths`, `clean_schema`, `fetch_crd_schema`, `download_spec`, `validate_spec`, `list_services`, `load_manifest`, `generate_all`, `generate_service`, `create_context`
+  + 39 more
+
+**generate_all() calls:** `get`, `generate_service`, `create_context`, `get_adapter`, `detect_style`, `_extract_known_resources_simple`, `derive_api_name`, `load_spec`, `_resolve_refs`, `_generate_crd_service`, `load_crd_schemas`, `_fetch_chart_artifacts`, `classify_fields`, `_classify_single_field`, `write_crd_skill`
+  + 23 more
+
+**download_all() calls:** `get`, `convert_crd_service`, `build_openapi_from_datreeio`, `build_crd_paths`, `clean_schema`, `fetch_crd_schema`, `download_spec`, `validate_spec`
+
+**generate_service() calls:** `get`, `create_context`, `get_adapter`, `detect_style`, `_is_cloudflare_spec`, `_is_vault_spec`, `_extract_known_resources_simple`, `derive_api_name`, `load_spec`, `_resolve_refs`, `_follow_ref`, `_generate_crd_service`, `load_crd_schemas`, `_fetch_chart_artifacts`, `extract_crds_from_chart`
+  + 51 more
+
 ### Command Summary
 
 | Entry Point | Module | External I/O |
