@@ -11,7 +11,12 @@ from __future__ import annotations
 from typing import Any
 
 from idi.generation.crd.kind_registry import KindRegistry
-from idi.generation.crd.ref_detector import ManifestFlags, classify_walked_field, detect_status_output
+from idi.generation.crd.ref_detector import (
+    ManifestFlags,
+    classify_walked_field,
+    detect_scale_subresource,
+    detect_status_output,
+)
 from idi.generation.crd.schema_walker import walk_crd_schema, walk_crd_status
 from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
 
@@ -126,21 +131,53 @@ class CrdDepAdapter:
     def detect_outputs(
         self, operation: OperationInfo, spec: dict[str, Any],
     ) -> list[Output]:
-        """Detect CRD status outputs using walk_crd_status + detect_status_output."""
+        """Detect CRD status outputs using walk_crd_status + detect_status_output.
+
+        Also detects scale subresource declarations (C20) from CRD-level metadata.
+        """
         body = operation.body_schema
         if not body or "properties" not in body:
             return []
 
-        # Extract status schema.
-        status_schema = body.get("properties", {}).get("status", {})
-        if not status_schema or "properties" not in status_schema:
-            return []
-
-        status_properties = status_schema["properties"]
         kind = self._extract_kind(body)
         group = self._extract_group(body)
 
         outputs: list[Output] = []
+
+        # Phase 5A (C20): Detect scale subresource declarations.
+        crd_spec = body.get("properties", {}).get("spec", {})
+        if crd_spec:
+            # Build a synthetic CRD spec with versions array.
+            # In real CRDs the versions are at spec-level, but our body schema
+            # has the spec properties directly. Construct a version dict.
+            scale_fields = detect_scale_subresource(
+                {"versions": [{
+                    "name": "v1",
+                    "subresources": body.get("x-kubernetes-subresources", {}),
+                    "schema": {"openAPIV3Schema": body},
+                }]},
+                kind, group, self.registry,
+            )
+            for sf in scale_fields:
+                if sf.confidence < 0.7:
+                    continue
+                target_group = sf.target_group or group
+                target_field = sf.target_field or "name"
+                fact_ref = f"crdfacts://{target_group}/{sf.target_kind}#{target_field}"
+                outputs.append(Output(
+                    field=sf.field,
+                    fact_ref=fact_ref,
+                    source=f"crd_dep:{sf.detection_source}",
+                    priority=3 if operation.method == "POST" else 1,
+                ))
+
+        # Extract status schema.
+        status_schema = body.get("properties", {}).get("status", {})
+        if not status_schema or "properties" not in status_schema:
+            return outputs
+
+        status_properties = status_schema["properties"]
+
         for field in walk_crd_status(status_properties):
             result = detect_status_output(field, kind, group, self.registry)
             if result is None:

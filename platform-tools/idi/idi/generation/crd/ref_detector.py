@@ -206,6 +206,94 @@ def _get_shape_catalog() -> ShapeCatalog:
     return _SHAPE_CATALOG
 
 
+# Workload Kinds for scale subresource resolution.
+_SCALE_WORKLOAD_KINDS: frozenset[str] = frozenset({
+    "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet",
+})
+
+
+def detect_scale_subresource(
+    crd_spec: dict,
+    kind: str,
+    group: str,
+    registry: KindRegistry,
+) -> list[ClassifiedField]:
+    """Detect scale subresource declarations in CRD spec (C20).
+
+    Operates on CRD-level metadata, not individual walked fields.
+    Called once per CRD from crd_dep.py during processing.
+    """
+    results: list[ClassifiedField] = []
+
+    for version in crd_spec.get("versions", []):
+        if not isinstance(version, dict):
+            continue
+
+        subresources = version.get("subresources")
+        if not isinstance(subresources, dict):
+            continue
+        scale = subresources.get("scale")
+        if not isinstance(scale, dict):
+            continue
+
+        spec_path = scale.get("specReplicasPath", "")
+        status_path = scale.get("statusReplicasPath", "")
+
+        # Validate paths are non-empty strings.
+        if not spec_path or not isinstance(spec_path, str):
+            continue
+        if not status_path or not isinstance(status_path, str):
+            continue
+
+        # Validate path prefixes.
+        if not spec_path.startswith(".spec."):
+            continue
+        if not status_path.startswith(".status."):
+            continue
+
+        # Attempt to resolve the target workload Kind from spec properties.
+        target_kind = _resolve_scale_target(version, registry)
+        if target_kind is None:
+            continue
+
+        target_group = registry.group_for_kind(target_kind) or ""
+        results.append(ClassifiedField(
+            field="scale_subresource",
+            role="output_declaration",
+            confidence=0.9,
+            field_type="subresource",
+            target_kind=target_kind,
+            target_group=target_group,
+            detection_source="ref_detector:scale_subresource",
+            fact_shape="identity",
+        ))
+
+    return results
+
+
+def _resolve_scale_target(
+    version: dict,
+    registry: KindRegistry,
+) -> str | None:
+    """Scan CRD spec properties for a field referencing a workload Kind."""
+    schema = version.get("schema", {})
+    v3 = schema.get("openAPIV3Schema", {})
+    spec_props = (
+        v3.get("properties", {})
+        .get("spec", {})
+        .get("properties", {})
+    )
+    if not spec_props:
+        return None
+
+    for field_name in spec_props:
+        is_ref, ref_kind, _, _ = registry.is_ref_field(field_name)
+        if is_ref and ref_kind and ref_kind in _SCALE_WORKLOAD_KINDS:
+            return ref_kind
+
+    return None
+
+
 # Constants moved from adapters/kubernetes_crd.py.
 OBJECT_REFERENCE_PATTERNS = [
     "io.k8s.api.core.v1.ObjectReference",
