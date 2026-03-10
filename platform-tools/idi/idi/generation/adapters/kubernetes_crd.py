@@ -49,11 +49,6 @@ LABEL_SELECTOR_PATTERNS = [
     "LabelSelector",
 ]
 
-# Temporary compatibility shim — will be removed in section-05
-# when crd_dep.py is updated to use the registry instead.
-K8S_REF_PATTERNS: Dict[str, str] = {}
-
-
 class KubernetesCrdAdapter:
     """Adapter for Kubernetes CRD schema FK detection and output extraction."""
 

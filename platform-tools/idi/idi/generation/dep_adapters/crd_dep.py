@@ -12,25 +12,14 @@ from typing import Any
 
 from idi.generation.adapters.kubernetes_crd import (
     EXCLUDED_FIELDS,
-    K8S_REF_PATTERNS,
     KubernetesCrdAdapter,
 )
+from idi.generation.crd.kind_registry import KindRegistry
 from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
 
 
 # Top-level K8s envelope fields to skip entirely.
 _K8S_ENVELOPE = frozenset({"apiVersion", "kind", "metadata", "status"})
-
-# Core K8s resources that are valid cross-service targets.
-# A CRD spec (e.g. cert-manager) can reference these even though they
-# aren't in the CRD spec's own resource set.
-_CROSS_SERVICE_RESOURCES = frozenset({
-    "secrets", "configmaps", "services", "serviceaccounts",
-    "namespaces", "nodes", "persistentvolumes", "persistentvolumeclaims",
-    "endpoints", "pods", "deployments", "statefulsets", "daemonsets",
-    "ingresses", "ingressclasses", "storageclasses",
-    "secretstores", "clustersecretstores",  # ESO
-})
 
 
 class CrdDepAdapter:
@@ -38,6 +27,15 @@ class CrdDepAdapter:
 
     name = "crd_dep"
     priority = 80
+
+    def __init__(self, registry: KindRegistry | None = None):
+        """Initialize with an optional KindRegistry.
+
+        The registry is optional to support the no-arg discovery pattern
+        used by DepAdapterRegistry. When not provided, a default registry
+        with only core resources is used.
+        """
+        self.registry = registry or KindRegistry()
 
     def matches(self, spec: dict[str, Any], service_name: str) -> bool:
         """Match specs with K8s-style API paths."""
@@ -58,6 +56,7 @@ class CrdDepAdapter:
 
         adapter = KubernetesCrdAdapter(
             service=operation.service,
+            registry=self.registry,
             known_resources=known_resources,
         )
 
@@ -120,8 +119,9 @@ class CrdDepAdapter:
                 continue
             if prop_name in _K8S_ENVELOPE or prop_name in EXCLUDED_FIELDS:
                 continue
-            # Skip fields we already matched (they have Ref suffix or are known).
-            if prop_name in K8S_REF_PATTERNS or prop_name.lower() in K8S_REF_PATTERNS:
+            # Skip fields we already matched (they are known refs).
+            is_ref, _, _, _ = self.registry.is_ref_field(prop_name)
+            if is_ref:
                 continue
 
             # Recurse into nested objects.
@@ -150,7 +150,7 @@ class CrdDepAdapter:
 
         Handles both direct matches (secretstores in known) and
         lowercase normalization.  Falls back to core K8s resources
-        for cross-service targets (e.g. cert-manager → secrets).
+        for cross-service targets (e.g. cert-manager -> secrets).
 
         Returns:
             Tuple of (resolved_name, is_cross_service).
@@ -162,8 +162,8 @@ class CrdDepAdapter:
         for res in known_resources:
             if res.lower() == lower_target:
                 return res, False
-        # Allow core K8s resources as cross-service targets.
-        if lower_target in _CROSS_SERVICE_RESOURCES:
+        # Allow core K8s resources (bootstrap set only) as cross-service targets.
+        if lower_target in self.registry.core_plurals():
             return target, True
         return None, False
 
@@ -171,7 +171,10 @@ class CrdDepAdapter:
         self, operation: OperationInfo, spec: dict[str, Any],
     ) -> list[Output]:
         """Detect K8s-style outputs (metadata.uid, metadata.name)."""
-        adapter = KubernetesCrdAdapter(service=operation.service)
+        adapter = KubernetesCrdAdapter(
+            service=operation.service,
+            registry=self.registry,
+        )
         facts = adapter.extract_outputs(
             operation.response_schema,
             operation.resource,
