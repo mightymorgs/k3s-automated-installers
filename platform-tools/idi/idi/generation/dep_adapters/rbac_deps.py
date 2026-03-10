@@ -247,6 +247,227 @@ def extract_rbac_edges(
     return deps, outputs
 
 
+# ---------------------------------------------------------------------------
+# Phase 5A (C21): Webhook configuration parsing
+# ---------------------------------------------------------------------------
+
+# Regex for stripping Go template expressions from Helm templates.
+# Matches {{ ... }}, {{- ... }}, {{ ... -}}, and {{- ... -}} including
+# multiline spans.  Uses non-greedy .*? to avoid over-matching.
+_GO_TPL_RE = re.compile(r"\{\{-?\s*.*?\s*-?\}\}", re.DOTALL)
+
+
+def _strip_go_templates(content: str) -> str:
+    """Replace {{ ... }} Go template blocks with safe YAML placeholders.
+
+    Handles: {{ .Values.x }}, {{ if ... }}...{{ end }}, {{ include ... }},
+    {{ b64enc ... }}, and multiline template blocks.
+
+    Uses 'placeholder' (no quotes) as replacement so adjacent templates
+    on the same line merge into a single token rather than producing
+    invalid YAML like '"placeholder"/"placeholder"'.
+    """
+    return _GO_TPL_RE.sub("placeholder", content)
+
+
+def _resolve_plural_resource(
+    plural: str,
+    api_group: str,
+    registry: KindRegistry,
+) -> str | None:
+    """Resolve a plural resource name to a Kind using KindRegistry.
+
+    Uses KindRegistry's plural field for reverse lookup. Falls back to
+    naive depluralisation (remove trailing 's') if not found.
+    """
+    # Strip subresource paths: pods/status -> pods.
+    base = plural.split("/")[0] if "/" in plural else plural
+
+    # Direct plural lookup.
+    kind = registry.plural_to_kind(base)
+    if kind is not None:
+        return kind
+
+    # Naive depluralisation: remove trailing 's', capitalize first letter.
+    if base.endswith("s") and len(base) > 1:
+        naive = base[:-1].capitalize()
+        if naive in registry.all_kinds():
+            return naive
+
+    return None
+
+
+def extract_webhook_dependencies(
+    chart_path: str,
+    registry: KindRegistry,
+) -> list[Dependency]:
+    """Parse Helm webhook configuration templates for dependency signals.
+
+    Steps:
+    1. Walk templates/ for YAML files
+    2. Strip Go template expressions
+    3. Parse with yaml.safe_load_all
+    4. Extract webhook rules and resolve against KindRegistry
+    5. Emit Dependency objects where target resource depends on webhook
+    """
+    templates_dir = Path(chart_path) / "templates"
+    if not templates_dir.is_dir():
+        return []
+
+    results: list[Dependency] = []
+
+    for yaml_file in sorted(templates_dir.iterdir()):
+        if not yaml_file.is_file():
+            continue
+        if yaml_file.suffix not in (".yaml", ".yml"):
+            continue
+
+        try:
+            raw_content = yaml_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        stripped = _strip_go_templates(raw_content)
+
+        try:
+            docs = list(yaml.safe_load_all(stripped))
+        except yaml.YAMLError:
+            logger.debug("Failed to parse webhook YAML: %s", yaml_file)
+            continue
+
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            doc_kind = doc.get("kind", "")
+            if doc_kind not in (
+                "ValidatingWebhookConfiguration",
+                "MutatingWebhookConfiguration",
+            ):
+                continue
+
+            is_validating = doc_kind == "ValidatingWebhookConfiguration"
+            source = (
+                "rbac_deps:validating_webhook"
+                if is_validating
+                else "rbac_deps:mutating_webhook"
+            )
+
+            webhooks = doc.get("webhooks") or []
+            for webhook in webhooks:
+                if not isinstance(webhook, dict):
+                    continue
+                rules = webhook.get("rules") or []
+                for rule in rules:
+                    if not isinstance(rule, dict):
+                        continue
+                    api_groups = rule.get("apiGroups") or []
+                    resources = rule.get("resources") or []
+
+                    # Wildcard handling: skip entirely.
+                    if "*" in resources or "*" in api_groups:
+                        continue
+
+                    # Cross-product: apiGroups x resources.
+                    for api_group in api_groups:
+                        if not isinstance(api_group, str):
+                            continue
+                        for resource_plural in resources:
+                            if not isinstance(resource_plural, str):
+                                continue
+                            resolved = _resolve_plural_resource(
+                                resource_plural, api_group, registry,
+                            )
+                            if resolved is None:
+                                continue
+
+                            results.append(Dependency(
+                                field=f"webhook:{resource_plural}",
+                                target_resource=resource_plural,
+                                target_operation="create",
+                                fact_ref=(
+                                    f"crdfacts://admissionregistration.k8s.io/"
+                                    f"{doc_kind}#name"
+                                ),
+                                confidence=0.85,
+                                source=source,
+                                lineage_type="reference",
+                            ))
+
+    return results
+
+
+def _extract_webhook_deps_from_content(
+    yaml_content: str,
+    registry: KindRegistry,
+) -> list[Dependency]:
+    """Extract webhook dependencies from in-memory YAML content.
+
+    Used by RbacDepAdapter to parse webhook configs from already-loaded
+    chart template content (same content used for RBAC extraction).
+    """
+    stripped = _strip_go_templates(yaml_content)
+    results: list[Dependency] = []
+
+    try:
+        docs = list(yaml.safe_load_all(stripped))
+    except yaml.YAMLError:
+        return []
+
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        doc_kind = doc.get("kind", "")
+        if doc_kind not in (
+            "ValidatingWebhookConfiguration",
+            "MutatingWebhookConfiguration",
+        ):
+            continue
+
+        source = (
+            "rbac_deps:validating_webhook"
+            if doc_kind == "ValidatingWebhookConfiguration"
+            else "rbac_deps:mutating_webhook"
+        )
+
+        for webhook in doc.get("webhooks") or []:
+            if not isinstance(webhook, dict):
+                continue
+            for rule in webhook.get("rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                api_groups = rule.get("apiGroups") or []
+                resources = rule.get("resources") or []
+
+                if "*" in resources or "*" in api_groups:
+                    continue
+
+                for api_group in api_groups:
+                    if not isinstance(api_group, str):
+                        continue
+                    for resource_plural in resources:
+                        if not isinstance(resource_plural, str):
+                            continue
+                        resolved = _resolve_plural_resource(
+                            resource_plural, api_group, registry,
+                        )
+                        if resolved is None:
+                            continue
+                        results.append(Dependency(
+                            field=f"webhook:{resource_plural}",
+                            target_resource=resource_plural,
+                            target_operation="create",
+                            fact_ref=(
+                                f"crdfacts://admissionregistration.k8s.io/"
+                                f"{doc_kind}#name"
+                            ),
+                            confidence=0.85,
+                            source=source,
+                            lineage_type="reference",
+                        ))
+
+    return results
+
+
 class RbacDepAdapter:
     """Detects K8s operator dependencies from Helm chart RBAC rules."""
 
@@ -363,6 +584,10 @@ class RbacDepAdapter:
             return result
 
         deps, outputs = extract_rbac_edges(yaml_content, self.registry)
+
+        # Phase 5A (C21): Extract webhook dependencies from the same YAML content.
+        webhook_deps = _extract_webhook_deps_from_content(yaml_content, self.registry)
+        deps.extend(webhook_deps)
 
         # Intra-adapter deduplication.
         seen_deps: dict[tuple[str, str], Dependency] = {}
