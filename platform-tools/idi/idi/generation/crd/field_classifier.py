@@ -33,6 +33,8 @@ class ClassifiedField:
     cross_namespace: bool = False
     description: str = ""
     detection_source: str = ""  # Identifies which classification layer produced this result
+    fact_shape: str = ""        # "identity", "lifecycle", or "config"
+    target_field: str = "name"  # canonical target field for URI fragment
 
 
 def classify_fields(

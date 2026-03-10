@@ -311,3 +311,84 @@ class TestDetectionSource:
         fields = _classify_fixture(fixture, self.registry)
         for f in fields:
             assert f.detection_source, f"Field {f.field} has empty detection_source"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Section 01: ClassifiedField extension tests
+# ---------------------------------------------------------------------------
+
+
+class TestClassifiedFieldExtensions:
+    """Verify the three new Phase 2 fields on ClassifiedField."""
+
+    def test_fact_shape_defaults_to_empty(self):
+        """fact_shape defaults to empty string."""
+        cf = ClassifiedField(
+            field="spec.foo", role="config_field",
+            confidence=0.5, field_type="string",
+        )
+        assert cf.fact_shape == ""
+
+    def test_target_field_defaults_to_name(self):
+        """target_field defaults to 'name'."""
+        cf = ClassifiedField(
+            field="spec.foo", role="config_field",
+            confidence=0.5, field_type="string",
+        )
+        assert cf.target_field == "name"
+
+    def test_detection_source_defaults_to_empty(self):
+        """detection_source defaults to empty string (pre-existing)."""
+        cf = ClassifiedField(
+            field="spec.foo", role="config_field",
+            confidence=0.5, field_type="string",
+        )
+        assert cf.detection_source == ""
+
+    def test_existing_code_without_new_fields_still_works(self):
+        """Constructing ClassifiedField with only original fields succeeds."""
+        cf = ClassifiedField(
+            field="spec.issuerRef", role="input_ref",
+            confidence=0.9, field_type="object",
+            target_kind="Issuer", target_group="cert-manager.io",
+            required=True, cross_namespace=False,
+            description="Reference to issuer",
+        )
+        assert cf.detection_source == ""
+        assert cf.fact_shape == ""
+        assert cf.target_field == "name"
+
+    def test_new_fields_can_be_set_explicitly(self):
+        """New fields can be explicitly set on construction."""
+        cf = ClassifiedField(
+            field="spec.issuerRef", role="input_ref",
+            confidence=0.9, field_type="object",
+            detection_source="ref_detector:kind_registry",
+            fact_shape="identity",
+            target_field="name",
+        )
+        assert cf.detection_source == "ref_detector:kind_registry"
+        assert cf.fact_shape == "identity"
+        assert cf.target_field == "name"
+
+    def test_fact_shape_lifecycle(self):
+        """fact_shape can be set to 'lifecycle'."""
+        cf = ClassifiedField(
+            field="status.conditions", role="output_declaration",
+            confidence=0.9, field_type="array",
+            fact_shape="lifecycle",
+            target_field="type",
+        )
+        assert cf.fact_shape == "lifecycle"
+        assert cf.target_field == "type"
+
+    def test_fact_shape_config(self):
+        """fact_shape can be set to 'config'."""
+        cf = ClassifiedField(
+            field="spec.replicas", role="config_field",
+            confidence=0.5, field_type="integer",
+            fact_shape="config",
+            target_field="replicas",
+        )
+        assert cf.fact_shape == "config"
+        assert cf.target_field == "replicas"
