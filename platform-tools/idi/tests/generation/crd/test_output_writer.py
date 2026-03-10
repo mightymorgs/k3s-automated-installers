@@ -131,6 +131,24 @@ class TestRefContent:
     def test_confidence(self):
         assert self.ref["confidence"] == 0.9
 
+    def test_target_plural_empty_without_registry(self):
+        """target_plural is empty string when no registry is provided."""
+        assert self.ref["target_plural"] == ""
+
+
+class TestRefContentWithRegistry:
+    @pytest.fixture(autouse=True)
+    def setup(self, populated_registry):
+        fixture = _load_fixture("cert-manager", "Certificate")
+        fields = _classify_fixture(fixture, populated_registry)
+        skill = build_decomposed_skill(fixture, fields, registry=populated_registry)
+        self.ref = skill["refs"]["issuerRef"]
+        self.registry = populated_registry
+
+    def test_target_plural_populated(self):
+        """target_plural is populated from KindRegistry when registry is provided."""
+        assert self.ref["target_plural"] == "issuers"
+
 
 # ---------------------------------------------------------------------------
 # Output content tests
@@ -156,6 +174,23 @@ class TestOutputContent:
 
     def test_fact_shape(self):
         assert self.output["fact_shape"] == "identity"
+
+    def test_produces_plural_empty_without_registry(self):
+        """produces_plural is empty string when no registry is provided."""
+        assert self.output["produces_plural"] == ""
+
+
+class TestOutputContentWithRegistry:
+    @pytest.fixture(autouse=True)
+    def setup(self, populated_registry):
+        fixture = _load_fixture("cert-manager", "Certificate")
+        fields = _classify_fixture(fixture, populated_registry)
+        skill = build_decomposed_skill(fixture, fields, registry=populated_registry)
+        self.output = skill["outputs"]["secretName"]
+
+    def test_produces_plural_populated(self):
+        """produces_plural is populated from KindRegistry when registry is provided."""
+        assert self.output["produces_plural"] == "secrets"
 
 
 # ---------------------------------------------------------------------------

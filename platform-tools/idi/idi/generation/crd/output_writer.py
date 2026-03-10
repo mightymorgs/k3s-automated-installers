@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from idi.generation.crd.field_classifier import ClassifiedField
+from idi.generation.crd.kind_registry import KindRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ def build_decomposed_skill(
     fields: list[ClassifiedField],
     status_conditions: list[str] | None = None,
     accepts_arbitrary_resources: bool = False,
+    registry: KindRegistry | None = None,
 ) -> dict[str, Any]:
     """Build decomposed CRD skill as a dict-of-dicts.
 
@@ -151,6 +153,7 @@ def build_decomposed_skill(
         fields: Classified fields from field_classifier.
         status_conditions: Status conditions (default: ["Ready"]).
         accepts_arbitrary_resources: If True, add flag to manifest JSON.
+        registry: KindRegistry for resolving target_plural. If None, plurals are empty.
 
     Returns:
         Dict with keys: 'manifest', 'operation', 'refs', 'outputs', 'fields'.
@@ -178,7 +181,7 @@ def build_decomposed_skill(
             "field_path": f.field,
             "target_kind": f.target_kind,
             "target_group": f.target_group or group,
-            "target_plural": "",  # Not available on ClassifiedField; filled by orchestrator if needed.
+            "target_plural": (registry.kind_to_plural(f.target_kind) or "") if registry else "",
             "role": "input_ref",
             "required": f.required,
             "cross_namespace": f.cross_namespace,
@@ -200,7 +203,7 @@ def build_decomposed_skill(
             "field_path": f.field,
             "produces_kind": f.target_kind or "Unknown",
             "produces_group": f.target_group or "core",
-            "produces_plural": "",
+            "produces_plural": (registry.kind_to_plural(f.target_kind) or "") if (registry and f.target_kind) else "",
             "role": "output_declaration",
             "fact_ref": _fact_ref_for_output(f),
             "fact_shape": f.fact_shape or "identity",
@@ -307,6 +310,7 @@ def write_decomposed_skill(
     output_dir: Path,
     status_conditions: list[str] | None = None,
     accepts_arbitrary_resources: bool = False,
+    registry: KindRegistry | None = None,
 ) -> Path:
     """Write decomposed CRD skill files to the Kind directory.
 
@@ -319,6 +323,7 @@ def write_decomposed_skill(
     skill = build_decomposed_skill(
         crd_info, fields, status_conditions,
         accepts_arbitrary_resources=accepts_arbitrary_resources,
+        registry=registry,
     )
 
     group_seg = _sanitize_path_segment(crd_info["group"])
