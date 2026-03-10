@@ -74,9 +74,15 @@ class CrdDepAdapter:
             if any(field.path.startswith(ref_path + ".") for ref_path in classified_ref_paths):
                 continue
 
-            # Get sibling fields for enum_kind detection.
+            # Get sibling fields for enum_kind detection and constraint_fk (C29).
+            # Populate for: (a) string fields with enum values, or
+            # (b) string fields with DNS-name patterns/formats (needed by C29).
             sibling_fields = None
-            if field.schema.get("type") == "string" and field.schema.get("enum"):
+            if field.schema.get("type") == "string" and (
+                field.schema.get("enum")
+                or field.schema.get("pattern")
+                or field.schema.get("format")
+            ):
                 # Look up parent object properties for sibling detection.
                 sibling_fields = self._get_sibling_fields(
                     spec_properties, field.parent_path, "spec",
