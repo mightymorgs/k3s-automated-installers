@@ -7,12 +7,19 @@ A top-level orchestrator runs them in priority order.
 C10: status field output detection
 C15: absorbs detection logic from kubernetes_crd.py
 C18: enum Kind detection
+C19: reference tuple detection (Phase 3)
+C24: examples/defaults extraction (Phase 3)
+C25: API group literals in constraints (Phase 3)
+C26: pass-through manifest detection (Phase 3)
+C27: status addressability upgrade (Phase 3)
+C28: false-positive suppression (Phase 3)
 
 Critical: Precision > recall. No edge emitted below confidence 0.7.
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from idi.generation.crd.field_classifier import ClassifiedField
@@ -22,6 +29,19 @@ from idi.generation.crd.side_effect_registry import (
     classify_name_field,
     get_side_effects,
 )
+
+
+@dataclass
+class ManifestFlags:
+    """Manifest-level flags detected during field classification.
+
+    Pass-in accumulator: caller creates one instance before the walker
+    loop, passes it to classify_walked_field, detectors mutate it.
+    """
+
+    accepts_arbitrary_resources: bool = False
+    passthrough_detection_source: str = ""
+    passthrough_field_path: str = ""  # For debugging: which field triggered the flag
 
 # Constants moved from adapters/kubernetes_crd.py.
 OBJECT_REFERENCE_PATTERNS = [
@@ -300,12 +320,32 @@ def detect_namespace(field: WalkedField) -> bool:
     return "namespace" in schema.get("properties", {})
 
 
+def _deduplicate_classifications(
+    classifications: list[ClassifiedField],
+) -> list[ClassifiedField]:
+    """Deduplicate classifications by (field, role, target_kind, target_group).
+
+    When duplicates exist, keep the one with highest confidence.
+    """
+    if not classifications:
+        return classifications
+
+    best: dict[tuple[str, str, str | None, str | None], ClassifiedField] = {}
+    for c in classifications:
+        key = (c.field, c.role, c.target_kind, c.target_group)
+        existing = best.get(key)
+        if existing is None or c.confidence > existing.confidence:
+            best[key] = c
+    return list(best.values())
+
+
 def classify_walked_field(
     field: WalkedField,
     registry: KindRegistry,
     kind: str,
     group: str,
     sibling_fields: dict[str, Any] | None = None,
+    manifest_flags: ManifestFlags | None = None,
 ) -> list[ClassifiedField]:
     """Top-level orchestrator for spec field classification.
 
@@ -324,6 +364,9 @@ def classify_walked_field(
         kind: The source CRD's Kind name.
         group: The source CRD's API group.
         sibling_fields: Parent object's properties (for enum_kind).
+        manifest_flags: Optional accumulator for manifest-level flags.
+            If provided, passthrough detection will mutate it.
+            If None, passthrough detection still runs but the flag is lost.
 
     Returns:
         List of ClassifiedField (usually 1 item; multiple for enum_kind).

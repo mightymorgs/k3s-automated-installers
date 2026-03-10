@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from idi.generation.crd.kind_registry import KindRegistry
-from idi.generation.crd.ref_detector import classify_walked_field, detect_status_output
+from idi.generation.crd.ref_detector import ManifestFlags, classify_walked_field, detect_status_output
 from idi.generation.crd.schema_walker import walk_crd_schema, walk_crd_status
 from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
 
@@ -62,6 +62,7 @@ class CrdDepAdapter:
 
         results: list[Dependency] = []
         classified_ref_paths: set[str] = set()
+        flags = ManifestFlags()
 
         for field in walk_crd_schema(spec_properties, spec_required):
             # Parent-child deduplication: skip descendants of classified refs.
@@ -79,6 +80,7 @@ class CrdDepAdapter:
             classifications = classify_walked_field(
                 field, self.registry, kind, group,
                 sibling_fields=sibling_fields,
+                manifest_flags=flags,
             )
 
             for classified in classifications:
