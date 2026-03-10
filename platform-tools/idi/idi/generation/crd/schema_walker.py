@@ -57,7 +57,7 @@ def walk_crd_schema(
     properties: dict[str, Any],
     required: list[str] | None = None,
     prefix: str = "spec",
-    max_depth: int = 5,
+    max_depth: int = 8,
 ) -> Iterator[WalkedField]:
     """Recursively yield every field in a CRD spec schema.
 
@@ -65,7 +65,9 @@ def walk_crd_schema(
         properties: The properties dict from the spec schema.
         required: Required field names at this level.
         prefix: Dot-path prefix (default: "spec").
-        max_depth: Maximum traversal depth (default: 5).
+        max_depth: Maximum traversal depth (default: 8).
+            Increased from 5 to 8 to cover deeply nested provider auth
+            chains (e.g., external-secrets SecretStore at depth 6-7).
 
     Yields:
         WalkedField for each property at every level.
