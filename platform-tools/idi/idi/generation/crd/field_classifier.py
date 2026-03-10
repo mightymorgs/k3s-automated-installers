@@ -14,11 +14,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from idi.generation.adapters.kubernetes_crd import (
-    K8S_REF_PATTERNS,
-    _COMPOUND_SUFFIXES,
-    EXCLUDED_FIELDS,
-)
+from idi.generation.adapters.kubernetes_crd import EXCLUDED_FIELDS
+from idi.generation.crd.kind_registry import KindRegistry
 from idi.generation.crd.side_effect_registry import classify_name_field
 
 
@@ -42,6 +39,7 @@ def classify_fields(
     spec_required: list[str],
     group: str,
     kind: str,
+    registry: KindRegistry,
     prefix: str = "spec",
 ) -> list[ClassifiedField]:
     """Classify all spec properties into roles.
@@ -51,6 +49,7 @@ def classify_fields(
         spec_required: Required field names.
         group: CRD API group.
         kind: CRD Kind name.
+        registry: KindRegistry with core and CRD resources.
         prefix: Dot-path prefix (default: "spec").
 
     Returns:
@@ -71,7 +70,7 @@ def classify_fields(
 
         classified = _classify_single_field(
             prop_name, prop_schema, field_path, field_type,
-            description, is_required, group, kind,
+            description, is_required, group, kind, registry,
         )
         results.append(classified)
 
@@ -87,6 +86,7 @@ def _classify_single_field(
     is_required: bool,
     group: str,
     kind: str,
+    registry: KindRegistry,
 ) -> ClassifiedField:
     """Classify a single field using layered heuristics."""
 
@@ -117,17 +117,19 @@ def _classify_single_field(
                 required=is_required, description=description,
             )
         if role == "input_ref":
-            # Infer target from compound suffix.
-            base = re.sub(r'[Nn]ame$', '', prop_name).lower()
-            for suffix, resource in _COMPOUND_SUFFIXES.items():
-                if base.endswith(suffix) or base == suffix:
-                    return ClassifiedField(
-                        field=field_path, role="input_ref",
-                        confidence=confidence, field_type=field_type,
-                        target_kind=_resource_to_kind(resource),
-                        target_group=_resource_to_group(resource),
-                        required=is_required, description=description,
-                    )
+            # Infer target from registry.
+            is_ref, target_kind, target_plural, target_group = registry.is_ref_field(
+                prop_name, current_group=group,
+            )
+            if is_ref and target_kind:
+                return ClassifiedField(
+                    field=field_path, role="input_ref",
+                    confidence=confidence, field_type=field_type,
+                    target_kind=target_kind,
+                    target_group=target_group,
+                    required=is_required, description=description,
+                )
+            # No registry match — still input_ref but without target.
             return ClassifiedField(
                 field=field_path, role="input_ref",
                 confidence=confidence, field_type=field_type,
@@ -135,11 +137,28 @@ def _classify_single_field(
             )
         # config_field fallthrough — fall to default at bottom.
 
-    # 2. Check K8S_REF_PATTERNS (exact match, non-*Name fields only).
-    if lower_name in K8S_REF_PATTERNS:
-        target_resource = K8S_REF_PATTERNS[lower_name]
-        target_kind = _resource_to_kind(target_resource)
-        target_group = _resource_to_group(target_resource)
+    # 2. Object with name property + *Ref suffix → input_ref (structural heuristic).
+    # Checked before generic registry matching because the structural shape is a
+    # stronger signal. Uses the current CRD's group as target_group (matching old behavior).
+    if (
+        field_type == "object"
+        and "name" in prop_schema.get("properties", {})
+        and lower_name.endswith("ref")
+    ):
+        inferred_kind = _infer_kind_from_ref(prop_name)
+        cross_ns = "namespace" in prop_schema.get("properties", {})
+        return ClassifiedField(
+            field=field_path, role="input_ref", confidence=0.9,
+            field_type=field_type, target_kind=inferred_kind,
+            target_group=group, required=is_required,
+            cross_namespace=cross_ns, description=description,
+        )
+
+    # 3. Check registry for {Kind}Ref / {Kind}Name patterns.
+    is_ref, target_kind, target_plural, target_group = registry.is_ref_field(
+        prop_name, current_group=group,
+    )
+    if is_ref and target_kind:
         cross_ns = _has_namespace_prop(prop_schema)
         return ClassifiedField(
             field=field_path, role="input_ref", confidence=0.9,
@@ -148,35 +167,8 @@ def _classify_single_field(
             cross_namespace=cross_ns, description=description,
         )
 
-    # 3. Object with name property + *Ref suffix → input_ref.
-    if (
-        field_type == "object"
-        and "name" in prop_schema.get("properties", {})
-        and lower_name.endswith("ref")
-    ):
-        target_kind = _infer_kind_from_ref(prop_name)
-        cross_ns = "namespace" in prop_schema.get("properties", {})
-        return ClassifiedField(
-            field=field_path, role="input_ref", confidence=0.9,
-            field_type=field_type, target_kind=target_kind,
-            target_group=group, required=is_required,
-            cross_namespace=cross_ns, description=description,
-        )
-
-    # 4. Compound *Ref suffix (e.g., passwordSecretRef).
-    if lower_name.endswith("ref"):
-        base = re.sub(r'[Rr]ef$', '', prop_name).lower()
-        for suffix, resource in _COMPOUND_SUFFIXES.items():
-            if base.endswith(suffix) and base != suffix:
-                target_kind = _resource_to_kind(resource)
-                target_group = _resource_to_group(resource)
-                cross_ns = _has_namespace_prop(prop_schema)
-                return ClassifiedField(
-                    field=field_path, role="input_ref", confidence=0.9,
-                    field_type=field_type, target_kind=target_kind,
-                    target_group=target_group, required=is_required,
-                    cross_namespace=cross_ns, description=description,
-                )
+    # 4. (REMOVED — compound *Ref suffix handling is now covered by layer 2
+    #     via registry.is_ref_field() which handles longest-match.)
 
     # 5. Default: config_field.
     return ClassifiedField(
@@ -188,36 +180,18 @@ def _classify_single_field(
 
 # -- Helpers ----------------------------------------------------------------
 
-_KIND_MAP = {
-    "secrets": "Secret",
-    "configmaps": "ConfigMap",
-    "services": "Service",
-    "serviceaccounts": "ServiceAccount",
-    "persistentvolumes": "PersistentVolume",
-    "persistentvolumeclaims": "PersistentVolumeClaim",
-    "nodes": "Node",
-    "namespaces": "Namespace",
-    "endpoints": "Endpoint",
-    "secretstores": "SecretStore",
-    "clustersecretstores": "ClusterSecretStore",
-    "ingressclasses": "IngressClass",
-    "clusters": "Cluster",
-    "externalsecrets": "ExternalSecret",
-}
 
-_CORE_RESOURCES = frozenset({
-    "secrets", "configmaps", "services", "serviceaccounts",
-    "persistentvolumes", "persistentvolumeclaims",
-    "nodes", "namespaces", "endpoints",
-})
+def _resource_to_kind(resource: str, registry: KindRegistry) -> str | None:
+    """Look up Kind name for a plural resource. Returns None if not registered."""
+    return registry.plural_to_kind(resource)
 
 
-def _resource_to_kind(resource: str) -> str:
-    return _KIND_MAP.get(resource, resource.title().replace("s", "", 1))
-
-
-def _resource_to_group(resource: str) -> str:
-    return "core" if resource in _CORE_RESOURCES else ""
+def _resource_to_group(resource: str, registry: KindRegistry) -> str:
+    """Look up API group for a plural resource."""
+    kind = registry.plural_to_kind(resource)
+    if kind:
+        return registry.group_for_kind(kind) or ""
+    return ""
 
 
 def _has_namespace_prop(schema: dict[str, Any]) -> bool:

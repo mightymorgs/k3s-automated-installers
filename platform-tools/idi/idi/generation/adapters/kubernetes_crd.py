@@ -7,7 +7,7 @@ Handles Kubernetes-specific FK detection patterns:
 - Namespaced vs cluster-scoped resources
 
 Usage:
-    adapter = KubernetesCrdAdapter(service="external-secrets")
+    adapter = KubernetesCrdAdapter(service="external-secrets", registry=registry)
     refs = adapter.extract_field_refs(schema, source_resource="externalsecret")
     outputs = adapter.extract_outputs(response_schema, resource="externalsecret", operation="create")
 """
@@ -17,83 +17,6 @@ from typing import Dict, List, Any, Optional
 
 from idi.generation.fact_model import ProducedFact, FactRef
 
-
-# Known K8s resource suffixes in compound field names (e.g., passwordSecretRef → secrets)
-_COMPOUND_SUFFIXES = {
-    "secret": "secrets",
-    "configmap": "configmaps",
-    "service": "services",
-    "serviceaccount": "serviceaccounts",
-    "volume": "persistentvolumes",
-    "node": "nodes",
-    "cluster": "clusters",
-    "namespace": "namespaces",
-    "endpoint": "endpoints",
-}
-
-
-# K8s reference patterns - maps field name patterns to target resource names
-K8S_REF_PATTERNS: Dict[str, str] = {
-    # Standard ref fields
-    "secretRef": "secrets",
-    "secretref": "secrets",
-    "configMapRef": "configmaps",
-    "configmapref": "configmaps",
-    "configMapKeyRef": "configmaps",
-    "configmapkeyref": "configmaps",
-    "secretKeyRef": "secrets",
-    "secretkeyref": "secrets",
-    "serviceAccountRef": "serviceaccounts",
-    "serviceaccountref": "serviceaccounts",
-    "serviceAccountName": "serviceaccounts",
-    "serviceaccountname": "serviceaccounts",
-    # Name-based fields
-    "secretName": "secrets",
-    "secretname": "secrets",
-    "configMapName": "configmaps",
-    "configmapname": "configmaps",
-    "claimName": "persistentvolumeclaims",
-    "claimname": "persistentvolumeclaims",
-    "storeName": "secretstores",
-    "storename": "secretstores",
-    "ingressClassName": "ingressclasses",
-    "ingressclassname": "ingressclasses",
-    "externalSecretName": "externalsecrets",
-    "externalsecretname": "externalsecrets",
-    "volumeName": "persistentvolumes",
-    "volumename": "persistentvolumes",
-    "nodeName": "nodes",
-    "nodename": "nodes",
-    "clusterName": "clusters",
-    "clustername": "clusters",
-    # Generic refs
-    "claimRef": "persistentvolumeclaims",
-    "claimref": "persistentvolumeclaims",
-    "secretStoreRef": "secretstores",
-    "secretstoreref": "secretstores",
-    "clusterSecretStoreRef": "clustersecretstores",
-    "clustersecretstoreref": "clustersecretstores",
-    "localSecretRef": "secrets",
-    "localsecretref": "secrets",
-}
-
-# Core K8s resource types (for validation and special handling)
-CORE_K8S_RESOURCES = frozenset({
-    "pods",
-    "services",
-    "secrets",
-    "configmaps",
-    "serviceaccounts",
-    "namespaces",
-    "nodes",
-    "persistentvolumes",
-    "persistentvolumeclaims",
-    "endpoints",
-    "events",
-    "limitranges",
-    "resourcequotas",
-    "replicationcontrollers",
-})
 
 # Fields to exclude from FK detection
 EXCLUDED_FIELDS = frozenset({
@@ -126,18 +49,24 @@ LABEL_SELECTOR_PATTERNS = [
     "LabelSelector",
 ]
 
+# Temporary compatibility shim — will be removed in section-05
+# when crd_dep.py is updated to use the registry instead.
+K8S_REF_PATTERNS: Dict[str, str] = {}
+
 
 class KubernetesCrdAdapter:
     """Adapter for Kubernetes CRD schema FK detection and output extraction."""
 
-    def __init__(self, service: str, known_resources: Optional[set] = None):
+    def __init__(self, service: str, registry=None, known_resources: Optional[set] = None):
         """Initialize adapter for a specific service.
 
         Args:
             service: Service name (e.g., 'external-secrets', 'cert-manager', 'k8s')
+            registry: KindRegistry with core resources and CRDs registered
             known_resources: Optional set of known resource names for FK resolution
         """
         self.service = service
+        self.registry = registry
         self.known_resources = known_resources or set()
 
     def extract_field_refs(
@@ -230,36 +159,29 @@ class KubernetesCrdAdapter:
                         "cross_namespace": False,
                     })
                 else:
-                    # Check compound suffixes: e.g. secretName, configMapName
-                    base = re.sub(r'[Nn]ame$', '', prop_name).lower()
-                    for suffix, resource in _COMPOUND_SUFFIXES.items():
-                        if base.endswith(suffix) or base == suffix:
+                    # Check via registry for compound name patterns.
+                    if self.registry:
+                        is_ref, _, target_plural, _ = self.registry.is_ref_field(prop_name)
+                        if is_ref and target_plural:
                             refs.append({
                                 "field": prop_name,
-                                "target_resource": resource,
+                                "target_resource": target_plural,
                                 "type": "k8s_ref",
                                 "source": "k8s_name_pattern",
                                 "cross_namespace": False,
                             })
-                            break
 
         return refs
 
     def _match_ref_pattern(self, field_name: str) -> Optional[str]:
-        """Match a field name to a K8s ref pattern.
+        """Match a field name to a known Kind reference.
 
-        Args:
-            field_name: Property name from schema
-
-        Returns:
-            Target resource name or None if no match
+        Returns target resource plural or None.
         """
-        # Direct lookup (case-insensitive)
-        lower_name = field_name.lower()
-        if lower_name in K8S_REF_PATTERNS:
-            return K8S_REF_PATTERNS[lower_name]
-        if field_name in K8S_REF_PATTERNS:
-            return K8S_REF_PATTERNS[field_name]
+        if self.registry:
+            is_ref, _, target_plural, _ = self.registry.is_ref_field(field_name)
+            if is_ref and target_plural:
+                return target_plural
         return None
 
     def _has_namespace_property(self, schema: Dict[str, Any]) -> bool:
@@ -279,32 +201,23 @@ class KubernetesCrdAdapter:
     def _infer_target_from_field_name(self, field_name: str) -> str:
         """Infer target resource from a ref field name.
 
-        Args:
-            field_name: Field name like 'secretStoreRef', 'claimRef'
-
-        Returns:
-            Inferred target resource name
+        Uses registry to resolve. Returns plural or falls back to naive pluralization.
         """
-        # Remove 'Ref' suffix
+        if self.registry:
+            is_ref, _, target_plural, _ = self.registry.is_ref_field(field_name)
+            if is_ref and target_plural:
+                return target_plural
+
+        # Fallback: strip Ref, lowercase, best-effort pluralize.
+        # Reached for CRD-specific refs not in registry.
         base = re.sub(r'[Rr]ef$', '', field_name)
-
-        # Check if the base ends with a known K8s resource type
         lower = base.lower()
-        for suffix, resource in _COMPOUND_SUFFIXES.items():
-            if lower.endswith(suffix) and lower != suffix:
-                return resource
-
-        # Fallback: flatten camelCase and pluralize
-        base = re.sub(r'([A-Z])', r'_\1', base).lower().strip('_')
-        base = base.replace('_', '')
-
-        # Pluralize
-        if base.endswith('s'):
-            return base
-        elif base.endswith('y'):
-            return base[:-1] + 'ies'
+        if lower.endswith('s'):
+            return lower
+        elif lower.endswith('y'):
+            return lower[:-1] + 'ies'
         else:
-            return base + 's'
+            return lower + 's'
 
     def extract_outputs(
         self,
