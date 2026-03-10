@@ -13,13 +13,21 @@ C25: API group literals in constraints (Phase 3)
 C26: pass-through manifest detection (Phase 3)
 C27: status addressability upgrade (Phase 3)
 C28: false-positive suppression (Phase 3)
+C20: scale subresource analysis (Phase 5A)
+C21: webhook configuration parsing (Phase 5A — in rbac_deps.py)
+C22: embedded workload shape matching (Phase 5A)
+C29: constraint-based FK inference (Phase 5A)
+C30: cross-CRD reference shape mining (Phase 5A)
+C32: x-kubernetes extension fingerprinting (Phase 5A)
 
 Critical: Precision > recall. No edge emitted below confidence 0.7.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from idi.generation.crd.field_classifier import ClassifiedField
@@ -42,6 +50,161 @@ class ManifestFlags:
     accepts_arbitrary_resources: bool = False
     passthrough_detection_source: str = ""
     passthrough_field_path: str = ""  # For debugging: which field triggered the flag
+
+# ---------------------------------------------------------------------------
+# Phase 5A: Data types and constants
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WorkloadFingerprint:
+    """Structural fingerprint for a well-known K8s type."""
+
+    required_properties: frozenset[str]
+    container_shape: frozenset[str]  # properties expected in container array items
+    optional_properties: frozenset[str]
+    min_match_count: int  # required + minimum optional matches needed
+    produces_kind: str
+
+
+WORKLOAD_SHAPES: dict[str, WorkloadFingerprint] = {
+    "PodTemplateSpec": WorkloadFingerprint(
+        required_properties=frozenset({"containers"}),
+        container_shape=frozenset({"image", "name"}),
+        optional_properties=frozenset({
+            "initContainers", "volumes", "serviceAccountName",
+            "nodeSelector", "tolerations", "affinity",
+        }),
+        min_match_count=2,
+        produces_kind="Pod",
+    ),
+    "JobSpec": WorkloadFingerprint(
+        required_properties=frozenset({"template"}),
+        container_shape=frozenset(),
+        optional_properties=frozenset({
+            "backoffLimit", "completions", "parallelism",
+            "activeDeadlineSeconds", "ttlSecondsAfterFinished",
+        }),
+        min_match_count=2,
+        produces_kind="Job",
+    ),
+    "ServiceSpec": WorkloadFingerprint(
+        required_properties=frozenset({"ports"}),
+        container_shape=frozenset(),
+        optional_properties=frozenset({
+            "selector", "clusterIP", "type",
+            "externalTrafficPolicy", "sessionAffinity", "loadBalancerIP",
+        }),
+        min_match_count=2,
+        produces_kind="Service",
+    ),
+}
+
+K8S_NAME_PATTERNS: list[str] = [
+    r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$",                                      # RFC 1123 label
+    r"^[a-z]([a-z0-9\-]*[a-z0-9])?$",                                          # RFC 1035 label
+    r"^[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?$",                                     # subdomain name
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",    # FQDN
+]
+
+K8S_FORMAT_ALLOWLIST: frozenset[str] = frozenset({
+    "dns1123-label",
+    "dns1123-subdomain",
+    "hostname",
+    "qualified-name",
+})
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """A confirmed reference shape from cross-CRD analysis."""
+
+    fingerprint: str
+    target_kind: str
+    confirmed_in: tuple[str, ...]  # CRD Kinds that confirmed this shape
+    confidence: float
+    required_properties: frozenset[str]
+
+
+@dataclass
+class ShapeCatalog:
+    """Pre-computed shape catalog for cross-CRD reference matching."""
+
+    shapes: dict[str, CatalogEntry]  # fingerprint -> entry
+
+    @classmethod
+    def load(cls, path: str | None = None) -> ShapeCatalog:
+        """Load catalog from disk. Returns empty catalog if file missing.
+
+        Path resolution: if no path given, resolve relative to project root
+        (platform-tools/idi/../../catalog/shape_catalog.json).
+        """
+        if path is None:
+            project_root = Path(__file__).parent.parent.parent.parent.parent
+            path = str(project_root / "catalog" / "shape_catalog.json")
+
+        catalog_path = Path(path)
+        if not catalog_path.is_file():
+            return cls(shapes={})
+
+        try:
+            data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return cls(shapes={})
+
+        shapes: dict[str, CatalogEntry] = {}
+        for entry_data in data.get("shapes", []):
+            fp = entry_data.get("fingerprint", "")
+            if not fp:
+                continue
+            entry = CatalogEntry(
+                fingerprint=fp,
+                target_kind=entry_data.get("target_kind", ""),
+                confirmed_in=tuple(entry_data.get("confirmed_in", [])),
+                confidence=entry_data.get("confidence", 0.8),
+                required_properties=frozenset(entry_data.get("required_properties", [])),
+            )
+            shapes[fp] = entry
+
+        return cls(shapes=shapes)
+
+    def lookup(self, fingerprint: str) -> CatalogEntry | None:
+        """Look up a fingerprint in the catalog."""
+        return self.shapes.get(fingerprint)
+
+
+def compute_schema_fingerprint(
+    properties: dict[str, dict],
+    required: list[str] | None = None,
+) -> str:
+    """Compute a structural fingerprint from schema properties.
+
+    Returns sorted name:type pairs with ? suffix for optional properties.
+    Example: "key:string?,name:string,namespace:string?"
+    """
+    if not properties:
+        return ""
+    required_set = set(required) if required else set()
+    parts: list[str] = []
+    for prop_name in sorted(properties.keys()):
+        prop_schema = properties[prop_name]
+        prop_type = prop_schema.get("type", "string") if isinstance(prop_schema, dict) else "string"
+        suffix = "" if prop_name in required_set else "?"
+        parts.append(f"{prop_name}:{prop_type}{suffix}")
+    return ",".join(parts)
+
+
+# Module-level shape catalog singleton.
+_SHAPE_CATALOG: ShapeCatalog | None = None
+
+
+def _get_shape_catalog() -> ShapeCatalog:
+    """Lazy-load shape catalog (singleton)."""
+    global _SHAPE_CATALOG  # noqa: PLW0603
+    if _SHAPE_CATALOG is None:
+        _SHAPE_CATALOG = ShapeCatalog.load()
+    return _SHAPE_CATALOG
+
 
 # Constants moved from adapters/kubernetes_crd.py.
 OBJECT_REFERENCE_PATTERNS = [
