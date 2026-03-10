@@ -168,6 +168,150 @@ def detect_ref(
     return None
 
 
+# Precompiled regex for K8s apiVersion pattern.
+_VERSION_RE = re.compile(r"^v\d+(?:(?:alpha|beta)\d+)?$")
+
+
+def _parse_api_version(value: str) -> tuple[str, str] | None:
+    """Parse a K8s apiVersion string into (group, version).
+
+    Returns (group, version) or None if the string doesn't match
+    any recognized apiVersion pattern.
+
+    Examples:
+        "apps/v1" -> ("apps", "v1")
+        "cert-manager.io/v1" -> ("cert-manager.io", "v1")
+        "v1" -> ("", "v1")  -- core API group
+        "v1alpha1" -> ("", "v1alpha1")
+        "not-valid" -> None
+    """
+    if not value:
+        return None
+    if "/" in value:
+        idx = value.rfind("/")
+        group = value[:idx]
+        version = value[idx + 1:]
+        if not group or not version or not _VERSION_RE.match(version):
+            return None
+        return (group, version)
+    # No slash -- check if it's a bare version (core group).
+    if _VERSION_RE.match(value):
+        return ("", value)
+    return None
+
+
+def detect_ref_tuple(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> list[ClassifiedField]:
+    """Detect structural reference tuple pattern (C19).
+
+    Identifies object fields with {name, namespace?, kind?, apiGroup?, apiVersion?}
+    as cross-resource references. Returns list of ClassifiedField with
+    role="input_ref" and fact_shape="identity", or empty list if no Kind resolvable.
+    """
+    schema = field.schema
+
+    # Step 1: Must be type: object with properties.
+    if schema.get("type") != "object":
+        return []
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return []
+
+    # Step 2: Must have 'name' as a string property.
+    name_prop = properties.get("name")
+    if not name_prop or not isinstance(name_prop, dict):
+        return []
+    if name_prop.get("type") != "string":
+        return []
+
+    # Determine confidence based on whether name is required.
+    required_fields = schema.get("required", [])
+    confidence = 0.85 if "name" in required_fields else 0.75
+
+    # Step 3: Must have at least one reference indicator.
+    ref_indicators = {"namespace", "kind", "apiGroup", "apiVersion"}
+    has_indicator = any(ind in properties for ind in ref_indicators)
+    if not has_indicator:
+        return []
+
+    # Determine cross_namespace.
+    cross_ns = "namespace" in properties
+
+    # Step 4: Try kind enum resolution.
+    kind_prop = properties.get("kind")
+    if kind_prop and isinstance(kind_prop, dict):
+        kind_enum = kind_prop.get("enum")
+        if kind_enum and isinstance(kind_enum, list):
+            results: list[ClassifiedField] = []
+            all_kinds = registry.all_kinds()
+            kind_lower_map = {k.lower(): k for k in all_kinds}
+            for val in kind_enum:
+                if not isinstance(val, str):
+                    continue
+                canonical = kind_lower_map.get(val.lower())
+                if canonical:
+                    target_group = registry.group_for_kind(canonical)
+                    results.append(ClassifiedField(
+                        field=field.path,
+                        role="input_ref",
+                        confidence=confidence,
+                        field_type="object",
+                        target_kind=canonical,
+                        target_group=target_group,
+                        required=field.required,
+                        cross_namespace=cross_ns,
+                        description=schema.get("description", ""),
+                        detection_source="ref_detector:ref_tuple",
+                        fact_shape="identity",
+                        target_field="name",
+                    ))
+            if results:
+                return results
+
+    # Step 5: apiGroup/apiVersion fallback for Kind resolution.
+    for api_key in ("apiGroup", "apiVersion"):
+        api_prop = properties.get(api_key)
+        if not api_prop or not isinstance(api_prop, dict):
+            continue
+        api_enum = api_prop.get("enum")
+        if not api_enum or not isinstance(api_enum, list):
+            continue
+        for val in api_enum:
+            if not isinstance(val, str):
+                continue
+            if api_key == "apiGroup":
+                group_str = val
+            else:
+                parsed = _parse_api_version(val)
+                if not parsed:
+                    continue
+                group_str = parsed[0]
+            # Look up group in registry.
+            kinds_in_group = registry.kinds_for_group(group_str)
+            if len(kinds_in_group) == 1:
+                target_kind = next(iter(kinds_in_group))
+                target_group = group_str
+                return [ClassifiedField(
+                    field=field.path,
+                    role="input_ref",
+                    confidence=confidence,
+                    field_type="object",
+                    target_kind=target_kind,
+                    target_group=target_group,
+                    required=field.required,
+                    cross_namespace=cross_ns,
+                    description=schema.get("description", ""),
+                    detection_source="ref_detector:ref_tuple",
+                    fact_shape="identity",
+                    target_field="name",
+                )]
+
+    # Step 6: Cannot resolve Kind -> return empty.
+    return []
+
+
 def detect_enum_kind(
     field: WalkedField,
     registry: KindRegistry,
@@ -400,7 +544,12 @@ def classify_walked_field(
     if ref_result is not None:
         return [ref_result]
 
-    # Priority 2: Enum Kind detection.
+    # Priority 2: Reference tuple detection (C19).
+    tuple_results = detect_ref_tuple(field, registry)
+    if tuple_results:
+        return tuple_results
+
+    # Priority 3: Enum Kind detection.
     enum_results = detect_enum_kind(field, registry, sibling_fields)
     if enum_results:
         return enum_results

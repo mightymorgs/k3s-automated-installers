@@ -263,6 +263,15 @@ class KindRegistry:
             return entries[0].group
         return None
 
+    def kinds_for_group(self, group: str) -> set[str]:
+        """Return all distinct Kind names registered for a given API group."""
+        result: set[str] = set()
+        for kind_name, entries in self._kind_to_entries.items():
+            for e in entries:
+                if e.group == group:
+                    result.add(kind_name)
+        return result
+
     def all_kinds(self) -> set[str]:
         """All registered Kind names."""
         return set(self._kind_to_entries.keys())
