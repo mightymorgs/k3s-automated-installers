@@ -294,6 +294,82 @@ def _resolve_scale_target(
     return None
 
 
+# Precompiled K8s name patterns for fast comparison.
+_K8S_NAME_PATTERN_SET: frozenset[str] = frozenset(K8S_NAME_PATTERNS)
+
+
+def _is_k8s_name_pattern(pattern: str) -> bool:
+    """Check if a schema pattern matches a known K8s DNS-name pattern."""
+    return pattern in _K8S_NAME_PATTERN_SET
+
+
+def detect_constraint_fk(
+    field: WalkedField,
+    registry: KindRegistry,
+    parent_properties: dict[str, dict] | None = None,
+) -> ClassifiedField | None:
+    """Detect resource references from value constraints + sibling evidence (C29).
+
+    Requires BOTH an explicit K8s DNS-name pattern (regex or format) AND a
+    namespace sibling. Length-only constraints are NOT sufficient.
+    """
+    schema = field.schema
+
+    # Step 1: Type check.
+    if schema.get("type") != "string":
+        return None
+
+    # Step 2: Self-exclusion.
+    if field.name.lower() == "namespace":
+        return None
+
+    # Step 3: DNS-name signal check (explicit pattern or format required).
+    has_dns_signal = False
+    schema_pattern = schema.get("pattern", "")
+    if schema_pattern and _is_k8s_name_pattern(schema_pattern):
+        has_dns_signal = True
+    if not has_dns_signal:
+        schema_format = schema.get("format", "")
+        if schema_format and schema_format in K8S_FORMAT_ALLOWLIST:
+            has_dns_signal = True
+    if not has_dns_signal:
+        return None
+
+    # Step 4: Namespace sibling check.
+    if parent_properties is None:
+        return None
+
+    has_namespace = False
+    has_kind = False
+    for prop_name, prop_schema in parent_properties.items():
+        if not isinstance(prop_schema, dict):
+            continue
+        if prop_name.lower() == "namespace" and prop_name.lower() == "namespace":
+            # Exact case-insensitive match on "namespace".
+            if prop_schema.get("type") == "string":
+                has_namespace = True
+        if prop_name.lower() == "kind":
+            has_kind = True
+
+    if not has_namespace:
+        return None
+
+    # Step 5: Confidence computation.
+    confidence = 0.75
+    if has_kind:
+        confidence = 0.80
+
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=confidence,
+        field_type="string",
+        target_kind=None,
+        detection_source="ref_detector:constraint_fk",
+        fact_shape="identity",
+    )
+
+
 def _match_workload_fingerprint(
     properties: dict[str, dict],
     fingerprint: WorkloadFingerprint,
