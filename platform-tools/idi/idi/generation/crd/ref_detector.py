@@ -470,6 +470,76 @@ def detect_apigroup_literal(
     return results
 
 
+def detect_passthrough_manifest(
+    field: WalkedField,
+    registry: KindRegistry,
+    manifest_flags: ManifestFlags | None = None,
+) -> list[ClassifiedField]:
+    """Detect pass-through manifest pattern (C26).
+
+    Identifies CRD fields accepting raw K8s manifests via
+    x-kubernetes-preserve-unknown-fields or x-kubernetes-embedded-resource.
+    Mutates manifest_flags (if provided) when passthrough detected.
+    Returns ClassifiedField list with role="input_ref" for constrained
+    Kind enum edges, or empty list.
+    """
+    schema = field.schema
+
+    # Step 1: Marker check -- must have one of the two K8s embedded markers.
+    has_preserve = schema.get("x-kubernetes-preserve-unknown-fields") is True
+    has_embedded = schema.get("x-kubernetes-embedded-resource") is True
+    if not has_preserve and not has_embedded:
+        return []
+
+    # Step 2: apiVersion/kind presence check.
+    properties = schema.get("properties", {})
+    required_list = schema.get("required", [])
+    has_av_kind_props = "apiVersion" in properties and "kind" in properties
+    has_av_kind_required = "apiVersion" in required_list and "kind" in required_list
+    if not has_av_kind_props and not has_av_kind_required:
+        return []
+
+    # Step 3: Set manifest flag.
+    if manifest_flags is not None:
+        manifest_flags.accepts_arbitrary_resources = True
+        manifest_flags.passthrough_detection_source = "ref_detector:passthrough_manifest"
+        manifest_flags.passthrough_field_path = field.path
+
+    # Step 4: Check for constrained Kind edges.
+    kind_prop = properties.get("kind")
+    if not kind_prop or not isinstance(kind_prop, dict):
+        return []
+    kind_enum = kind_prop.get("enum")
+    if not kind_enum or not isinstance(kind_enum, list):
+        return []
+
+    all_kinds = registry.all_kinds()
+    kind_lower_map = {k.lower(): k for k in all_kinds}
+    results: list[ClassifiedField] = []
+
+    for val in kind_enum:
+        if not isinstance(val, str):
+            continue
+        canonical = kind_lower_map.get(val.lower())
+        if canonical:
+            target_group = registry.group_for_kind(canonical)
+            results.append(ClassifiedField(
+                field=field.path,
+                role="input_ref",
+                confidence=0.95,
+                field_type="object",
+                target_kind=canonical,
+                target_group=target_group,
+                required=field.required,
+                description=schema.get("description", ""),
+                detection_source="ref_detector:passthrough_manifest",
+                fact_shape="identity",
+                target_field="name",
+            ))
+
+    return results
+
+
 def detect_enum_kind(
     field: WalkedField,
     registry: KindRegistry,
@@ -721,6 +791,10 @@ def classify_walked_field(
     # Step 5: API group literal detection (C25).
     apigroup_results = detect_apigroup_literal(field, registry)
     classifications.extend(apigroup_results)
+
+    # Step 6: Passthrough manifest detection (C26).
+    passthrough_results = detect_passthrough_manifest(field, registry, manifest_flags)
+    classifications.extend(passthrough_results)
 
     # If any additive detector fired, deduplicate and return.
     if classifications:

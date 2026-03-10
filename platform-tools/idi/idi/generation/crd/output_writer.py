@@ -142,6 +142,7 @@ def build_decomposed_skill(
     crd_info: dict[str, Any],
     fields: list[ClassifiedField],
     status_conditions: list[str] | None = None,
+    accepts_arbitrary_resources: bool = False,
 ) -> dict[str, Any]:
     """Build decomposed CRD skill as a dict-of-dicts.
 
@@ -149,6 +150,7 @@ def build_decomposed_skill(
         crd_info: Dict with kind, group, version, plural, scope, service, description.
         fields: Classified fields from field_classifier.
         status_conditions: Status conditions (default: ["Ready"]).
+        accepts_arbitrary_resources: If True, add flag to manifest JSON.
 
     Returns:
         Dict with keys: 'manifest', 'operation', 'refs', 'outputs', 'fields'.
@@ -271,7 +273,7 @@ def build_decomposed_skill(
     content_hash = _compute_content_hash(all_files)
 
     # Build manifest.
-    manifest = {
+    manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "kind": kind,
         "group": group,
@@ -287,6 +289,8 @@ def build_decomposed_skill(
         "status_conditions": conditions,
         "content_hash": content_hash,
     }
+    if accepts_arbitrary_resources:
+        manifest["accepts_arbitrary_resources"] = True
 
     return {
         "manifest": manifest,
@@ -302,6 +306,7 @@ def write_decomposed_skill(
     fields: list[ClassifiedField],
     output_dir: Path,
     status_conditions: list[str] | None = None,
+    accepts_arbitrary_resources: bool = False,
 ) -> Path:
     """Write decomposed CRD skill files to the Kind directory.
 
@@ -311,7 +316,10 @@ def write_decomposed_skill(
     Returns:
         The Kind directory path.
     """
-    skill = build_decomposed_skill(crd_info, fields, status_conditions)
+    skill = build_decomposed_skill(
+        crd_info, fields, status_conditions,
+        accepts_arbitrary_resources=accepts_arbitrary_resources,
+    )
 
     group_seg = _sanitize_path_segment(crd_info["group"])
     service_seg = _sanitize_path_segment(crd_info["service"])
