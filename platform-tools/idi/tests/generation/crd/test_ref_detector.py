@@ -428,13 +428,29 @@ class TestDetectStatusOutput:
         assert result.confidence == 0.6
         assert result.target_field == "phase"
 
-    def test_all_use_status_output_source(self, registry):
-        """All tiers use detection_source='ref_detector:status_output'."""
-        for name, schema_type in [("serviceName", "string"), ("conditions", "array"), ("phase", "string")]:
-            field = _make_field(name, schema={"type": schema_type},
-                              path=f"status.{name}", parent_path="status")
-            result = detect_status_output(field, "Cert", "cert-manager.io", registry)
-            assert result.detection_source == "ref_detector:status_output"
+    def test_detection_sources(self, registry):
+        """Detection sources reflect which tier fired.
+
+        C27 (status_addressability) fires for fields with Kind names resolved
+        via KindRegistry.is_ref_field(). Other tiers use status_output.
+        """
+        # serviceName resolves via KindRegistry -> status_addressability (C27)
+        field = _make_field("serviceName", schema={"type": "string"},
+                          path="status.serviceName", parent_path="status")
+        result = detect_status_output(field, "Cert", "cert-manager.io", registry)
+        assert result.detection_source == "ref_detector:status_addressability"
+
+        # conditions -> status_output (tier 1)
+        field = _make_field("conditions", schema={"type": "array"},
+                          path="status.conditions", parent_path="status")
+        result = detect_status_output(field, "Cert", "cert-manager.io", registry)
+        assert result.detection_source == "ref_detector:status_output"
+
+        # phase -> status_output (tier 3, generic)
+        field = _make_field("phase", schema={"type": "string"},
+                          path="status.phase", parent_path="status")
+        result = detect_status_output(field, "Cert", "cert-manager.io", registry)
+        assert result.detection_source == "ref_detector:status_output"
 
 
 # ---------------------------------------------------------------------------

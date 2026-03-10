@@ -625,17 +625,33 @@ def detect_status_output(
     group: str,
     registry: KindRegistry,
 ) -> ClassifiedField | None:
-    """Classify status fields as output_declarations (C10).
+    """Classify status fields as output_declarations (C10, C27).
 
-    Three tiers:
-    1. Kind in field name — confidence 0.85, fact_shape="identity"
-    2. Conditions pattern — confidence 0.9, fact_shape="lifecycle"
+    Four tiers (checked in order):
+    0. KindRegistry longest-match (C27) — confidence 0.85, "status_addressability"
+    1. Conditions pattern — confidence 0.9, fact_shape="lifecycle"
+    2. Kind substring in field name — confidence 0.85, fact_shape="identity"
     3. Generic status field — confidence 0.6 (BELOW 0.7 threshold)
     """
     schema = field.schema
     field_type = schema.get("type", "string")
 
-    # Tier 2: Conditions pattern (check first — it's the most specific).
+    # Tier 0 (C27): KindRegistry longest-match for status field names.
+    is_ref, ref_kind, ref_plural, ref_group = registry.is_ref_field(field.name)
+    if is_ref and ref_kind:
+        return ClassifiedField(
+            field=field.path,
+            role="output_declaration",
+            confidence=0.85,
+            field_type=field_type,
+            target_kind=ref_kind,
+            target_group=ref_group,
+            detection_source="ref_detector:status_addressability",
+            fact_shape="identity",
+            target_field="name",
+        )
+
+    # Tier 1: Conditions pattern (most specific structural pattern).
     if field.name == "conditions" and field_type == "array":
         return ClassifiedField(
             field=field.path,
@@ -649,9 +665,7 @@ def detect_status_output(
             target_field="type",
         )
 
-    # Tier 1: Kind in field name.
-    # Split the field name on camelCase boundaries and check if any
-    # subsequence matches a known Kind.
+    # Tier 2: Kind substring in field name (fallback from Phase 2).
     all_kinds = registry.all_kinds()
     for known_kind in all_kinds:
         if known_kind.lower() in field.name.lower():
