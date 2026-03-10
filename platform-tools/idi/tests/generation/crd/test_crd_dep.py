@@ -1,9 +1,10 @@
-"""Tests for CrdDepAdapter refactor — CRD Phase 1a."""
+"""Tests for CrdDepAdapter — CRD Phase 2 Section 04."""
 from __future__ import annotations
 
 import pytest
 
 from idi.generation.crd.kind_registry import KindRegistry
+from idi.generation.dep_adapters.base import OperationInfo
 from idi.generation.dep_adapters.crd_dep import CrdDepAdapter
 
 
@@ -14,12 +15,26 @@ def registry():
     reg.register("SecretStore", "secretstores", "external-secrets.io")
     reg.register("ClusterSecretStore", "clustersecretstores", "external-secrets.io")
     reg.register("Certificate", "certificates", "cert-manager.io")
+    reg.register("Issuer", "issuers", "cert-manager.io")
+    reg.register("ClusterIssuer", "clusterissuers", "cert-manager.io")
     return reg
 
 
 @pytest.fixture
 def adapter(registry):
     return CrdDepAdapter(registry=registry)
+
+
+def _make_operation(service="test", body_schema=None, response_schema=None):
+    return OperationInfo(
+        service=service,
+        resource="testresource",
+        operation="create",
+        method="POST",
+        path="/apis/test.io/v1/namespaces/{namespace}/testresources",
+        body_schema=body_schema or {},
+        response_schema=response_schema or {},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +75,7 @@ class TestResolveTarget:
 
 
 # ---------------------------------------------------------------------------
-# ESO CRDs not cross-service (behavior change)
+# ESO CRDs not cross-service
 # ---------------------------------------------------------------------------
 
 
@@ -72,7 +87,7 @@ class TestEsoBehaviorChange:
         assert "clustersecretstores" not in registry.core_plurals()
 
     def test_resolve_secretstores_empty_known(self, adapter):
-        """secretstores without known_resources -> None (no longer cross-service)."""
+        """secretstores without known_resources -> None."""
         result = adapter._resolve_target("secretstores", set())
         assert result == (None, False)
 
@@ -83,114 +98,11 @@ class TestEsoBehaviorChange:
 
 
 # ---------------------------------------------------------------------------
-# _walk_and_detect skip logic
-# ---------------------------------------------------------------------------
-
-
-class TestWalkAndDetectSkip:
-    def test_ref_fields_skipped_during_recursion(self, adapter, registry):
-        """Fields matching registry.is_ref_field are not recursed into."""
-        from idi.generation.adapters.kubernetes_crd import KubernetesCrdAdapter
-        k8s_adapter = KubernetesCrdAdapter(service="test", registry=registry)
-
-        schema = {
-            "properties": {
-                "secretRef": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "nested": {
-                            "type": "object",
-                            "properties": {
-                                "deepSecretRef": {
-                                    "type": "object",
-                                    "properties": {"name": {"type": "string"}},
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        }
-        results = []
-        adapter._walk_and_detect(
-            k8s_adapter, schema, "test",
-            {"secrets"}, results, depth=0,
-        )
-        # secretRef should be detected, but not recursed into for deeper refs.
-        fields = [r.field for r in results]
-        assert "secretRef" in fields
-        # deepSecretRef should NOT be found since we skip recursion into secretRef.
-        assert "deepSecretRef" not in fields
-
-    def test_k8s_envelope_skipped(self, adapter, registry):
-        """_K8S_ENVELOPE fields are skipped."""
-        from idi.generation.adapters.kubernetes_crd import KubernetesCrdAdapter
-        k8s_adapter = KubernetesCrdAdapter(service="test", registry=registry)
-
-        schema = {
-            "properties": {
-                "metadata": {
-                    "type": "object",
-                    "properties": {
-                        "secretRef": {
-                            "type": "object",
-                            "properties": {"name": {"type": "string"}},
-                        },
-                    },
-                },
-            },
-        }
-        results = []
-        adapter._walk_and_detect(
-            k8s_adapter, schema, "test", {"secrets"}, results, depth=0,
-        )
-        # Metadata is in _K8S_ENVELOPE, so nothing should be found inside it.
-        assert len(results) == 0
-
-    def test_nested_objects_recursed(self, adapter, registry):
-        """Nested objects ARE recursed into."""
-        from idi.generation.adapters.kubernetes_crd import KubernetesCrdAdapter
-        k8s_adapter = KubernetesCrdAdapter(service="test", registry=registry)
-
-        schema = {
-            "properties": {
-                "config": {
-                    "type": "object",
-                    "properties": {
-                        "secretRef": {
-                            "type": "object",
-                            "properties": {"name": {"type": "string"}},
-                        },
-                    },
-                },
-            },
-        }
-        results = []
-        adapter._walk_and_detect(
-            k8s_adapter, schema, "test", {"secrets"}, results, depth=0,
-        )
-        assert any(r.field == "secretRef" for r in results)
-
-
-# ---------------------------------------------------------------------------
-# detect_dependencies integration
+# detect_dependencies
 # ---------------------------------------------------------------------------
 
 
 class TestDetectDependencies:
-    def _make_operation(self, service="test", body_schema=None):
-        from idi.generation.dep_adapters.base import OperationInfo
-        return OperationInfo(
-            service=service,
-            resource="testresource",
-            operation="create",
-            method="POST",
-            path="/apis/test.io/v1/namespaces/{namespace}/testresources",
-            body_schema=body_schema,
-            response_schema=None,
-        )
-
     def test_secret_ref_produces_dependency(self, adapter):
         """CRD body with secretRef produces a Dependency."""
         body = {
@@ -206,10 +118,159 @@ class TestDetectDependencies:
                 },
             },
         }
-        op = self._make_operation(body_schema=body)
+        op = _make_operation(body_schema=body)
         deps = adapter.detect_dependencies(op, {}, {"secrets"})
         assert len(deps) >= 1
         assert deps[0].target_resource == "secrets"
+
+    def test_crdfacts_uri_format(self, adapter):
+        """URI format is crdfacts://{target_group}/{target_kind}#{target_field}."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "secretRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets"})
+        assert len(deps) >= 1
+        assert deps[0].fact_ref == "crdfacts://core/Secret#name"
+
+    def test_no_facts_uri_in_output(self, adapter):
+        """No facts:// URIs in output (regression check)."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "secretRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                        "configMapRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets", "configmaps"})
+        for dep in deps:
+            assert not dep.fact_ref.startswith("facts://")
+            assert dep.fact_ref.startswith("crdfacts://")
+
+    def test_required_field_satisfaction(self, adapter):
+        """Required field -> satisfaction='required_value'."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "required": ["secretRef"],
+                    "properties": {
+                        "secretRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets"})
+        assert len(deps) >= 1
+        assert deps[0].satisfaction == "required_value"
+
+    def test_optional_field_satisfaction(self, adapter):
+        """Optional field -> satisfaction='optional_with_default'."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "secretRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets"})
+        assert len(deps) >= 1
+        assert deps[0].satisfaction == "optional_with_default"
+
+    def test_nested_ref_depth_4(self, adapter):
+        """Nested ref at depth 4 (SecretStore pattern) detected."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "provider": {
+                            "type": "object",
+                            "properties": {
+                                "vault": {
+                                    "type": "object",
+                                    "properties": {
+                                        "auth": {
+                                            "type": "object",
+                                            "properties": {
+                                                "tokenSecretRef": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "name": {"type": "string"},
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets"})
+        secret_deps = [d for d in deps if d.target_resource == "secrets"]
+        assert len(secret_deps) >= 1
+        assert "tokenSecretRef" in secret_deps[0].field
+
+    def test_array_ref_detected(self, adapter):
+        """Array ref (PushSecret pattern) detected."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "secretStoreRefs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secretstores"})
+        store_deps = [d for d in deps if d.target_resource == "secretstores"]
+        assert len(store_deps) >= 1
 
     def test_cross_service_has_k8s_service(self, adapter):
         """Cross-service dependency has target_service='k8s'."""
@@ -226,8 +287,7 @@ class TestDetectDependencies:
                 },
             },
         }
-        op = self._make_operation(service="cert-manager", body_schema=body)
-        # secrets not in known_resources -> cross-service
+        op = _make_operation(service="cert-manager", body_schema=body)
         deps = adapter.detect_dependencies(op, {}, set())
         secret_deps = [d for d in deps if d.target_resource == "secrets"]
         assert len(secret_deps) >= 1
@@ -235,9 +295,189 @@ class TestDetectDependencies:
 
     def test_empty_body_returns_empty(self, adapter):
         """Operation with no body returns empty list."""
-        op = self._make_operation(body_schema=None)
+        op = _make_operation(body_schema=None)
         deps = adapter.detect_dependencies(op, {}, set())
         assert deps == []
+
+
+# ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
+
+
+class TestDeduplication:
+    def test_parent_child_dedup(self, adapter):
+        """secretRef (parent) and secretRef.name (child) — only parent produces Dependency."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "secretRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets"})
+        # Should have exactly 1 dep for secretRef, not 2
+        # (the child spec.secretRef.name is deduplicated)
+        secret_deps = [d for d in deps if d.target_resource == "secrets"]
+        assert len(secret_deps) == 1
+        assert "secretRef" in secret_deps[0].field
+
+    def test_sibling_refs_both_kept(self, adapter):
+        """Two sibling refs both produce Dependencies."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "secretRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                        "configMapRef": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        deps = adapter.detect_dependencies(op, {}, {"secrets", "configmaps"})
+        targets = {d.target_resource for d in deps}
+        assert "secrets" in targets
+        assert "configmaps" in targets
+
+
+# ---------------------------------------------------------------------------
+# detect_outputs
+# ---------------------------------------------------------------------------
+
+
+class TestDetectOutputs:
+    def test_status_field_with_kind_name(self, adapter):
+        """Status field with Kind name -> Output emitted."""
+        body = {
+            "properties": {
+                "status": {
+                    "type": "object",
+                    "properties": {
+                        "serviceName": {"type": "string"},
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        outputs = adapter.detect_outputs(op, {})
+        assert len(outputs) >= 1
+        assert any("serviceName" in o.field for o in outputs)
+
+    def test_status_conditions_output(self, adapter):
+        """Status conditions -> Output emitted."""
+        body = {
+            "properties": {
+                "status": {
+                    "type": "object",
+                    "properties": {
+                        "conditions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string"},
+                                    "status": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        outputs = adapter.detect_outputs(op, {})
+        assert len(outputs) >= 1
+
+    def test_generic_status_not_emitted(self, adapter):
+        """Generic status field (confidence 0.6) -> NOT emitted."""
+        body = {
+            "properties": {
+                "status": {
+                    "type": "object",
+                    "properties": {
+                        "observedGeneration": {"type": "integer"},
+                        "phase": {"type": "string"},
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        outputs = adapter.detect_outputs(op, {})
+        # Generic status fields are below 0.7 threshold
+        fields = [o.field for o in outputs]
+        assert "status.observedGeneration" not in fields
+        assert "status.phase" not in fields
+
+    def test_no_status_returns_empty(self, adapter):
+        """Body with no status schema returns empty outputs."""
+        body = {
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {"foo": {"type": "string"}},
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        outputs = adapter.detect_outputs(op, {})
+        assert outputs == []
+
+    def test_output_uses_crdfacts_uri(self, adapter):
+        """Output fact_ref uses crdfacts:// scheme."""
+        body = {
+            "properties": {
+                "status": {
+                    "type": "object",
+                    "properties": {
+                        "conditions": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                        },
+                    },
+                },
+            },
+        }
+        op = _make_operation(body_schema=body)
+        outputs = adapter.detect_outputs(op, {})
+        for out in outputs:
+            assert out.fact_ref.startswith("crdfacts://")
+
+
+# ---------------------------------------------------------------------------
+# matches()
+# ---------------------------------------------------------------------------
+
+
+class TestMatches:
+    def test_matches_apis_path(self, adapter):
+        """matches() returns True for /apis/ paths."""
+        spec = {"paths": {"/apis/test.io/v1/namespaces/{ns}/things": {}}}
+        assert adapter.matches(spec, "test") is True
+
+    def test_matches_api_v1_namespaces(self, adapter):
+        """matches() returns True for /api/v1/namespaces paths."""
+        spec = {"paths": {"/api/v1/namespaces/{ns}/configmaps": {}}}
+        assert adapter.matches(spec, "test") is True
+
+    def test_no_match(self, adapter):
+        """matches() returns False for non-K8s paths."""
+        spec = {"paths": {"/v1/users": {}}}
+        assert adapter.matches(spec, "test") is False
 
 
 # ---------------------------------------------------------------------------

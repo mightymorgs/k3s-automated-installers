@@ -33,6 +33,7 @@ class Dependency:
     lineage_type: str = "copy"
     discriminator_value: str | None = None
     target_service: str | None = None  # Set for cross-service deps (e.g. k8s)
+    satisfaction: str = ""  # "required_value" or "optional_with_default"
 
 
 @dataclass
