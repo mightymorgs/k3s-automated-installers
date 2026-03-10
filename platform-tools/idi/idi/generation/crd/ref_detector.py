@@ -294,6 +294,67 @@ def _resolve_scale_target(
     return None
 
 
+def detect_kubernetes_extensions(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> ClassifiedField | None:
+    """Detect dependency signals from x-kubernetes-* extensions (C32).
+
+    Returns ClassifiedField or None. For x-kubernetes-embedded-resource: true,
+    returns immediately (exclusive). For list-map matches, returns additive result.
+    """
+    schema = field.schema
+
+    # 1. Embedded resource check (exclusive, 0.95).
+    if schema.get("x-kubernetes-embedded-resource") is True:
+        target_kind = None
+        properties = schema.get("properties", {})
+        kind_prop = properties.get("kind", {}) if isinstance(properties, dict) else {}
+        if isinstance(kind_prop, dict):
+            kind_enum = kind_prop.get("enum")
+            if isinstance(kind_enum, list) and len(kind_enum) == 1:
+                target_kind = kind_enum[0]
+            # Multiple values = passthrough, target_kind stays None.
+
+        return ClassifiedField(
+            field=field.path,
+            role="passthrough_manifest",
+            confidence=0.95,
+            field_type=schema.get("type", "object"),
+            target_kind=target_kind,
+            detection_source="ref_detector:kubernetes_ext_embedded",
+            fact_shape="identity",
+        )
+
+    # 2. List-map check (additive, 0.8).
+    if (
+        schema.get("x-kubernetes-list-type") == "map"
+        and schema.get("x-kubernetes-list-map-keys") == ["name"]
+    ):
+        items = schema.get("items", {})
+        if isinstance(items, dict):
+            items_props = items.get("properties", {})
+            if items_props:
+                for _shape_name, fingerprint in WORKLOAD_SHAPES.items():
+                    if _match_workload_fingerprint(items_props, fingerprint):
+                        return ClassifiedField(
+                            field=field.path,
+                            role="output_declaration",
+                            confidence=0.8,
+                            field_type=schema.get("type", "array"),
+                            target_kind=fingerprint.produces_kind,
+                            target_group=registry.group_for_kind(fingerprint.produces_kind) or "",
+                            detection_source="ref_detector:kubernetes_ext_list_map",
+                            fact_shape="identity",
+                        )
+
+    # 3. Int-or-string check (no edge).
+    if schema.get("x-kubernetes-int-or-string") is True:
+        return None
+
+    return None
+
+
 def detect_cataloged_shape(
     field: WalkedField,
     shape_catalog: ShapeCatalog,
