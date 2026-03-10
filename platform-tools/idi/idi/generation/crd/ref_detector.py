@@ -294,6 +294,100 @@ def _resolve_scale_target(
     return None
 
 
+def _match_workload_fingerprint(
+    properties: dict[str, dict],
+    fingerprint: WorkloadFingerprint,
+    is_flattened: bool = False,
+) -> bool:
+    """Check if schema properties match a workload fingerprint.
+
+    Used by both detect_embedded_workload and detect_kubernetes_extensions.
+    """
+    # Check required properties.
+    for req in fingerprint.required_properties:
+        if req not in properties:
+            return False
+
+    # Container shape validation (PodTemplateSpec).
+    if fingerprint.container_shape:
+        containers = properties.get("containers", {})
+        if not isinstance(containers, dict):
+            return False
+        if containers.get("type") != "array":
+            return False
+        items = containers.get("items", {})
+        if not isinstance(items, dict):
+            return False
+        item_props = items.get("properties", {})
+        for cs_prop in fingerprint.container_shape:
+            if cs_prop not in item_props:
+                return False
+
+    # Count total matches (required + optional).
+    match_count = len(fingerprint.required_properties)
+    for opt in fingerprint.optional_properties:
+        if opt in properties:
+            match_count += 1
+
+    # Higher threshold for flattened patterns.
+    effective_min = fingerprint.min_match_count + 1 if is_flattened else fingerprint.min_match_count
+
+    return match_count >= effective_min
+
+
+def detect_embedded_workload(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> ClassifiedField | None:
+    """Detect fields matching well-known K8s type shapes (C22).
+
+    Checks schema properties of the walked field with nesting-aware matching.
+    Returns ClassifiedField with role="output_declaration" or None.
+    """
+    schema = field.schema
+    top_props = schema.get("properties", {})
+    if not top_props and not isinstance(top_props, dict):
+        return None
+
+    for shape_name, fingerprint in WORKLOAD_SHAPES.items():
+        # Standard nesting: check field.spec.properties.
+        nested_spec = top_props.get("spec", {})
+        nested_props = None
+        if isinstance(nested_spec, dict) and nested_spec.get("type") == "object":
+            candidate = nested_spec.get("properties", {})
+            if candidate:
+                nested_props = candidate
+
+        if nested_props is not None:
+            if _match_workload_fingerprint(nested_props, fingerprint, is_flattened=False):
+                return ClassifiedField(
+                    field=field.path,
+                    role="output_declaration",
+                    confidence=0.8,
+                    field_type=schema.get("type", "object"),
+                    target_kind=fingerprint.produces_kind,
+                    target_group=registry.group_for_kind(fingerprint.produces_kind) or "",
+                    detection_source="ref_detector:embedded_workload",
+                    fact_shape="identity",
+                )
+
+        # Flattened: check field.properties directly (higher threshold).
+        if top_props:
+            if _match_workload_fingerprint(top_props, fingerprint, is_flattened=True):
+                return ClassifiedField(
+                    field=field.path,
+                    role="output_declaration",
+                    confidence=0.8,
+                    field_type=schema.get("type", "object"),
+                    target_kind=fingerprint.produces_kind,
+                    target_group=registry.group_for_kind(fingerprint.produces_kind) or "",
+                    detection_source="ref_detector:embedded_workload",
+                    fact_shape="identity",
+                )
+
+    return None
+
+
 # Constants moved from adapters/kubernetes_crd.py.
 OBJECT_REFERENCE_PATTERNS = [
     "io.k8s.api.core.v1.ObjectReference",
