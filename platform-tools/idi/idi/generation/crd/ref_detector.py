@@ -421,6 +421,55 @@ def detect_example_kinds(
     return results
 
 
+def detect_apigroup_literal(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> list[ClassifiedField]:
+    """Detect API group literals in enum constraints (C25).
+
+    Finds API group strings (like apps/v1 or cert-manager.io/v1) in enum values.
+    Only emits edges for unambiguous single-Kind groups. Multi-Kind groups
+    produce no edges (precision > recall).
+    """
+    enum_values = field.schema.get("enum")
+    if not enum_values or not isinstance(enum_values, list):
+        return []
+
+    results: list[ClassifiedField] = []
+    seen_kinds: set[str] = set()
+
+    for val in enum_values:
+        if not isinstance(val, str):
+            continue
+        parsed = _parse_api_version(val)
+        if parsed is None:
+            continue
+        group_str, _version = parsed
+
+        # Look up group in registry.
+        kinds_in_group = registry.kinds_for_group(group_str)
+        if len(kinds_in_group) == 1:
+            target_kind = next(iter(kinds_in_group))
+            if target_kind in seen_kinds:
+                continue
+            seen_kinds.add(target_kind)
+            results.append(ClassifiedField(
+                field=field.path,
+                role="input_ref",
+                confidence=0.85,
+                field_type=field.schema.get("type", "string"),
+                target_kind=target_kind,
+                target_group=group_str,
+                required=field.required,
+                description=field.schema.get("description", ""),
+                detection_source="ref_detector:apigroup_literal",
+                fact_shape="identity",
+                target_field="name",
+            ))
+
+    return results
+
+
 def detect_enum_kind(
     field: WalkedField,
     registry: KindRegistry,
@@ -668,6 +717,10 @@ def classify_walked_field(
     # Step 4: Example/default Kind extraction (C24).
     example_results = detect_example_kinds(field, registry)
     classifications.extend(example_results)
+
+    # Step 5: API group literal detection (C25).
+    apigroup_results = detect_apigroup_literal(field, registry)
+    classifications.extend(apigroup_results)
 
     # If any additive detector fired, deduplicate and return.
     if classifications:
