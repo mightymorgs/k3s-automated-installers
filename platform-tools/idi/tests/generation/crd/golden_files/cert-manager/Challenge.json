@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "kind": "Challenge",
+  "group": "acme.cert-manager.io",
+  "version": "v1",
+  "plural": "challenges",
+  "scope": "namespaced",
+  "service": "cert-manager",
+  "description": "Challenge is a type to represent a Challenge request with an ACME server",
+  "input_refs": [
+    {
+      "field": "spec.issuerRef",
+      "target_kind": "Issuer",
+      "target_group": "acme.cert-manager.io",
+      "role": "input_ref",
+      "required": true,
+      "cross_namespace": false,
+      "fact_ref": "crdfacts://acme.cert-manager.io/Issuer#issuerRef"
+    }
+  ],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.authorizationURL",
+      "type": "string",
+      "description": "The URL to the ACME Authorization resource that this\nchallenge is a part of."
+    },
+    {
+      "field": "spec.dnsName",
+      "type": "string",
+      "description": "dnsName is the identifier that this challenge is for, e.g., example.com.\nIf the requested DNSName is a 'wildcard', this field MUST be set to the\nnon-wildcard domain, e.g., for `*.example.com`, it must be `example.com`."
+    },
+    {
+      "field": "spec.key",
+      "type": "string",
+      "description": "The ACME challenge key for this challenge\nFor HTTP01 challenges, this is the value that must be responded with to\ncomplete the HTTP01 challenge in the format:\n`<private key JWK thumbprint>.<key from acme server for challenge>`.\nFor DNS01 challenges, this is the base64 encoded SHA256 sum of the\n`<private key JWK thumbprint>.<key from acme server for challenge>`\ntext that must be set as the TXT record content."
+    },
+    {
+      "field": "spec.solver",
+      "type": "object",
+      "description": "Contains the domain solving configuration that should be used to\nsolve this challenge resource."
+    },
+    {
+      "field": "spec.token",
+      "type": "string",
+      "description": "The ACME challenge token for this challenge.\nThis is the raw value returned from the ACME server."
+    },
+    {
+      "field": "spec.type",
+      "type": "string",
+      "description": "The type of ACME challenge this resource represents.\nOne of \"HTTP-01\" or \"DNS-01\"."
+    },
+    {
+      "field": "spec.url",
+      "type": "string",
+      "description": "The URL of the ACME Challenge resource for this challenge.\nThis can be used to lookup details about the status of this challenge."
+    },
+    {
+      "field": "spec.wildcard",
+      "type": "boolean",
+      "description": "wildcard will be true if this challenge is for a wildcard identifier,\nfor example '*.example.com'."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

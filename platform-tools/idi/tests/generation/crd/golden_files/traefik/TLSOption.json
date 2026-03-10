@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "kind": "TLSOption",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "tlsoptions",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "TLSOption is the CRD implementation of a Traefik TLS Option, allowing to configure some parameters of the TLS connection.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/tls/tls-certificates/#certificates-stores#tls-options",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.alpnProtocols",
+      "type": "array",
+      "description": "ALPNProtocols defines the list of supported application level protocols for the TLS handshake, in order of preference.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/tls/tls-certificates/#certificates-stores#alpn-protocols"
+    },
+    {
+      "field": "spec.cipherSuites",
+      "type": "array",
+      "description": "CipherSuites defines the list of supported cipher suites for TLS versions up to TLS 1.2.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/tls/tls-certificates/#certificates-stores#cipher-suites"
+    },
+    {
+      "field": "spec.clientAuth",
+      "type": "object",
+      "description": "ClientAuth defines the server's policy for TLS Client Authentication."
+    },
+    {
+      "field": "spec.curvePreferences",
+      "type": "array",
+      "description": "CurvePreferences defines the preferred elliptic curves.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/tls/tls-certificates/#certificates-stores#curve-preferences"
+    },
+    {
+      "field": "spec.disableSessionTickets",
+      "type": "boolean",
+      "description": "DisableSessionTickets disables TLS session resumption via session tickets."
+    },
+    {
+      "field": "spec.maxVersion",
+      "type": "string",
+      "description": "MaxVersion defines the maximum TLS version that Traefik will accept.\nPossible values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13.\nDefault: None."
+    },
+    {
+      "field": "spec.minVersion",
+      "type": "string",
+      "description": "MinVersion defines the minimum TLS version that Traefik will accept.\nPossible values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13.\nDefault: VersionTLS10."
+    },
+    {
+      "field": "spec.preferServerCipherSuites",
+      "type": "boolean",
+      "description": "PreferServerCipherSuites defines whether the server chooses a cipher suite among his own instead of among the client's.\nIt is enabled automatically when minVersion or maxVersion is set.\nDeprecated: https://github.com/golang/go/issues/45430"
+    },
+    {
+      "field": "spec.sniStrict",
+      "type": "boolean",
+      "description": "SniStrict defines whether Traefik allows connections from clients connections that do not specify a server_name extension."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

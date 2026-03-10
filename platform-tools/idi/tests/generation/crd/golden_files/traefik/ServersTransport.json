@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "kind": "ServersTransport",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "serverstransports",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "ServersTransport is the CRD implementation of a ServersTransport.\nIf no serversTransport is specified, the default@internal will be used.\nThe default@internal serversTransport is created from the static configuration.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/load-balancing/serverstransport/",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.certificatesSecrets",
+      "type": "array",
+      "description": "CertificatesSecrets defines a list of secret storing client certificates for mTLS."
+    },
+    {
+      "field": "spec.disableHTTP2",
+      "type": "boolean",
+      "description": "DisableHTTP2 disables HTTP/2 for connections with backend servers."
+    },
+    {
+      "field": "spec.forwardingTimeouts",
+      "type": "object",
+      "description": "ForwardingTimeouts defines the timeouts for requests forwarded to the backend servers."
+    },
+    {
+      "field": "spec.insecureSkipVerify",
+      "type": "boolean",
+      "description": "InsecureSkipVerify disables SSL certificate verification."
+    },
+    {
+      "field": "spec.maxIdleConnsPerHost",
+      "type": "integer",
+      "description": "MaxIdleConnsPerHost controls the maximum idle (keep-alive) to keep per-host."
+    },
+    {
+      "field": "spec.peerCertURI",
+      "type": "string",
+      "description": "PeerCertURI defines the peer cert URI used to match against SAN URI during the peer certificate verification."
+    },
+    {
+      "field": "spec.rootCAs",
+      "type": "array",
+      "description": "RootCAs defines a list of CA certificate Secrets or ConfigMaps used to validate server certificates."
+    },
+    {
+      "field": "spec.rootCAsSecrets",
+      "type": "array",
+      "description": "RootCAsSecrets defines a list of CA secret used to validate self-signed certificate.\nDeprecated: RootCAsSecrets is deprecated, please use the RootCAs option instead."
+    },
+    {
+      "field": "spec.serverName",
+      "type": "string",
+      "description": "ServerName defines the server name used to contact the server."
+    },
+    {
+      "field": "spec.spiffe",
+      "type": "object",
+      "description": "Spiffe defines the SPIFFE configuration."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

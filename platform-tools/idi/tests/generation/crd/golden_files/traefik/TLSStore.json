@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "kind": "TLSStore",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "tlsstores",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "TLSStore is the CRD implementation of a Traefik TLS Store.\nFor the time being, only the TLSStore named default is supported.\nThis means that you cannot have two stores that are named default in different Kubernetes namespaces.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/tls/tls-certificates/#certificates-stores#certificates-stores",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.certificates",
+      "type": "array",
+      "description": "Certificates is a list of secret names, each secret holding a key/certificate pair to add to the store."
+    },
+    {
+      "field": "spec.defaultCertificate",
+      "type": "object",
+      "description": "DefaultCertificate defines the default certificate configuration."
+    },
+    {
+      "field": "spec.defaultGeneratedCert",
+      "type": "object",
+      "description": "DefaultGeneratedCert defines the default generated certificate configuration."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

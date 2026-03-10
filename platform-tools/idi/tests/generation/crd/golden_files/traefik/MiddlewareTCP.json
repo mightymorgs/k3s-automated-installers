@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "kind": "MiddlewareTCP",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "middlewaretcps",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "MiddlewareTCP is the CRD implementation of a Traefik TCP middleware.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/tcp/middlewares/overview/",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.inFlightConn",
+      "type": "object",
+      "description": "InFlightConn defines the InFlightConn middleware configuration."
+    },
+    {
+      "field": "spec.ipAllowList",
+      "type": "object",
+      "description": "IPAllowList defines the IPAllowList middleware configuration.\nThis middleware accepts/refuses connections based on the client IP.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/tcp/middlewares/ipallowlist/"
+    },
+    {
+      "field": "spec.ipWhiteList",
+      "type": "object",
+      "description": "IPWhiteList defines the IPWhiteList middleware configuration.\nThis middleware accepts/refuses connections based on the client IP.\nDeprecated: please use IPAllowList instead.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/tcp/middlewares/ipwhitelist/"
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

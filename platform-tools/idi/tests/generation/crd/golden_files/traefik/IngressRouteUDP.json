@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "kind": "IngressRouteUDP",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "ingressrouteudps",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "IngressRouteUDP is a CRD implementation of a Traefik UDP Router.",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.entryPoints",
+      "type": "array",
+      "description": "EntryPoints defines the list of entry point names to bind to.\nEntry points have to be configured in the static configuration.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/install-configuration/entrypoints/\nDefault: all."
+    },
+    {
+      "field": "spec.routes",
+      "type": "array",
+      "description": "Routes defines the list of routes."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

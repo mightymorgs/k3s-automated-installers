@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "kind": "TraefikService",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "traefikservices",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "TraefikService is the CRD implementation of a Traefik Service.\nTraefikService object allows to:\n- Apply weight to Services on load-balancing\n- Mirror traffic on services\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/kubernetes/crd/http/traefikservice/",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.highestRandomWeight",
+      "type": "object",
+      "description": "HighestRandomWeight defines the highest random weight service configuration."
+    },
+    {
+      "field": "spec.mirroring",
+      "type": "object",
+      "description": "Mirroring defines the Mirroring service configuration."
+    },
+    {
+      "field": "spec.weighted",
+      "type": "object",
+      "description": "Weighted defines the Weighted Round Robin configuration."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}
