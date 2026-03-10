@@ -328,6 +328,30 @@ def classify_walked_field(
     Returns:
         List of ClassifiedField (usually 1 item; multiple for enum_kind).
     """
+    # Priority 0: Side-effect dictionary for *Name fields.
+    # The side-effect dictionary (confidence 0.95) has domain-specific knowledge
+    # that overrides structural detection (0.9). For example, Certificate's
+    # spec.secretName is an output_declaration (operator creates the Secret),
+    # but KindRegistry would classify it as input_ref (Secret+Name pattern).
+    # Dictionary knowledge MUST win.
+    lower_name = field.name.lower()
+    if lower_name.endswith("name") and field.schema.get("type") == "string":
+        effects = get_side_effects(group, kind)
+        for eff in effects:
+            if eff["field"] == field.path:
+                return [ClassifiedField(
+                    field=field.path,
+                    role="output_declaration",
+                    confidence=0.95,
+                    field_type=field.schema.get("type", "string"),
+                    target_kind=eff["produces_kind"],
+                    target_group=eff["produces_group"],
+                    required=field.required,
+                    description=field.schema.get("description", ""),
+                    detection_source="side_effect:operator_dict",
+                    fact_shape="identity",
+                )]
+
     # Priority 1: Structural ref detection.
     ref_result = detect_ref(field, registry)
     if ref_result is not None:
@@ -338,30 +362,12 @@ def classify_walked_field(
     if enum_results:
         return enum_results
 
-    # Priority 3: Side-effect NLP for *Name fields.
-    lower_name = field.name.lower()
+    # Priority 3: Side-effect NLP for *Name fields (non-dictionary).
     if lower_name.endswith("name") and field.schema.get("type") == "string":
         role, confidence = classify_name_field(
             field.path, group, kind, field.schema.get("description", ""),
         )
         if role == "output_declaration":
-            # Check side-effect dictionary for target info.
-            effects = get_side_effects(group, kind)
-            for eff in effects:
-                if eff["field"] == field.path:
-                    return [ClassifiedField(
-                        field=field.path,
-                        role="output_declaration",
-                        confidence=confidence,
-                        field_type=field.schema.get("type", "string"),
-                        target_kind=eff["produces_kind"],
-                        target_group=eff["produces_group"],
-                        required=field.required,
-                        description=field.schema.get("description", ""),
-                        detection_source="side_effect:operator_dict",
-                        fact_shape="identity",
-                    )]
-            # NLP detected output but no dictionary entry.
             return [ClassifiedField(
                 field=field.path,
                 role="output_declaration",

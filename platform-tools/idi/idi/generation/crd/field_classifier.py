@@ -1,22 +1,20 @@
-"""RESTler-adapted field classifier for CRD schemas.
+"""CRD field classifier — delegates to schema_walker + ref_detector pipeline.
 
 Classifies CRD spec properties into roles:
 - input_ref: consumer — needs an existing resource
 - output_declaration: producer — operator creates this
 - config_field: parameterization — no dep edges
 
-Uses structural heuristics (0.9), description NLP (0.6),
-and side-effect dictionary (0.95) in layered confidence.
+The ClassifiedField dataclass is the canonical data model, imported
+throughout the pipeline (output_writer.py, ref_detector.py, crd_dep.py).
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from idi.generation.adapters.kubernetes_crd import EXCLUDED_FIELDS
 from idi.generation.crd.kind_registry import KindRegistry
-from idi.generation.crd.side_effect_registry import classify_name_field
+from idi.generation.crd.schema_walker import walk_crd_schema
 
 
 @dataclass
@@ -42,10 +40,14 @@ def classify_fields(
     spec_required: list[str],
     group: str,
     kind: str,
-    registry: KindRegistry,
+    registry: KindRegistry | None = None,
     prefix: str = "spec",
 ) -> list[ClassifiedField]:
-    """Classify all spec properties into roles.
+    """Classify all spec properties into roles using the detection pipeline.
+
+    Iterates walk_crd_schema results and delegates per-field classification
+    to classify_walked_field from ref_detector. Applies parent-child
+    deduplication to prevent the same reference from being classified twice.
 
     Args:
         spec_properties: The properties dict from spec.
@@ -58,162 +60,69 @@ def classify_fields(
     Returns:
         List of ClassifiedField with roles assigned.
     """
+    # Lazy import to avoid circular dependency:
+    # field_classifier -> ref_detector -> field_classifier (for ClassifiedField).
+    from idi.generation.crd.ref_detector import classify_walked_field
+
+    if registry is None:
+        registry = KindRegistry()
+
     results: list[ClassifiedField] = []
+    classified_ref_paths: set[str] = set()
 
-    for prop_name, prop_schema in spec_properties.items():
-        if not isinstance(prop_schema, dict):
+    for field in walk_crd_schema(spec_properties, spec_required, prefix=prefix):
+        # Parent-child deduplication: skip descendants of classified refs.
+        if any(field.path.startswith(ref_path + ".") for ref_path in classified_ref_paths):
             continue
-        if prop_name in EXCLUDED_FIELDS:
-            continue
 
-        field_path = f"{prefix}.{prop_name}"
-        field_type = prop_schema.get("type", "string")
-        description = prop_schema.get("description", "")
-        is_required = prop_name in spec_required
+        # Get sibling fields for enum_kind detection.
+        sibling_fields = None
+        if field.schema.get("type") == "string" and field.schema.get("enum"):
+            sibling_fields = _get_sibling_fields(
+                spec_properties, field.parent_path, prefix,
+            )
 
-        classified = _classify_single_field(
-            prop_name, prop_schema, field_path, field_type,
-            description, is_required, group, kind, registry,
+        classified_list = classify_walked_field(
+            field, registry, kind, group,
+            sibling_fields=sibling_fields,
         )
-        results.append(classified)
+
+        for classified in classified_list:
+            if classified.role == "input_ref":
+                classified_ref_paths.add(field.path)
+
+        results.extend(classified_list)
 
     return results
 
 
-def _classify_single_field(
-    prop_name: str,
-    prop_schema: dict[str, Any],
-    field_path: str,
-    field_type: str,
-    description: str,
-    is_required: bool,
-    group: str,
-    kind: str,
-    registry: KindRegistry,
-) -> ClassifiedField:
-    """Classify a single field using layered heuristics."""
+def _get_sibling_fields(
+    root_properties: dict[str, Any],
+    parent_path: str,
+    prefix: str,
+) -> dict[str, Any] | None:
+    """Navigate to parent object's properties for sibling detection."""
+    if parent_path == prefix:
+        return root_properties
 
-    lower_name = prop_name.lower()
-
-    # 1. *Name fields — check side-effect registry first (dictionary 0.95 > structural 0.9).
-    if lower_name.endswith("name") and field_type == "string":
-        role, confidence = classify_name_field(
-            field_path, group, kind, description,
-        )
-        if role == "output_declaration":
-            # Look up what it produces from side-effect registry.
-            from idi.generation.crd.side_effect_registry import get_side_effects
-            effects = get_side_effects(group, kind)
-            for eff in effects:
-                if eff["field"] == field_path:
-                    return ClassifiedField(
-                        field=field_path, role="output_declaration",
-                        confidence=confidence, field_type=field_type,
-                        target_kind=eff["produces_kind"],
-                        target_group=eff["produces_group"],
-                        required=is_required, description=description,
-                        detection_source="field_classifier:layer1_side_effect",
-                    )
-            # NLP detected output but no dictionary entry — still output.
-            return ClassifiedField(
-                field=field_path, role="output_declaration",
-                confidence=confidence, field_type=field_type,
-                required=is_required, description=description,
-                detection_source="field_classifier:layer1_nlp_output",
-            )
-        if role == "input_ref":
-            # Infer target from registry.
-            is_ref, target_kind, target_plural, target_group = registry.is_ref_field(
-                prop_name, current_group=group,
-            )
-            if is_ref and target_kind:
-                return ClassifiedField(
-                    field=field_path, role="input_ref",
-                    confidence=confidence, field_type=field_type,
-                    target_kind=target_kind,
-                    target_group=target_group,
-                    required=is_required, description=description,
-                    detection_source="field_classifier:layer1_nlp_input",
-                )
-            # No registry match — still input_ref but without target.
-            return ClassifiedField(
-                field=field_path, role="input_ref",
-                confidence=confidence, field_type=field_type,
-                required=is_required, description=description,
-                detection_source="field_classifier:layer1_nlp_input",
-            )
-        # config_field fallthrough — fall to default at bottom.
-
-    # 2. Object with name property + *Ref suffix → input_ref (structural heuristic).
-    # Checked before generic registry matching because the structural shape is a
-    # stronger signal. Uses the current CRD's group as target_group (matching old behavior).
-    if (
-        field_type == "object"
-        and "name" in prop_schema.get("properties", {})
-        and lower_name.endswith("ref")
-    ):
-        inferred_kind = _infer_kind_from_ref(prop_name)
-        cross_ns = "namespace" in prop_schema.get("properties", {})
-        return ClassifiedField(
-            field=field_path, role="input_ref", confidence=0.9,
-            field_type=field_type, target_kind=inferred_kind,
-            target_group=group, required=is_required,
-            cross_namespace=cross_ns, description=description,
-            detection_source="field_classifier:layer3_object_name_ref",
-        )
-
-    # 3. Check registry for {Kind}Ref / {Kind}Name patterns.
-    is_ref, target_kind, target_plural, target_group = registry.is_ref_field(
-        prop_name, current_group=group,
-    )
-    if is_ref and target_kind:
-        cross_ns = _has_namespace_prop(prop_schema)
-        return ClassifiedField(
-            field=field_path, role="input_ref", confidence=0.9,
-            field_type=field_type, target_kind=target_kind,
-            target_group=target_group, required=is_required,
-            cross_namespace=cross_ns, description=description,
-            detection_source="field_classifier:layer2_ref_pattern",
-        )
-
-    # 4. (REMOVED — compound *Ref suffix handling is now covered by layer 2
-    #     via registry.is_ref_field() which handles longest-match.)
-
-    # 5. Default: config_field.
-    return ClassifiedField(
-        field=field_path, role="config_field", confidence=0.5,
-        field_type=field_type, required=is_required,
-        description=description,
-        detection_source="field_classifier:layer5_default",
-    )
-
-
-# -- Helpers ----------------------------------------------------------------
-
-
-def _resource_to_kind(resource: str, registry: KindRegistry) -> str | None:
-    """Look up Kind name for a plural resource. Returns None if not registered."""
-    return registry.plural_to_kind(resource)
-
-
-def _resource_to_group(resource: str, registry: KindRegistry) -> str:
-    """Look up API group for a plural resource."""
-    kind = registry.plural_to_kind(resource)
-    if kind:
-        return registry.group_for_kind(kind) or ""
-    return ""
-
-
-def _has_namespace_prop(schema: dict[str, Any]) -> bool:
-    if schema.get("type") != "object":
-        return False
-    return "namespace" in schema.get("properties", {})
-
-
-def _infer_kind_from_ref(field_name: str) -> str:
-    """Infer Kind from a *Ref field name: issuerRef -> Issuer."""
-    base = re.sub(r'[Rr]ef$', '', field_name)
-    # PascalCase: first char already upper in most cases.
-    if base and base[0].isupper():
-        return base
-    return base[0].upper() + base[1:] if base else ""
+    # Walk the path segments to reach the parent.
+    segments = parent_path[len(prefix) + 1:].split(".")
+    current = root_properties
+    for seg in segments:
+        if not isinstance(current, dict):
+            return None
+        prop = current.get(seg, {})
+        if not isinstance(prop, dict):
+            return None
+        # Handle arrays — dive into items.
+        if prop.get("type") == "array":
+            items = prop.get("items", {})
+            if isinstance(items, dict) and "properties" in items:
+                current = items["properties"]
+            else:
+                return None
+        elif "properties" in prop:
+            current = prop["properties"]
+        else:
+            return None
+    return current

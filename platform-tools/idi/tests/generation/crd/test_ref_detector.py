@@ -535,16 +535,20 @@ class TestClassifyWalkedField:
         assert isinstance(results, list)
 
     def test_side_effect_dict_for_certificate_secret_name(self, registry):
-        """Certificate spec.secretName uses side-effect dictionary."""
+        """Certificate spec.secretName uses side-effect dictionary (priority 0).
+
+        The side-effect dictionary (confidence 0.95) overrides KindRegistry
+        structural detection (0.9) for known operator outputs. Certificate's
+        spec.secretName is an output_declaration — the operator creates the Secret.
+        """
         field = _make_field("secretName", schema={
             "type": "string",
             "description": "Name of the Secret resource to store the TLS certificate",
         })
-        # secretName matches KindRegistry first (Secret via suffix match),
-        # so detect_ref takes priority. This is correct behavior — the ref
-        # detector catches it before NLP.
         results = classify_walked_field(
             field, registry, "Certificate", "cert-manager.io",
         )
         assert len(results) == 1
-        assert results[0].role == "input_ref"  # KindRegistry catches it
+        assert results[0].role == "output_declaration"
+        assert results[0].detection_source == "side_effect:operator_dict"
+        assert results[0].confidence == 0.95

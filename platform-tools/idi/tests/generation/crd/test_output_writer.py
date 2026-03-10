@@ -79,13 +79,16 @@ class TestDecomposedStructure:
 
     def test_operation_depends_on(self):
         depends = self.skill["operation"]["depends_on"]
-        assert len(depends) == 1
-        assert depends[0]["ref"] == "issuerRef"
+        # Phase 2 finds more refs via depth traversal; verify issuerRef is present.
+        assert len(depends) >= 1
+        ref_names = {d["ref"] for d in depends}
+        assert "issuerRef" in ref_names
 
     def test_operation_outputs(self):
         outputs = self.skill["operation"]["outputs"]
-        assert len(outputs) == 1
-        assert outputs[0]["output"] == "secretName"
+        assert len(outputs) >= 1
+        output_names = {o["output"] for o in outputs}
+        assert "secretName" in output_names
 
 
 # ---------------------------------------------------------------------------
