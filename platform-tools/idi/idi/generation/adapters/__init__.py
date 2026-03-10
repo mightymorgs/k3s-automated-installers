@@ -29,7 +29,6 @@ import re
 from idi.generation.adapters.openapi_rest import OpenApiRestAdapter
 from idi.generation.adapters.cloudflare import CloudflareAdapter
 from idi.generation.adapters.vault import VaultAdapter
-from idi.generation.adapters.kubernetes_crd import KubernetesCrdAdapter
 from idi.generation.adapters.aws_query import AwsQueryAdapter
 from idi.generation.adapters.swagger2 import Swagger2Adapter
 from idi.generation.adapters.github_openapi import GitHubOpenApiAdapter
@@ -38,7 +37,6 @@ __all__ = [
     "OpenApiRestAdapter",
     "CloudflareAdapter",
     "VaultAdapter",
-    "KubernetesCrdAdapter",
     "AwsQueryAdapter",
     "Swagger2Adapter",
     "GitHubOpenApiAdapter",
@@ -56,9 +54,6 @@ class AdapterRegistry:
             "openapi": OpenApiRestAdapter,
             "cloudflare": CloudflareAdapter,
             "vault": VaultAdapter,
-            "kubernetes": KubernetesCrdAdapter,
-            "k8s": KubernetesCrdAdapter,
-            "crd": KubernetesCrdAdapter,
             "aws": AwsQueryAdapter,
             "query": AwsQueryAdapter,
             "swagger": Swagger2Adapter,
@@ -124,11 +119,12 @@ class AdapterRegistry:
             return "cloudflare"
 
         # Priority 3: Path pattern matching
-        # Kubernetes: /apis/<group>/<version>/ or /api/v1/ core
+        # K8s API paths use the generic REST adapter; CRD detection goes
+        # through crd_dep.py, not the schema-family adapter path.
         if re.match(r"^/apis/[a-z0-9.-]+/v\d+", sample_path, re.IGNORECASE):
-            return "kubernetes"
+            return "rest"
         if re.match(r"^/api/v\d+/", sample_path, re.IGNORECASE):
-            return "kubernetes"
+            return "rest"
         if "Action=" in sample_path or "#Action=" in sample_path:
             return "aws"
         return "rest"

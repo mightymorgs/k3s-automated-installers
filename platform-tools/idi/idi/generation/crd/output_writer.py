@@ -53,18 +53,25 @@ def _satisfaction_for_field(field: ClassifiedField) -> str:
 def _fact_ref_for_ref(field: ClassifiedField) -> str:
     """Build crdfacts:// URI for an input_ref in decomposed format.
 
-    Uses #name as the fragment (CFM convention), not the source field name.
+    Uses target_field for the fragment if populated, falls back to leaf name.
+    This ensures two consumer fields referencing Secret#name produce
+    the same fact URI: crdfacts://core/Secret#name.
     """
     group = field.target_group or "core"
     kind = field.target_kind or "Unknown"
-    return f"crdfacts://{group}/{kind}#name"
+    fragment = field.target_field if field.target_field else field.field.rsplit(".", 1)[-1]
+    return f"crdfacts://{group}/{kind}#{fragment}"
 
 
 def _fact_ref_for_output(field: ClassifiedField) -> str:
-    """Build crdfacts:// URI for an output_declaration in decomposed format."""
+    """Build crdfacts:// URI for an output_declaration in decomposed format.
+
+    Uses target_field for the fragment if populated, falls back to leaf name.
+    """
     group = field.target_group or "core"
     kind = field.target_kind or "Unknown"
-    return f"crdfacts://{group}/{kind}#name"
+    fragment = field.target_field if field.target_field else field.field.rsplit(".", 1)[-1]
+    return f"crdfacts://{group}/{kind}#{fragment}"
 
 
 def _resolve_filenames(fields: list[ClassifiedField], role: str) -> dict[str, str]:
@@ -174,7 +181,7 @@ def build_decomposed_skill(
             "required": f.required,
             "cross_namespace": f.cross_namespace,
             "fact_ref": _fact_ref_for_ref(f),
-            "fact_shape": "identity",
+            "fact_shape": f.fact_shape or "identity",
             "satisfaction": _satisfaction_for_field(f),
             "detection_source": f.detection_source,
             "confidence": f.confidence,
@@ -194,7 +201,7 @@ def build_decomposed_skill(
             "produces_plural": "",
             "role": "output_declaration",
             "fact_ref": _fact_ref_for_output(f),
-            "fact_shape": "identity",
+            "fact_shape": f.fact_shape or "identity",
             "detection_source": f.detection_source,
             "confidence": f.confidence,
         }
