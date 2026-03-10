@@ -155,6 +155,12 @@ def _walk_recursive(
             # Exception: don't skip "status" when walking status subresource
             if prop_name == "status" and not skip_status_in_excluded:
                 pass  # allow through
+            # Exception: allow "kind" at depth > 1 (inside arrays/objects).
+            # At root level (depth 1), "kind" is the K8s envelope field.
+            # At deeper levels, it's often a discriminator enum (e.g.,
+            # services[].kind with enum ["Service", "TraefikService"]).
+            elif prop_name == "kind" and current_depth > 1:
+                pass  # allow through
             else:
                 continue
 

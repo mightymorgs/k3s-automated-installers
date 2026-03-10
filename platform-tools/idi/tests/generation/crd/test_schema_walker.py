@@ -348,6 +348,10 @@ class TestWalkMixed:
         # Inner fields also yielded
         name_field = next(f for f in fields if f.path == "spec.secretStoreRefs.name")
         assert name_field.is_array_item is True
+        # 'kind' inside array items at depth > 1 is now yielded (discriminator)
+        kind_field = next(f for f in fields if f.path == "spec.secretStoreRefs.kind")
+        assert kind_field.is_array_item is True
+        assert kind_field.depth == 2
 
 
 # ---------------------------------------------------------------------------
@@ -399,23 +403,36 @@ class TestWalkExclusions:
         assert names == {"foo"}
 
     def test_k8s_envelope_not_skipped_when_nested(self):
-        """_K8S_ENVELOPE fields NOT skipped when nested (except EXCLUDED ones)."""
+        """_K8S_ENVELOPE fields NOT skipped when nested (except some EXCLUDED ones)."""
         props = {
             "outer": {
                 "type": "object",
                 "properties": {
                     # "metadata" is not in EXCLUDED_FIELDS, so it should be yielded
                     "metadata": {"type": "string"},
-                    # "kind" IS in EXCLUDED_FIELDS (wait, it is), so it should be skipped
+                    # "kind" is in EXCLUDED_FIELDS but allowed at depth > 1
+                    "kind": {"type": "string"},
                 },
             },
         }
         fields = list(walk_crd_schema(props))
         names = {f.name for f in fields}
         assert "outer" in names
-        # "kind" is in EXCLUDED_FIELDS so it gets skipped everywhere
         # "metadata" is NOT in EXCLUDED_FIELDS, so it IS yielded when nested
         assert "metadata" in names
+        # "kind" is in EXCLUDED_FIELDS but allowed at depth > 1 (discriminator)
+        assert "kind" in names
+
+    def test_kind_excluded_at_root_level(self):
+        """'kind' in EXCLUDED_FIELDS is still skipped at depth 1 (root level)."""
+        props = {
+            "kind": {"type": "string"},
+            "foo": {"type": "string"},
+        }
+        fields = list(walk_crd_schema(props))
+        names = {f.name for f in fields}
+        assert "kind" not in names
+        assert "foo" in names
 
     def test_excluded_fields_has_16_entries(self):
         """EXCLUDED_FIELDS contains all 16 entries from kubernetes_crd.py."""
