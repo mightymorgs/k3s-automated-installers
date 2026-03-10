@@ -128,7 +128,13 @@ class TestGoldenFileCoverage:
         assert len(all_json) == 21
 
     def test_exactly_21_fixture_files(self):
-        all_json = list(_FIXTURES_DIR.rglob("*.json"))
+        # Count only CRD spec fixtures in service subdirectories,
+        # not Phase 4 golden fixtures (olm/rbac) in phase4/ subdir.
+        service_dirs = {"cert-manager", "external-secrets", "traefik"}
+        all_json = [
+            p for p in _FIXTURES_DIR.rglob("*.json")
+            if p.parent.name in service_dirs
+        ]
         assert len(all_json) == 21
 
     def test_all_kinds_have_golden_files(self):

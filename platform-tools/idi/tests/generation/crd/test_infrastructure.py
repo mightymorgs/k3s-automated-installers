@@ -64,10 +64,21 @@ def test_golden_files_correct_kinds():
 # ---------------------------------------------------------------------------
 
 
+_CRD_SERVICE_DIRS = {"cert-manager", "external-secrets", "traefik"}
+
+
+def _crd_fixtures() -> list[Path]:
+    """Return only CRD spec fixture JSON files (service sub-directories)."""
+    return [
+        p for p in _FIXTURES_DIR.rglob("*.json")
+        if p.parent.name in _CRD_SERVICE_DIRS
+    ]
+
+
 def test_fixtures_exist():
     """fixtures directory contains fixture files for all 21 Kinds."""
     assert _FIXTURES_DIR.is_dir(), f"fixtures dir not found: {_FIXTURES_DIR}"
-    all_json = list(_FIXTURES_DIR.rglob("*.json"))
+    all_json = _crd_fixtures()
     assert len(all_json) == 21, f"Expected 21 fixtures, found {len(all_json)}"
 
 
@@ -77,7 +88,7 @@ def test_fixture_required_keys():
         "kind", "group", "version", "plural", "scope",
         "service", "spec_properties", "spec_required",
     }
-    for json_path in sorted(_FIXTURES_DIR.rglob("*.json")):
+    for json_path in sorted(_crd_fixtures()):
         data = json.loads(json_path.read_text(encoding="utf-8"))
         missing = required_keys - set(data.keys())
         assert not missing, f"{json_path.name}: missing keys {missing}"
