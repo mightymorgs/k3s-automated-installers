@@ -706,6 +706,159 @@ def detect_namespace(field: WalkedField) -> bool:
     return "namespace" in schema.get("properties", {})
 
 
+def split_camel_case(text: str) -> list[str]:
+    """Split camelCase/PascalCase text into tokens.
+
+    Handles acronyms correctly: 'serverURL' -> ['server', 'URL'].
+    Uses two-pass regex for standard camelCase splitting.
+    """
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", text)
+    s = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s)
+    return s.split("_")
+
+
+# Phase 3 detection source prefixes (Rule 2 scope guard).
+_PHASE3_SOURCES = frozenset({
+    "ref_detector:ref_tuple",
+    "ref_detector:example_kind",
+    "ref_detector:apigroup_literal",
+})
+
+# Structural K8s reference indicator property names.
+_STRUCTURAL_MARKERS = frozenset({"namespace", "kind", "apiGroup"})
+
+
+def _rule_target_kind_not_at_word_boundary(
+    field: WalkedField,
+    classification: ClassifiedField,
+) -> bool:
+    """Rule 1: Suppress when target_kind is not a complete camelCase token.
+
+    Exempt: detectors that resolve Kind from schema data (enum values)
+    rather than field names. Passthrough manifests and enum_kind both
+    resolve from enum -- the field name is unrelated to the target Kind.
+    """
+    target_kind = classification.target_kind
+    if not target_kind:
+        return False
+
+    # Detectors that resolve Kind from enum values, not field names.
+    exempt_sources = {
+        "ref_detector:passthrough_manifest",
+        "ref_detector:enum_kind",
+        "ref_detector:example_kind",
+        "ref_detector:apigroup_literal",
+    }
+    if classification.detection_source in exempt_sources:
+        return False
+
+    tokens = split_camel_case(field.name)
+    target_lower = target_kind.lower()
+
+    for token in tokens:
+        token_lower = token.lower()
+        if token_lower == target_lower:
+            return False  # Exact match -> do not suppress
+        # Depluralize: remove trailing 's' and check.
+        if token_lower.endswith("s") and token_lower[:-1] == target_lower:
+            return False  # Depluralized match -> do not suppress
+
+    return True  # target_kind not found as token -> suppress
+
+
+def _rule_kind_collision_no_structural_context(
+    field: WalkedField,
+    classification: ClassifiedField,
+) -> bool:
+    """Rule 2: Suppress Phase 3 detections on fields without structural context.
+
+    ONLY applies to Phase 3 detector sources. Phase 2 sources are exempt.
+    """
+    # Scope guard: only Phase 3 detectors.
+    if classification.detection_source not in _PHASE3_SOURCES:
+        return False
+
+    schema = field.schema
+    field_type = schema.get("type", "")
+
+    # Primitive types cannot be structural references.
+    if field_type in ("string", "integer", "boolean", "number"):
+        return True
+
+    # Object type: check for structural markers.
+    if field_type == "object":
+        properties = schema.get("properties", {})
+        if not any(marker in properties for marker in _STRUCTURAL_MARKERS):
+            return True
+
+    return False
+
+
+def _rule_nested_metadata_self_reference(
+    field: WalkedField,
+    classification: ClassifiedField,
+) -> bool:
+    """Rule 3: Suppress nested metadata.name/metadata.namespace self-references."""
+    segments = field.path.split(".")
+    for i in range(len(segments) - 1):
+        if segments[i] == "metadata" and segments[i + 1] in ("name", "namespace"):
+            if i > 1:  # metadata at depth > 1
+                return True
+    return False
+
+
+# Suppression rules: list of (predicate_function, rule_name) tuples.
+# Extensible design -- new FP patterns are added as new tuples.
+_SUPPRESSION_RULE_LIST: list[tuple[Any, str]] = [
+    (_rule_target_kind_not_at_word_boundary, "target_kind_not_at_word_boundary"),
+    (_rule_kind_collision_no_structural_context, "kind_collision_no_structural_context"),
+    (_rule_nested_metadata_self_reference, "nested_metadata_self_reference"),
+]
+
+
+def suppress_false_positives(
+    field: WalkedField,
+    classifications: list[ClassifiedField],
+) -> list[ClassifiedField]:
+    """Post-filter to suppress known false positive patterns (C28).
+
+    Suppressed items are KEPT but downgraded:
+    - role changed to "config_field"
+    - confidence set to 0.1 (below 0.7 threshold)
+    - detection_source updated to "suppressed:{original}:{rule}"
+
+    Returns the full list with suppressions applied.
+    """
+    if not classifications:
+        return classifications
+
+    result: list[ClassifiedField] = []
+    for c in classifications:
+        suppressed = False
+        for predicate, rule_name in _SUPPRESSION_RULE_LIST:
+            if predicate(field, c):
+                # Downgrade: create a new ClassifiedField with suppression markers.
+                result.append(ClassifiedField(
+                    field=c.field,
+                    role="config_field",
+                    confidence=0.1,
+                    field_type=c.field_type,
+                    target_kind=c.target_kind,
+                    target_group=c.target_group,
+                    required=c.required,
+                    cross_namespace=c.cross_namespace,
+                    description=c.description,
+                    detection_source=f"suppressed:{c.detection_source}:{rule_name}",
+                    fact_shape=c.fact_shape,
+                    target_field=c.target_field,
+                ))
+                suppressed = True
+                break  # First matching rule wins
+        if not suppressed:
+            result.append(c)
+    return result
+
+
 def _deduplicate_classifications(
     classifications: list[ClassifiedField],
 ) -> list[ClassifiedField]:
@@ -810,9 +963,10 @@ def classify_walked_field(
     passthrough_results = detect_passthrough_manifest(field, registry, manifest_flags)
     classifications.extend(passthrough_results)
 
-    # If any additive detector fired, deduplicate and return.
+    # If any additive detector fired, deduplicate, suppress, and return.
     if classifications:
-        return _deduplicate_classifications(classifications)
+        classifications = _deduplicate_classifications(classifications)
+        return suppress_false_positives(field, classifications)
 
     # Side-effect NLP for *Name fields (non-dictionary).
     if lower_name.endswith("name") and field.schema.get("type") == "string":
