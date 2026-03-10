@@ -434,9 +434,9 @@ class TestWalkExclusions:
         assert "kind" not in names
         assert "foo" in names
 
-    def test_excluded_fields_has_16_entries(self):
-        """EXCLUDED_FIELDS contains all 16 entries from kubernetes_crd.py."""
-        assert len(EXCLUDED_FIELDS) == 16
+    def test_excluded_fields_has_15_entries(self):
+        """EXCLUDED_FIELDS contains 15 entries (selector removed for PushSecret support)."""
+        assert len(EXCLUDED_FIELDS) == 15
 
     def test_k8s_envelope_has_4_entries(self):
         """_K8S_ENVELOPE has 4 entries."""

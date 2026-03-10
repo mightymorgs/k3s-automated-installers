@@ -32,7 +32,10 @@ EXCLUDED_FIELDS = frozenset({
     "managedFields",
     "annotations",
     "labels",
-    "selector",
+    # Note: "selector" was removed from this set. The original reason was to
+    # exclude K8s label selectors (matchLabels/matchExpressions), but those
+    # patterns don't trigger ref detection anyway. Removing it unblocks
+    # PushSecret.spec.selector.secret.name and similar valid ref paths.
 })
 
 # Top-level K8s envelope fields — skipped at root level only by walk_crd_schema.

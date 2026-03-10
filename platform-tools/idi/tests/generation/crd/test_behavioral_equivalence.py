@@ -114,10 +114,14 @@ class TestBehavioralSuperset:
 
         for f in fields:
             if f.role == "input_ref":
-                # constraint_fk (C29) may emit input_ref with target_kind=None
-                # when it detects structural evidence but cannot resolve the Kind.
+                # Some detectors may emit input_ref with target_kind=None
+                # when they detect structural evidence but cannot resolve the Kind.
                 # These are correctly filtered out by crd_dep.py and output_writer.py.
-                if f.detection_source == "ref_detector:constraint_fk":
+                # Known sources: constraint_fk (C29), side_effect:nlp_input.
+                if f.detection_source in (
+                    "ref_detector:constraint_fk",
+                    "side_effect:nlp_input",
+                ):
                     continue
                 assert f.target_kind is not None, (
                     f"Unresolved input_ref: {f.field} in {service}/{kind_name} "
