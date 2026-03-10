@@ -13,11 +13,11 @@ from typing import Any
 import pytest
 
 from idi.generation.crd.field_classifier import classify_fields
-from idi.generation.crd.output_writer import build_crd_skill_json
 from tests.generation.crd.conftest import (
     _FIXTURES_DIR,
     _GOLDEN_DIR,
     assert_json_equivalent,
+    build_crd_skill_json_legacy,
 )
 
 
@@ -74,8 +74,8 @@ class TestBehavioralEquivalence:
             registry=populated_registry,
         )
 
-        # 3. Build monolithic skill JSON.
-        actual = build_crd_skill_json(
+        # 3. Build monolithic skill JSON (legacy format for golden-file comparison).
+        actual = build_crd_skill_json_legacy(
             crd_info=fixture,
             fields=fields,
         )

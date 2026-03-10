@@ -67,6 +67,81 @@ def assert_json_equivalent(actual: dict, expected: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Legacy monolithic builder (kept for Phase 1a golden-file regression tests)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_fact_ref(field) -> str:
+    """Build a crdfacts:// URI in the monolithic (v1.0) format."""
+    group = field.target_group or "core"
+    kind = field.target_kind or "Unknown"
+    leaf = field.field.rsplit(".", 1)[-1]
+    return f"crdfacts://{group}/{kind}#{leaf}"
+
+
+def build_crd_skill_json_legacy(
+    crd_info: dict[str, Any],
+    fields,
+    status_conditions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a monolithic CRD skill JSON (schema v1.0) for golden-file testing.
+
+    This is a copy of the original build_crd_skill_json, preserved for
+    behavioral equivalence tests. Not used in production.
+    """
+    input_refs = []
+    output_declarations = []
+    config_fields = []
+
+    for f in fields:
+        if f.role == "input_ref" and f.target_kind:
+            input_refs.append({
+                "field": f.field,
+                "target_kind": f.target_kind,
+                "target_group": f.target_group or crd_info["group"],
+                "role": "input_ref",
+                "required": f.required,
+                "cross_namespace": f.cross_namespace,
+                "fact_ref": _legacy_fact_ref(f),
+            })
+        elif f.role == "output_declaration":
+            output_declarations.append({
+                "field": f.field,
+                "produces_kind": f.target_kind or "Unknown",
+                "produces_group": f.target_group or "core",
+                "role": "output_declaration",
+                "fact_ref": _legacy_fact_ref(f),
+            })
+        elif f.role == "config_field":
+            entry: dict[str, Any] = {
+                "field": f.field,
+                "type": f.field_type,
+            }
+            if f.description:
+                entry["description"] = f.description
+            config_fields.append(entry)
+
+    return {
+        "schema_version": "1.0",
+        "kind": crd_info["kind"],
+        "group": crd_info["group"],
+        "version": crd_info["version"],
+        "plural": crd_info["plural"],
+        "scope": crd_info["scope"],
+        "service": crd_info["service"],
+        "description": crd_info.get("description") or f"{crd_info['kind']} CRD",
+        "input_refs": input_refs,
+        "output_declarations": output_declarations,
+        "config_fields": config_fields,
+        "status_conditions": status_conditions or ["Ready"],
+        "execution": {
+            "method": "kubectl_apply",
+            "wait_condition": "condition=Ready",
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Fixture loading
 # ---------------------------------------------------------------------------
 
