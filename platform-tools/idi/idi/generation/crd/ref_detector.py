@@ -1264,12 +1264,18 @@ def _rule_target_kind_not_at_word_boundary(
     if not target_kind:
         return False
 
-    # Detectors that resolve Kind from enum values, not field names.
+    # Detectors that resolve Kind from enum values or structural evidence,
+    # not field names.
     exempt_sources = {
         "ref_detector:passthrough_manifest",
         "ref_detector:enum_kind",
         "ref_detector:example_kind",
         "ref_detector:apigroup_literal",
+        "ref_detector:kubernetes_ext_embedded",
+        "ref_detector:kubernetes_ext_list_map",
+        "ref_detector:embedded_workload",
+        "ref_detector:cataloged_shape",
+        "ref_detector:constraint_fk",
     }
     if classification.detection_source in exempt_sources:
         return False
@@ -1400,6 +1406,28 @@ def _deduplicate_classifications(
     return list(best.values())
 
 
+def _merge_additive_results(
+    results: list[ClassifiedField],
+) -> list[ClassifiedField]:
+    """Merge additive detector results, keeping highest confidence per dedup key.
+
+    Dedup key: (field_path, role, target_kind).
+    If equal confidence, prefer result from earlier pipeline step (lower index in input list).
+    Input list preserves pipeline ordering (earlier steps come first).
+    """
+    if not results:
+        return results
+
+    best: dict[tuple[str, str, str | None], ClassifiedField] = {}
+    for c in results:
+        key = (c.field, c.role, c.target_kind)
+        existing = best.get(key)
+        if existing is None or c.confidence > existing.confidence:
+            best[key] = c
+        # Equal confidence: earlier entry wins (already in dict).
+    return list(best.values())
+
+
 def classify_walked_field(
     field: WalkedField,
     registry: KindRegistry,
@@ -1410,21 +1438,35 @@ def classify_walked_field(
 ) -> list[ClassifiedField]:
     """Top-level orchestrator for spec field classification.
 
-    Runs detectors in priority order:
-    1. detect_ref — structural/KindRegistry/array ref detection
-    2. detect_enum_kind — enum values matching known Kinds
-    3. Side-effect registry NLP — for *Name fields
-    4. Default — config_field
+    Runs detectors in priority order (Phase 5A updated pipeline):
+    Step  0: Side-effect dictionary (0.95) — *Name override
+    Step  1: detect_ref (0.9) — exclusive
+    Step  2: detect_ref_tuple (0.85) — exclusive
+    Step  3: detect_kubernetes_extensions (0.8-0.95) — C32
+             embedded-resource: exclusive at 0.95
+             list-map: additive at 0.8
+    Step  4: detect_enum_kind (0.95)
+    Step  5: detect_example_kinds (0.8) — additive
+    Step  6: detect_apigroup_literal (0.85) — additive
+    Step  7: detect_passthrough_manifest (0.95)
+    Step  8: detect_constraint_fk (0.75) — C29, additive
+    Step  9: detect_embedded_workload (0.8) — C22, additive
+    Step 10: detect_cataloged_shape (0.8-0.85) — C30, additive
+    Step 11: Side-effect NLP
+    Step 12: Default config_field
+    Step 13: suppress_false_positives — post-filter
 
     Note: detect_status_output is NOT called here — it is invoked
     separately on status fields by callers.
+    detect_scale_subresource is called from crd_dep.py.
+    extract_webhook_dependencies is called from RbacDepAdapter.
 
     Args:
         field: WalkedField from schema walker.
         registry: KindRegistry instance.
         kind: The source CRD's Kind name.
         group: The source CRD's API group.
-        sibling_fields: Parent object's properties (for enum_kind).
+        sibling_fields: Parent object's properties (for enum_kind and constraint_fk).
         manifest_flags: Optional accumulator for manifest-level flags.
             If provided, passthrough detection will mutate it.
             If None, passthrough detection still runs but the flag is lost.
@@ -1432,7 +1474,7 @@ def classify_walked_field(
     Returns:
         List of ClassifiedField (usually 1 item; multiple for enum_kind).
     """
-    # Priority 0: Side-effect dictionary for *Name fields.
+    # Step 0: Side-effect dictionary for *Name fields.
     # The side-effect dictionary (confidence 0.95) has domain-specific knowledge
     # that overrides structural detection (0.9). For example, Certificate's
     # spec.secretName is an output_declaration (operator creates the Secret),
@@ -1456,41 +1498,67 @@ def classify_walked_field(
                     fact_shape="identity",
                 )]
 
-    # Priority 1: Structural ref detection.
+    # Step 1: Structural ref detection (exclusive).
     ref_result = detect_ref(field, registry)
     if ref_result is not None:
         return [ref_result]
 
-    # Priority 2: Reference tuple detection (C19).
+    # Step 2: Reference tuple detection (C19, exclusive).
     tuple_results = detect_ref_tuple(field, registry)
     if tuple_results:
         return tuple_results
 
-    # --- Additive detectors (steps 3-6): results accumulate ---
-    classifications: list[ClassifiedField] = []
+    # --- Additive detectors (steps 3-10): results accumulate ---
+    additive_results: list[ClassifiedField] = []
 
-    # Step 3: Enum Kind detection.
+    # Step 3: x-kubernetes extension fingerprinting (C32).
+    ext_result = detect_kubernetes_extensions(field, registry)
+    if ext_result is not None:
+        if ext_result.detection_source == "ref_detector:kubernetes_ext_embedded":
+            # Exclusive: embedded-resource at 0.95.
+            return [ext_result]
+        # Additive: list-map at 0.8.
+        additive_results.append(ext_result)
+
+    # Step 4: Enum Kind detection.
     enum_results = detect_enum_kind(field, registry, sibling_fields)
-    classifications.extend(enum_results)
+    additive_results.extend(enum_results)
 
-    # Step 4: Example/default Kind extraction (C24).
+    # Step 5: Example/default Kind extraction (C24).
     example_results = detect_example_kinds(field, registry)
-    classifications.extend(example_results)
+    additive_results.extend(example_results)
 
-    # Step 5: API group literal detection (C25).
+    # Step 6: API group literal detection (C25).
     apigroup_results = detect_apigroup_literal(field, registry)
-    classifications.extend(apigroup_results)
+    additive_results.extend(apigroup_results)
 
-    # Step 6: Passthrough manifest detection (C26).
+    # Step 7: Passthrough manifest detection (C26).
     passthrough_results = detect_passthrough_manifest(field, registry, manifest_flags)
-    classifications.extend(passthrough_results)
+    additive_results.extend(passthrough_results)
 
-    # If any additive detector fired, deduplicate, suppress, and return.
-    if classifications:
-        classifications = _deduplicate_classifications(classifications)
-        return suppress_false_positives(field, classifications)
+    # Step 8: Constraint-based FK inference (C29, additive).
+    fk_result = detect_constraint_fk(field, registry, parent_properties=sibling_fields)
+    if fk_result is not None:
+        additive_results.append(fk_result)
 
-    # Side-effect NLP for *Name fields (non-dictionary).
+    # Step 9: Embedded workload shape matching (C22, additive).
+    workload_result = detect_embedded_workload(field, registry)
+    if workload_result is not None:
+        additive_results.append(workload_result)
+
+    # Step 10: Cross-CRD shape catalog matching (C30, additive).
+    catalog = _get_shape_catalog()
+    catalog_result = detect_cataloged_shape(field, catalog)
+    if catalog_result is not None:
+        additive_results.append(catalog_result)
+
+    # Merge additive results, then deduplicate and suppress.
+    if additive_results:
+        merged = _merge_additive_results(additive_results)
+        merged = _deduplicate_classifications(merged)
+        return suppress_false_positives(field, merged)
+
+    # Step 11: Side-effect NLP for *Name fields (non-dictionary).
     if lower_name.endswith("name") and field.schema.get("type") == "string":
         role, confidence = classify_name_field(
             field.path, group, kind, field.schema.get("description", ""),
@@ -1524,7 +1592,7 @@ def classify_walked_field(
                 fact_shape="identity" if target_kind else "config",
             )]
 
-    # Default — config_field.
+    # Step 12: Default — config_field.
     return [ClassifiedField(
         field=field.path,
         role="config_field",
