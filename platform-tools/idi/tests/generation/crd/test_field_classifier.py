@@ -263,3 +263,51 @@ class TestResourceToGroup:
 
     def test_unknown(self):
         assert _resource_to_group("unknown", self.registry) == ""
+
+
+# ---------------------------------------------------------------------------
+# detection_source tests
+# ---------------------------------------------------------------------------
+
+
+class TestDetectionSource:
+    @pytest.fixture(autouse=True)
+    def setup_registry(self, populated_registry):
+        self.registry = populated_registry
+
+    def test_certificate_secret_name_side_effect(self):
+        """spec.secretName on Certificate -> layer1_side_effect."""
+        fixture = _load_fixture("cert-manager", "Certificate")
+        fields = _classify_fixture(fixture, self.registry)
+        secret_name = next(f for f in fields if f.field == "spec.secretName")
+        assert secret_name.detection_source == "field_classifier:layer1_side_effect"
+
+    def test_certificate_issuer_ref_layer3(self):
+        """spec.issuerRef on Certificate -> layer3_object_name_ref."""
+        fixture = _load_fixture("cert-manager", "Certificate")
+        fields = _classify_fixture(fixture, self.registry)
+        issuer_ref = next(f for f in fields if f.field == "spec.issuerRef")
+        assert issuer_ref.detection_source == "field_classifier:layer3_object_name_ref"
+
+    def test_external_secret_store_ref_layer3(self):
+        """spec.secretStoreRef on ExternalSecret -> layer3 (object+name+Ref structural heuristic)."""
+        fixture = _load_fixture("external-secrets", "ExternalSecret")
+        fields = _classify_fixture(fixture, self.registry)
+        store_ref = next(f for f in fields if f.field == "spec.secretStoreRef")
+        # secretStoreRef is an object with name property, so structural heuristic (layer 3)
+        # takes priority over registry matching (layer 2).
+        assert store_ref.detection_source == "field_classifier:layer3_object_name_ref"
+
+    def test_certificate_common_name_default(self):
+        """spec.commonName on Certificate -> layer5_default."""
+        fixture = _load_fixture("cert-manager", "Certificate")
+        fields = _classify_fixture(fixture, self.registry)
+        common_name = next(f for f in fields if f.field == "spec.commonName")
+        assert common_name.detection_source == "field_classifier:layer5_default"
+
+    def test_all_fields_have_detection_source(self):
+        """Every classified field has a non-empty detection_source."""
+        fixture = _load_fixture("cert-manager", "Certificate")
+        fields = _classify_fixture(fixture, self.registry)
+        for f in fields:
+            assert f.detection_source, f"Field {f.field} has empty detection_source"

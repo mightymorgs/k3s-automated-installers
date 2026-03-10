@@ -32,6 +32,7 @@ class ClassifiedField:
     required: bool = False
     cross_namespace: bool = False
     description: str = ""
+    detection_source: str = ""  # Identifies which classification layer produced this result
 
 
 def classify_fields(
@@ -109,12 +110,14 @@ def _classify_single_field(
                         target_kind=eff["produces_kind"],
                         target_group=eff["produces_group"],
                         required=is_required, description=description,
+                        detection_source="field_classifier:layer1_side_effect",
                     )
             # NLP detected output but no dictionary entry — still output.
             return ClassifiedField(
                 field=field_path, role="output_declaration",
                 confidence=confidence, field_type=field_type,
                 required=is_required, description=description,
+                detection_source="field_classifier:layer1_nlp_output",
             )
         if role == "input_ref":
             # Infer target from registry.
@@ -128,12 +131,14 @@ def _classify_single_field(
                     target_kind=target_kind,
                     target_group=target_group,
                     required=is_required, description=description,
+                    detection_source="field_classifier:layer1_nlp_input",
                 )
             # No registry match — still input_ref but without target.
             return ClassifiedField(
                 field=field_path, role="input_ref",
                 confidence=confidence, field_type=field_type,
                 required=is_required, description=description,
+                detection_source="field_classifier:layer1_nlp_input",
             )
         # config_field fallthrough — fall to default at bottom.
 
@@ -152,6 +157,7 @@ def _classify_single_field(
             field_type=field_type, target_kind=inferred_kind,
             target_group=group, required=is_required,
             cross_namespace=cross_ns, description=description,
+            detection_source="field_classifier:layer3_object_name_ref",
         )
 
     # 3. Check registry for {Kind}Ref / {Kind}Name patterns.
@@ -165,6 +171,7 @@ def _classify_single_field(
             field_type=field_type, target_kind=target_kind,
             target_group=target_group, required=is_required,
             cross_namespace=cross_ns, description=description,
+            detection_source="field_classifier:layer2_ref_pattern",
         )
 
     # 4. (REMOVED — compound *Ref suffix handling is now covered by layer 2
@@ -175,6 +182,7 @@ def _classify_single_field(
         field=field_path, role="config_field", confidence=0.5,
         field_type=field_type, required=is_required,
         description=description,
+        detection_source="field_classifier:layer5_default",
     )
 
 
