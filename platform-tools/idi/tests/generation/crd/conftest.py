@@ -119,11 +119,8 @@ def tmp_output_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def core_only_registry():
     """KindRegistry with only the 18 core K8s resources (no CRDs registered)."""
-    try:
-        from idi.generation.crd.kind_registry import KindRegistry
-        return KindRegistry()
-    except ImportError:
-        pytest.skip("KindRegistry not yet implemented")
+    from idi.generation.crd.kind_registry import KindRegistry
+    return KindRegistry()
 
 
 @pytest.fixture
