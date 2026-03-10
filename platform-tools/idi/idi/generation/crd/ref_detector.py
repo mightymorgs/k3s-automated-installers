@@ -312,6 +312,115 @@ def detect_ref_tuple(
     return []
 
 
+def _scan_for_kind_values(
+    value: Any,
+    depth: int = 0,
+    max_depth: int = 3,
+    _counter: list[int] | None = None,
+    max_visited: int = 50,
+) -> list[str]:
+    """Recursively scan a value for 'kind' keys, returning found string values.
+
+    Safety limits prevent resource exhaustion from pathological inputs.
+    Does NOT mutate the input value.
+    """
+    if _counter is None:
+        _counter = [0]
+
+    if _counter[0] >= max_visited or depth > max_depth:
+        return []
+
+    _counter[0] += 1
+    results: list[str] = []
+
+    if isinstance(value, dict):
+        for key, val in value.items():
+            if key == "kind" and isinstance(val, str):
+                results.append(val)
+            elif isinstance(val, (dict, list)):
+                results.extend(_scan_for_kind_values(
+                    val, depth + 1, max_depth, _counter, max_visited,
+                ))
+    elif isinstance(value, list):
+        for item in value:
+            if _counter[0] >= max_visited:
+                break
+            results.extend(_scan_for_kind_values(
+                item, depth + 1, max_depth, _counter, max_visited,
+            ))
+
+    return results
+
+
+def detect_example_kinds(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> list[ClassifiedField]:
+    """Detect Kind names in example/default values (C24).
+
+    Scans example, default, and x-kubernetes-examples schema values
+    for literal Kind names. Returns one ClassifiedField per matched Kind.
+    """
+    schema = field.schema
+    all_kinds = registry.all_kinds()
+    kind_lower_map = {k.lower(): k for k in all_kinds}
+
+    # Collect all values to scan.
+    values_to_scan: list[Any] = []
+    for key in ("example", "default"):
+        if key in schema:
+            values_to_scan.append(schema[key])
+    xke = schema.get("x-kubernetes-examples")
+    if xke is not None:
+        if isinstance(xke, list):
+            values_to_scan.extend(xke)
+        else:
+            values_to_scan.append(xke)
+
+    if not values_to_scan:
+        return []
+
+    # Scan for kind values.
+    found_kinds: set[str] = set()
+    for val in values_to_scan:
+        # Check if the value itself is a string matching a Kind.
+        if isinstance(val, str):
+            canonical = kind_lower_map.get(val.lower())
+            if canonical:
+                found_kinds.add(canonical)
+        # Recursive scan for kind keys.
+        for kind_val in _scan_for_kind_values(val):
+            canonical = kind_lower_map.get(kind_val.lower())
+            if canonical:
+                found_kinds.add(canonical)
+
+    if not found_kinds:
+        return []
+
+    # Determine role based on status vs spec.
+    is_status = field.parent_path.startswith("status")
+    role = "output_declaration" if is_status else "input_ref"
+
+    results: list[ClassifiedField] = []
+    for kind_name in sorted(found_kinds):
+        target_group = registry.group_for_kind(kind_name) or ""
+        results.append(ClassifiedField(
+            field=field.path,
+            role=role,
+            confidence=0.8,
+            field_type=schema.get("type", "string"),
+            target_kind=kind_name,
+            target_group=target_group,
+            required=field.required,
+            description=schema.get("description", ""),
+            detection_source="ref_detector:example_kind",
+            fact_shape="identity",
+            target_field="name",
+        ))
+
+    return results
+
+
 def detect_enum_kind(
     field: WalkedField,
     registry: KindRegistry,
@@ -549,12 +658,22 @@ def classify_walked_field(
     if tuple_results:
         return tuple_results
 
-    # Priority 3: Enum Kind detection.
-    enum_results = detect_enum_kind(field, registry, sibling_fields)
-    if enum_results:
-        return enum_results
+    # --- Additive detectors (steps 3-6): results accumulate ---
+    classifications: list[ClassifiedField] = []
 
-    # Priority 3: Side-effect NLP for *Name fields (non-dictionary).
+    # Step 3: Enum Kind detection.
+    enum_results = detect_enum_kind(field, registry, sibling_fields)
+    classifications.extend(enum_results)
+
+    # Step 4: Example/default Kind extraction (C24).
+    example_results = detect_example_kinds(field, registry)
+    classifications.extend(example_results)
+
+    # If any additive detector fired, deduplicate and return.
+    if classifications:
+        return _deduplicate_classifications(classifications)
+
+    # Side-effect NLP for *Name fields (non-dictionary).
     if lower_name.endswith("name") and field.schema.get("type") == "string":
         role, confidence = classify_name_field(
             field.path, group, kind, field.schema.get("description", ""),
@@ -588,7 +707,7 @@ def classify_walked_field(
                 fact_shape="identity" if target_kind else "config",
             )]
 
-    # Priority 4: Default — config_field.
+    # Default — config_field.
     return [ClassifiedField(
         field=field.path,
         role="config_field",
