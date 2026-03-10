@@ -143,15 +143,16 @@ class TestMergeAdditiveResults:
 
 class TestPipelineOrdering:
     def test_embedded_resource_exclusive_return(self, registry):
-        """x-kubernetes-embedded-resource: true -> exclusive at 0.95."""
+        """x-kubernetes-embedded-resource: true without target Kind -> config_field at 0.95."""
         field = _make_field("rawResource", schema={
             "type": "object",
             "x-kubernetes-embedded-resource": True,
         })
         results = classify_walked_field(field, registry, "MyApp", "example.com")
         assert len(results) == 1
-        assert results[0].role == "passthrough_manifest"
+        assert results[0].role == "config_field"
         assert results[0].confidence == 0.95
+        assert results[0].detection_source == "ref_detector:kubernetes_ext_embedded"
 
     def test_detect_ref_exclusive(self, registry):
         """detect_ref match -> exclusive return, no Phase 5A detectors called."""
@@ -292,8 +293,12 @@ class TestBehavioralSuperset:
             manifest_flags=flags,
         )
         # Should fire the x-kubernetes-embedded-resource exclusive path.
+        # With single Kind enum, it emits input_ref; with multi-kind, config_field.
         assert len(results) >= 1
-        assert any(r.role == "passthrough_manifest" for r in results)
+        assert any(
+            r.detection_source == "ref_detector:kubernetes_ext_embedded"
+            for r in results
+        )
 
     def test_config_field_default(self, registry):
         """Unrecognized field -> config_field as default."""

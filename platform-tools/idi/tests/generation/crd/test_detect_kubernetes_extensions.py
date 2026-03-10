@@ -45,8 +45,8 @@ def _make_field(
 
 
 class TestEmbeddedResource:
-    def test_embedded_resource_true(self, registry):
-        """x-kubernetes-embedded-resource: true -> passthrough_manifest at 0.95."""
+    def test_embedded_resource_true_no_kind(self, registry):
+        """x-kubernetes-embedded-resource: true without Kind -> config_field at 0.95."""
         field = _make_field("rawResource", schema={
             "type": "object",
             "x-kubernetes-embedded-resource": True,
@@ -54,12 +54,12 @@ class TestEmbeddedResource:
         })
         result = detect_kubernetes_extensions(field, registry)
         assert result is not None
-        assert result.role == "passthrough_manifest"
+        assert result.role == "config_field"
         assert result.confidence == 0.95
         assert result.detection_source == "ref_detector:kubernetes_ext_embedded"
 
     def test_embedded_resource_with_multi_kind_enum(self, registry):
-        """Embedded resource with kind enum ["ConfigMap", "Secret"] -> target_kind=None."""
+        """Embedded resource with kind enum ["ConfigMap", "Secret"] -> config_field (passthrough)."""
         field = _make_field("rawResource", schema={
             "type": "object",
             "x-kubernetes-embedded-resource": True,
@@ -73,9 +73,10 @@ class TestEmbeddedResource:
         result = detect_kubernetes_extensions(field, registry)
         assert result is not None
         assert result.target_kind is None
+        assert result.role == "config_field"
 
     def test_embedded_resource_with_single_kind_enum(self, registry):
-        """Embedded resource with kind enum ["Secret"] -> target_kind=Secret."""
+        """Embedded resource with kind enum ["Secret"] -> input_ref with target_kind=Secret."""
         field = _make_field("rawResource", schema={
             "type": "object",
             "x-kubernetes-embedded-resource": True,
@@ -89,16 +90,17 @@ class TestEmbeddedResource:
         result = detect_kubernetes_extensions(field, registry)
         assert result is not None
         assert result.target_kind == "Secret"
+        assert result.role == "input_ref"
 
     def test_embedded_resource_no_kind_property(self, registry):
-        """Embedded resource without kind property -> passthrough_manifest at 0.95."""
+        """Embedded resource without kind property -> config_field at 0.95 (passthrough)."""
         field = _make_field("rawResource", schema={
             "type": "object",
             "x-kubernetes-embedded-resource": True,
         })
         result = detect_kubernetes_extensions(field, registry)
         assert result is not None
-        assert result.role == "passthrough_manifest"
+        assert result.role == "config_field"
         assert result.confidence == 0.95
 
     def test_embedded_resource_with_preserve_unknown(self, registry):
@@ -110,7 +112,7 @@ class TestEmbeddedResource:
         })
         result = detect_kubernetes_extensions(field, registry)
         assert result is not None
-        assert result.role == "passthrough_manifest"
+        assert result.role == "config_field"
 
     def test_embedded_resource_false(self, registry):
         """x-kubernetes-embedded-resource: false -> None."""
@@ -120,6 +122,23 @@ class TestEmbeddedResource:
         })
         result = detect_kubernetes_extensions(field, registry)
         assert result is None
+
+    def test_embedded_resource_sets_manifest_flags(self):
+        """Embedded resource without target Kind sets ManifestFlags via orchestrator."""
+        from idi.generation.crd.ref_detector import ManifestFlags, classify_walked_field
+        registry = KindRegistry()
+        flags = ManifestFlags()
+        field = _make_field("rawResource", schema={
+            "type": "object",
+            "x-kubernetes-embedded-resource": True,
+        })
+        results = classify_walked_field(
+            field, registry, "TestKind", "test.io",
+            manifest_flags=flags,
+        )
+        assert flags.accepts_arbitrary_resources is True
+        assert len(results) == 1
+        assert results[0].role == "config_field"
 
 
 # ---------------------------------------------------------------------------

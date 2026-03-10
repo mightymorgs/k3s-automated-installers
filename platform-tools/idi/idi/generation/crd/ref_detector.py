@@ -316,12 +316,30 @@ def detect_kubernetes_extensions(
                 target_kind = kind_enum[0]
             # Multiple values = passthrough, target_kind stays None.
 
+        # Set the ManifestFlags passthrough flag via the caller's accumulator.
+        # Do NOT emit a ClassifiedField with an invalid role. Instead:
+        # - If target_kind is resolved (single Kind enum), emit as input_ref.
+        # - If target_kind is None (true passthrough), only set the flag — no
+        #   ClassifiedField, since we cannot produce a valid edge without a target.
+        if target_kind:
+            return ClassifiedField(
+                field=field.path,
+                role="input_ref",
+                confidence=0.95,
+                field_type=schema.get("type", "object"),
+                target_kind=target_kind,
+                detection_source="ref_detector:kubernetes_ext_embedded",
+                fact_shape="identity",
+            )
+        # True passthrough (no specific target Kind). Signal via return value
+        # that caller should set ManifestFlags.accepts_arbitrary_resources.
+        # Return a config_field so the field is recorded but no edge is created.
         return ClassifiedField(
             field=field.path,
-            role="passthrough_manifest",
+            role="config_field",
             confidence=0.95,
             field_type=schema.get("type", "object"),
-            target_kind=target_kind,
+            target_kind=None,
             detection_source="ref_detector:kubernetes_ext_embedded",
             fact_shape="identity",
         )
@@ -1516,6 +1534,9 @@ def classify_walked_field(
     if ext_result is not None:
         if ext_result.detection_source == "ref_detector:kubernetes_ext_embedded":
             # Exclusive: embedded-resource at 0.95.
+            # If no target_kind, this is a true passthrough — set the flag.
+            if not ext_result.target_kind and manifest_flags is not None:
+                manifest_flags.accepts_arbitrary_resources = True
             return [ext_result]
         # Additive: list-map at 0.8.
         additive_results.append(ext_result)
