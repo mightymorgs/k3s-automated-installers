@@ -294,6 +294,46 @@ def _resolve_scale_target(
     return None
 
 
+def detect_cataloged_shape(
+    field: WalkedField,
+    shape_catalog: ShapeCatalog,
+) -> ClassifiedField | None:
+    """Match a walked field against the pre-computed shape catalog (C30).
+
+    Returns ClassifiedField with role="input_ref" or None.
+    """
+    schema = field.schema
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return None
+
+    required = schema.get("required", [])
+    fingerprint = compute_schema_fingerprint(properties, required)
+    if not fingerprint:
+        return None
+
+    entry = shape_catalog.lookup(fingerprint)
+    if entry is None:
+        return None
+
+    # Verify all required_properties from catalog are present.
+    for req_prop in entry.required_properties:
+        if req_prop not in properties:
+            return None
+
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=entry.confidence,
+        field_type=schema.get("type", "object"),
+        target_kind=entry.target_kind,
+        target_group="",
+        detection_source="ref_detector:cataloged_shape",
+        fact_shape="identity",
+        target_field="name",
+    )
+
+
 # Precompiled K8s name patterns for fast comparison.
 _K8S_NAME_PATTERN_SET: frozenset[str] = frozenset(K8S_NAME_PATTERNS)
 
