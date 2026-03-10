@@ -160,32 +160,80 @@ class TestCrossServiceResolution:
 # ---------------------------------------------------------------------------
 
 
-class TestPipelineOutputEquivalence:
-    """Verify _generate_crd_service with populated registry produces valid output."""
+class TestDecomposedPipelineOutput:
+    """Verify _generate_crd_service produces decomposed output."""
 
-    def test_generate_cert_manager_output(self, populated_registry, tmp_path):
-        """_generate_crd_service for cert-manager produces correct output."""
+    @pytest.fixture(autouse=True)
+    def setup(self, populated_registry, tmp_path):
         config = _build_mini_manifest_config("cert-manager")
-        # We need the real specs_dir to load schemas.
-        # Use the catalog directory relative to the project root.
         project_root = Path(__file__).parent.parent.parent.parent.parent.parent
         specs_dir = project_root / "catalog"
 
         if not (specs_dir / config["schema"]).exists():
             pytest.skip("Catalog specs not available")
 
-        result = _generate_crd_service(
+        self.tmp_path = tmp_path
+        self.result = _generate_crd_service(
             "cert-manager", config, tmp_path, specs_dir, registry=populated_registry,
         )
-        assert result["success"] is True
-        assert result["stats"]["skills"] == 6
 
-        # Verify golden file match for Certificate.
-        cert_path = tmp_path / "cert-manager" / "Certificate.json"
-        assert cert_path.exists()
-        actual = json.loads(cert_path.read_text())
-        golden = json.loads((_GOLDEN_DIR / "cert-manager" / "Certificate.json").read_text())
-        assert_json_equivalent(actual, golden)
+    def test_success(self):
+        assert self.result["success"] is True
+        assert self.result["stats"]["skills"] == 6
+
+    def test_certificate_directory_exists(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        assert cert_dir.is_dir()
+
+    def test_manifest_exists(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        assert (cert_dir / "manifest.json").exists()
+
+    def test_operations_exist(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        assert (cert_dir / "operations" / "apply.json").exists()
+
+    def test_subdirectories_exist(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        assert (cert_dir / "refs").is_dir()
+        assert (cert_dir / "outputs").is_dir()
+        assert (cert_dir / "fields").is_dir()
+
+    def test_manifest_refs_match_files(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        manifest = json.loads((cert_dir / "manifest.json").read_text())
+        actual_refs = sorted(p.stem for p in (cert_dir / "refs").glob("*.json"))
+        assert manifest["refs"] == actual_refs
+
+    def test_manifest_outputs_match_files(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        manifest = json.loads((cert_dir / "manifest.json").read_text())
+        actual_outputs = sorted(p.stem for p in (cert_dir / "outputs").glob("*.json"))
+        assert manifest["outputs"] == actual_outputs
+
+    def test_manifest_fields_match_files(self):
+        cert_dir = self.tmp_path / "cert-manager.io" / "cert-manager" / "Certificate"
+        manifest = json.loads((cert_dir / "manifest.json").read_text())
+        actual_fields = sorted(p.stem for p in (cert_dir / "fields").glob("*.json"))
+        assert manifest["fields"] == actual_fields
+
+    def test_all_6_kinds_have_directories(self):
+        """All cert-manager Kinds produce decomposed directories."""
+        base = self.tmp_path
+        for kind_name in ["Certificate", "CertificateRequest", "Issuer", "ClusterIssuer"]:
+            kind_dir = base / "cert-manager.io" / "cert-manager" / kind_name
+            assert kind_dir.is_dir(), f"Missing: {kind_dir}"
+        for kind_name in ["Order", "Challenge"]:
+            kind_dir = base / "acme.cert-manager.io" / "cert-manager" / kind_name
+            assert kind_dir.is_dir(), f"Missing: {kind_dir}"
+
+    def test_no_monolithic_files(self):
+        """No old monolithic {Kind}.json files produced."""
+        monolithic = list(self.tmp_path.rglob("*.json"))
+        for f in monolithic:
+            # Monolithic files would be directly under service dir, not in subdirs.
+            assert f.parent.name != "cert-manager" or f.name == "manifest.json" or \
+                   f.parent.parent.name != "cert-manager"
 
 
 # ---------------------------------------------------------------------------

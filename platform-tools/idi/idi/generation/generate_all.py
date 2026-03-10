@@ -265,7 +265,7 @@ def _generate_crd_service(
     try:
         from idi.generation.crd.field_classifier import classify_fields
         from idi.generation.crd.odg_builder import build_odg
-        from idi.generation.crd.output_writer import write_crd_skill
+        from idi.generation.crd.output_writer import write_decomposed_skill
 
         # Load schemas.
         schemas = _load_crd_schemas_for_service(name, config, specs_dir)
@@ -301,12 +301,12 @@ def _generate_crd_service(
         primary_group = schemas[0]["group"] if schemas else ""
         deps = build_odg(all_kinds, name, primary_group)
 
-        # Write skill files.
+        # Write decomposed skill files.
         skills_written = 0
         for schema in schemas:
             kind = schema["kind"]
             fields = all_kinds.get(kind, [])
-            write_crd_skill(schema, fields, output_dir)
+            write_decomposed_skill(schema, fields, output_dir)
             skills_written += 1
 
         stats = {"kinds": len(schemas), "skills": skills_written, "deps": len(deps)}
