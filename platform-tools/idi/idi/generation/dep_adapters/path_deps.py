@@ -98,8 +98,8 @@ def detect_path_deps(
 ) -> list[Dependency]:
     """Extract parent resource deps from URL path parameters.
 
-    Walks all ancestor resource segments for each path parameter,
-    not just the immediate parent. Confidence decreases with distance.
+    Walks backwards to find the nearest matching ancestor segment for each
+    path parameter. Only emits one edge per param (nearest ancestor).
     Falls back to param-name inference when no ancestor segment matches.
     """
     segments = operation.path.strip("/").split("/")
@@ -113,9 +113,8 @@ def detect_path_deps(
         if param.lower() in _EXCLUDED:
             continue
 
-        # Walk backwards through all ancestor resource segments.
-        matched_ancestor = False
-        depth = 0
+        # Walk backwards to find nearest matching ancestor segment.
+        nearest_resource = None
         for j in range(i - 1, -1, -1):
             if segments[j].startswith("{"):
                 continue
@@ -125,25 +124,23 @@ def detect_path_deps(
 
             resource = _match_segment(candidate, known_resources)
             if resource is not None:
-                key = (param, resource)
-                if key not in seen:
-                    confidence = max(0.4, 0.8 - depth * 0.1)
-                    results.append(Dependency(
-                        field=param,
-                        target_resource=resource,
-                        fact_ref=f"facts://{operation.service}/{resource}#id",
-                        confidence=confidence,
-                        source="generic_odg:path",
-                        detection_source=DetectionSource.DEFAULT,
-                    ))
-                    seen.add(key)
-                matched_ancestor = True
-            depth += 1
+                nearest_resource = resource
+                break
 
-        # Fallback: infer from param name when no ancestor matched.
-        # Covers first-position params like {realm} and suffixed params
-        # like {stage_uuid}.
-        if not matched_ancestor:
+        if nearest_resource is not None:
+            key = (param, nearest_resource)
+            if key not in seen:
+                results.append(Dependency(
+                    field=param,
+                    target_resource=nearest_resource,
+                    fact_ref=f"facts://{operation.service}/{nearest_resource}#id",
+                    confidence=0.8,
+                    source="generic_odg:path",
+                    detection_source=DetectionSource.DEFAULT,
+                ))
+                seen.add(key)
+        else:
+            # Fallback: infer from param name when no ancestor matched.
             inferred = _infer_from_param_name(param, known_resources)
             if inferred is not None:
                 key = (param, inferred)
