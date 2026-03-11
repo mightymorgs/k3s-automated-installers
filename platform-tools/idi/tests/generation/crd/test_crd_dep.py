@@ -491,3 +491,56 @@ class TestDefaultConstruction:
         adapter = CrdDepAdapter()
         assert adapter.registry is not None
         assert "secrets" in adapter.registry.core_plurals()
+
+
+# ---------------------------------------------------------------------------
+# Target disambiguation (Section 06)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTargetKind:
+    """Tests for ecosystem-local Kind resolution."""
+
+    def test_same_group_wins(self):
+        """Same API group as source wins over core."""
+        from idi.generation.dep_adapters.crd_dep import resolve_target_kind
+        reg = KindRegistry()
+        reg.register("Volume", "volumes", "longhorn.io")
+        # Core also has a "Volume" (via PersistentVolume -> Volume)
+        result = resolve_target_kind("Volume", "longhorn.io", reg)
+        assert result is not None
+        assert result[0] == "longhorn.io"
+
+    def test_vendor_prefix_wins(self):
+        """Same vendor prefix (first segment) wins over core."""
+        from idi.generation.dep_adapters.crd_dep import resolve_target_kind
+        reg = KindRegistry()
+        reg.register("Volume", "volumes", "longhorn.io")
+        reg.register("Volume", "volumes", "other.io")
+        result = resolve_target_kind("Volume", "longhorn.example.io", reg)
+        assert result is not None
+        assert result[0] == "longhorn.io"
+
+    def test_core_fallback(self):
+        """Core group is fallback when no ecosystem match."""
+        from idi.generation.dep_adapters.crd_dep import resolve_target_kind
+        reg = KindRegistry()
+        # Secret is core (group="core")
+        result = resolve_target_kind("Secret", "cert-manager.io", reg)
+        assert result is not None
+        assert result[0] == "core"
+
+    def test_single_candidate(self):
+        """Unambiguous single match returns immediately."""
+        from idi.generation.dep_adapters.crd_dep import resolve_target_kind
+        reg = KindRegistry()
+        reg.register("Certificate", "certificates", "cert-manager.io")
+        result = resolve_target_kind("Certificate", "cert-manager.io", reg)
+        assert result == ("cert-manager.io", "Certificate")
+
+    def test_unknown_kind_returns_none(self):
+        """Kind not in registry returns None."""
+        from idi.generation.dep_adapters.crd_dep import resolve_target_kind
+        reg = KindRegistry()
+        result = resolve_target_kind("UnknownKind", "foo.io", reg)
+        assert result is None

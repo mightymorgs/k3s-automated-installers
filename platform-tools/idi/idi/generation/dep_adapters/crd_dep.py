@@ -295,3 +295,39 @@ class CrdDepAdapter:
             else:
                 return None
         return current
+
+
+def resolve_target_kind(
+    target_kind: str,
+    source_group: str,
+    registry: KindRegistry,
+) -> tuple[str, str] | None:
+    """Resolve ambiguous Kind name to (group, kind) using ecosystem locality.
+
+    When multiple groups contain the same Kind name, prefer:
+    1. Same API group as source
+    2. Same vendor prefix (first segment before '.')
+    3. Any available group (first match)
+
+    Returns (group, kind) or None if Kind not found.
+    """
+    groups = registry.groups_for_kind(target_kind)
+    if not groups:
+        return None
+    if len(groups) == 1:
+        return (groups[0], target_kind)
+
+    # Same group as source.
+    for g in groups:
+        if g == source_group:
+            return (g, target_kind)
+
+    # Same vendor prefix.
+    source_prefix = source_group.split(".")[0] if "." in source_group else source_group
+    for g in groups:
+        group_prefix = g.split(".")[0] if "." in g else g
+        if group_prefix == source_prefix:
+            return (g, target_kind)
+
+    # Fallback: first match.
+    return (groups[0], target_kind)

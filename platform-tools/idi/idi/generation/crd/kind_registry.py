@@ -305,6 +305,11 @@ class KindRegistry:
                     result.add(kind_name)
         return result
 
+    def groups_for_kind(self, kind: str) -> list[str]:
+        """Return all groups that contain this Kind name."""
+        entries = self._kind_to_entries.get(kind, [])
+        return [e.group for e in entries]
+
     def all_kinds(self) -> set[str]:
         """All registered Kind names."""
         return set(self._kind_to_entries.keys())
