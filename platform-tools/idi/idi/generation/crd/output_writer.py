@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -75,49 +76,65 @@ def _fact_ref_for_output(field: ClassifiedField) -> str:
     return f"crdfacts://{group}/{kind}#{fragment}"
 
 
-def _resolve_filenames(fields: list[ClassifiedField], role: str) -> dict[str, str]:
-    """Map field_path -> filename for fields of the given role.
+def _resolve_filenames(
+    fields: list[ClassifiedField], role: str,
+) -> dict[tuple[str, str | None, str | None], str]:
+    """Map (field_path, target_group, target_kind) -> filename.
 
-    Returns dict mapping field_path to safe filename (without .json extension).
+    Returns dict mapping the triple to a safe filename (without .json extension).
+    Appends -target_kind to filename when multiple targets share the same field_path.
     Detects collisions and uses hyphen-joined paths when needed.
     """
-    role_fields = [f for f in fields if f.role == role or
-                   (role == "output_declaration" and f.role == "output_declaration") or
-                   (role == "input_ref" and f.role == "input_ref" and f.target_kind) or
-                   (role == "config_field" and f.role == "config_field")]
-
-    # Filter properly based on role.
+    # Filter based on role.
     if role == "input_ref":
         role_fields = [f for f in fields if f.role == "input_ref" and f.target_kind]
     elif role == "output_declaration":
         role_fields = [f for f in fields if f.role == "output_declaration"]
     elif role == "config_field":
         role_fields = [f for f in fields if f.role == "config_field"]
+    else:
+        role_fields = [f for f in fields if f.role == role]
 
-    # Default: use leaf field name.
-    path_to_leaf: dict[str, str] = {}
+    # Sort for determinism.
+    role_fields.sort(key=lambda f: (f.field, f.target_kind or "", f.target_group or "", f.detection_source))
+
+    # Build key_to_leaf keyed by (field_path, target_group, target_kind).
+    key_to_leaf: dict[tuple[str, str | None, str | None], str] = {}
     for f in role_fields:
+        key = (f.field, f.target_group, f.target_kind)
         leaf = f.field.rsplit(".", 1)[-1]
-        path_to_leaf[f.field] = leaf
+        key_to_leaf[key] = leaf
 
-    # Detect collisions (case-insensitive).
-    seen_lower: dict[str, list[str]] = {}
-    for field_path, leaf in path_to_leaf.items():
-        lower = leaf.lower()
-        seen_lower.setdefault(lower, []).append(field_path)
+    # Detect polymorphic paths: field_paths with >1 distinct (group, kind) pair.
+    path_keys: dict[str, list[tuple[str, str | None, str | None]]] = defaultdict(list)
+    for key in key_to_leaf:
+        path_keys[key[0]].append(key)
+
+    polymorphic_paths = {fp for fp, keys in path_keys.items() if len(keys) > 1}
+
+    # Append -target_kind suffix for polymorphic paths.
+    for key, leaf in list(key_to_leaf.items()):
+        if key[0] in polymorphic_paths and key[2]:
+            key_to_leaf[key] = f"{leaf}-{key[2]}"
+
+    # Detect collisions (case-insensitive) across all leaf names.
+    seen_lower: dict[str, list[tuple[str, str | None, str | None]]] = defaultdict(list)
+    for key, leaf in key_to_leaf.items():
+        seen_lower[leaf.lower()].append(key)
 
     # Resolve collisions with hyphen-joined paths.
-    result: dict[str, str] = {}
-    for field_path, leaf in path_to_leaf.items():
+    result: dict[tuple[str, str | None, str | None], str] = {}
+    for key, leaf in key_to_leaf.items():
         lower = leaf.lower()
         if len(seen_lower[lower]) > 1:
             # Use hyphen-joined path: strip "spec." prefix, replace "." with "-".
-            path_part = field_path
+            path_part = key[0]
             if path_part.startswith("spec."):
                 path_part = path_part[5:]
-            result[field_path] = path_part.replace(".", "-")
+            suffix = f"-{key[2]}" if key[0] in polymorphic_paths and key[2] else ""
+            result[key] = path_part.replace(".", "-") + suffix
         else:
-            result[field_path] = leaf
+            result[key] = leaf
 
     return result
 
@@ -175,7 +192,8 @@ def build_decomposed_skill(
     for f in fields:
         if f.role != "input_ref" or not f.target_kind:
             continue
-        fname = ref_names[f.field]
+        key = (f.field, f.target_group, f.target_kind)
+        fname = ref_names[key]
         refs[fname] = {
             "name": f.field.rsplit(".", 1)[-1],
             "field_path": f.field,
@@ -197,7 +215,8 @@ def build_decomposed_skill(
     for f in fields:
         if f.role != "output_declaration":
             continue
-        fname = output_names[f.field]
+        key = (f.field, f.target_group, f.target_kind)
+        fname = output_names[key]
         outputs[fname] = {
             "name": f.field.rsplit(".", 1)[-1],
             "field_path": f.field,
@@ -216,7 +235,8 @@ def build_decomposed_skill(
     for f in fields:
         if f.role != "config_field":
             continue
-        fname = field_names[f.field]
+        key = (f.field, f.target_group, f.target_kind)
+        fname = field_names[key]
         entry: dict[str, Any] = {
             "name": f.field.rsplit(".", 1)[-1],
             "field_path": f.field,

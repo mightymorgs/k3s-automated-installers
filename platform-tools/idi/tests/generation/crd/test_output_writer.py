@@ -282,8 +282,8 @@ class TestCollisionDetection:
                           field_type="object", target_kind="Secret", target_group="core"),
         ]
         result = _resolve_filenames(fields, "input_ref")
-        assert result["spec.tls.secretRef"] == "tls-secretRef"
-        assert result["spec.auth.secretRef"] == "auth-secretRef"
+        assert result[("spec.tls.secretRef", "core", "Secret")] == "tls-secretRef"
+        assert result[("spec.auth.secretRef", "core", "Secret")] == "auth-secretRef"
 
     def test_case_insensitive_collision(self):
         """Case-insensitive collision detection."""
@@ -295,8 +295,8 @@ class TestCollisionDetection:
         ]
         result = _resolve_filenames(fields, "input_ref")
         # Both should use hyphen-joined form.
-        assert result["spec.issuerRef"] == "issuerRef"  # No spec. prefix -> just leaf
-        assert result["spec.alt.IssuerRef"] == "alt-IssuerRef"
+        assert result[("spec.issuerRef", None, "Issuer")] == "issuerRef"  # No spec. prefix -> just leaf
+        assert result[("spec.alt.IssuerRef", None, "Issuer")] == "alt-IssuerRef"
 
     def test_no_collision_uses_leaf(self):
         """Non-colliding fields use leaf names."""
@@ -307,8 +307,8 @@ class TestCollisionDetection:
                           field_type="object", target_kind="Issuer"),
         ]
         result = _resolve_filenames(fields, "input_ref")
-        assert result["spec.secretRef"] == "secretRef"
-        assert result["spec.issuerRef"] == "issuerRef"
+        assert result[("spec.secretRef", "core", "Secret")] == "secretRef"
+        assert result[("spec.issuerRef", None, "Issuer")] == "issuerRef"
 
 
 # ---------------------------------------------------------------------------
