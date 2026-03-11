@@ -475,13 +475,66 @@ class TestDetectEnumKind:
         assert len(results) == 2
 
     def test_exact_ratio_boundary_accepted(self, registry):
-        """Enum with ratio exactly 0.6 (3/5) — at threshold, accepted."""
+        """Enum with ratio exactly 0.8 (4/5) — at threshold, accepted."""
         field = _make_field("kind", schema={
             "type": "string",
-            "enum": ["Issuer", "ClusterIssuer", "Certificate", "foo", "bar"],
+            "enum": ["Issuer", "ClusterIssuer", "Certificate", "ExternalSecret", "bar"],
         }, path="spec.ref.kind")
         results = detect_enum_kind(field, registry)
-        assert len(results) == 3
+        assert len(results) == 4
+
+    # -- section-03: discriminator enum suppression --
+
+    def test_type_field_rejected(self, registry):
+        """Enum on field named 'type' is rejected (removed from _KIND_LIKE_FIELD_NAMES)."""
+        field = _make_field("type", schema={
+            "type": "string",
+            "enum": ["Issuer", "ClusterIssuer"],
+        }, path="spec.sourceRef.type")
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
+    def test_kind_field_with_high_ratio_accepted(self, registry):
+        """Enum on 'kind' with 100% kindness ratio → accepted."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Service", "Issuer"],
+        }, path="spec.ref.kind", parent_path="spec.ref")
+        sibling = {"name": {"type": "string"}}
+        results = detect_enum_kind(field, registry, sibling_fields=sibling)
+        assert len(results) == 2
+
+    def test_kind_field_below_08_ratio_rejected(self, registry):
+        """Enum on 'kind' with ratio 1/3 = 0.33 → below 0.8 threshold, rejected."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Service", "foo", "bar"],
+        }, path="spec.ref.kind")
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
+    def test_ingressroute_routes_kind_accepted(self, registry):
+        """IngressRoute routes[].kind enum ["Rule"] — regression guard."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Rule"],
+        }, path="spec.routes.kind")
+        # "Rule" is not a registered Kind, so no match expected
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
+    def test_traefik_service_kind_enum(self, registry):
+        """Traefik routes services kind enum ["Service", "TraefikService"]."""
+        registry.register("TraefikService", "traefikservices", "traefik.io")
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Service", "TraefikService"],
+        }, path="spec.routes.services.kind", parent_path="spec.routes.services")
+        sibling = {"name": {"type": "string"}, "kind": {"type": "string"}}
+        results = detect_enum_kind(field, registry, sibling_fields=sibling)
+        assert len(results) == 2
+        kinds = {r.target_kind for r in results}
+        assert kinds == {"Service", "TraefikService"}
 
 
 # ---------------------------------------------------------------------------

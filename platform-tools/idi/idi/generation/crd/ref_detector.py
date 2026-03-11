@@ -1281,7 +1281,7 @@ _K8S_API_CONSTANTS: frozenset[str] = frozenset({
 })
 
 _KIND_LIKE_FIELD_NAMES: frozenset[str] = frozenset({
-    "kind", "targetKind", "resourceKind", "type",
+    "kind", "targetKind", "resourceKind", "apiKind",
 })
 
 
@@ -1334,9 +1334,9 @@ def detect_enum_kind(
     if not matched_kinds:
         return []
 
-    # Kindness ratio guard: matched / total filtered must be >= 0.6.
+    # Kindness ratio guard: matched / total filtered must be >= 0.8.
     match_ratio = len(matched_kinds) / len(filtered_values)
-    if match_ratio < 0.6:
+    if match_ratio < 0.8:
         return []
 
     results: list[ClassifiedField] = []
