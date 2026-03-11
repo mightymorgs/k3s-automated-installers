@@ -53,6 +53,170 @@ def unwrap_single_item_combinator(schema: Dict[str, Any]) -> Dict[str, Any]:
     return schema
 
 
+def canonicalize_composed_schema(
+    schema: Dict[str, Any],
+    *,
+    visited: Optional[Set[int]] = None,
+) -> Dict[str, Any]:
+    """Flatten allOf/oneOf/anyOf compositions into a canonical flat schema.
+
+    Algorithm:
+    1. If the schema has no composition keywords, return as-is.
+    2. Apply single-item combinator unwrapping first.
+    3. For allOf: merge all branches' properties and required fields.
+       - Conflict detection: same property name with different types -> mark _ambiguous.
+       - Preserve readOnly/writeOnly/deprecated/nullable with last-wins semantics.
+       - Preserve additionalProperties from any branch.
+    4. For oneOf/anyOf WITHOUT discriminator: use property intersection only.
+    5. For oneOf/anyOf WITH discriminator: allow property union.
+    6. Preserve discriminator field during merge.
+    7. Recurse into nested compositions. Track visited schemas by id() to halt cycles.
+    8. Set type to "object" if properties exist and type is not set.
+
+    Args:
+        schema: The schema dict to canonicalize. May contain allOf/oneOf/anyOf.
+        visited: Set of schema object ids already visited (cycle detection).
+
+    Returns:
+        A new schema dict with composition flattened. Does not mutate input.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Cycle detection via object identity.
+    if visited is None:
+        visited = set()
+    schema_id = id(schema)
+    if schema_id in visited:
+        return {}
+    visited = visited | {schema_id}  # Copy to avoid mutation across branches
+
+    has_allof = "allOf" in schema and isinstance(schema["allOf"], list)
+    has_oneof = "oneOf" in schema and isinstance(schema["oneOf"], list)
+    has_anyof = "anyOf" in schema and isinstance(schema["anyOf"], list)
+
+    if not (has_allof or has_oneof or has_anyof):
+        return schema
+
+    # Capture parent-level properties before unwrapping (unwrap may drop them).
+    parent_props = schema.get("properties", {})
+    parent_required = schema.get("required", [])
+
+    # Single-item unwrapping first (may eliminate composition entirely).
+    schema = unwrap_single_item_combinator(schema)
+    # Re-check after unwrapping.
+    has_allof = "allOf" in schema and isinstance(schema["allOf"], list)
+    has_oneof = "oneOf" in schema and isinstance(schema["oneOf"], list)
+    has_anyof = "anyOf" in schema and isinstance(schema["anyOf"], list)
+    if not (has_allof or has_oneof or has_anyof):
+        # Merge parent properties back if unwrapping dropped them.
+        if parent_props:
+            merged = {**schema}
+            merged_p = dict(parent_props)
+            merged_p.update(schema.get("properties", {}))  # child overrides parent
+            merged["properties"] = merged_p
+            req = list(parent_required)
+            for r in schema.get("required", []):
+                if r not in req:
+                    req.append(r)
+            if req:
+                merged["required"] = req
+            if "type" not in merged and "properties" in merged:
+                merged["type"] = "object"
+            return merged
+        if "properties" in schema and "type" not in schema:
+            return {**schema, "type": "object"}
+        return schema
+
+    merged_props: Dict[str, Any] = {}
+    merged_required: List[str] = []
+    result: Dict[str, Any] = {}
+    has_discriminator = "discriminator" in schema and isinstance(schema["discriminator"], dict)
+
+    # Include parent-level properties (common pattern: properties alongside allOf).
+    for pname, pval in schema.get("properties", {}).items():
+        merged_props[pname] = dict(pval)
+    for req in schema.get("required", []):
+        if req not in merged_required:
+            merged_required.append(req)
+    if "additionalProperties" in schema:
+        result["additionalProperties"] = schema["additionalProperties"]
+
+    # --- allOf: merge all branches ---
+    if has_allof:
+        for sub in schema["allOf"]:
+            sub = canonicalize_composed_schema(sub, visited=visited)
+            for pname, pval in sub.get("properties", {}).items():
+                if pname in merged_props:
+                    existing = merged_props[pname]
+                    # Conflict detection: different type -> ambiguous
+                    if existing.get("type") != pval.get("type") and "type" in existing and "type" in pval:
+                        merged_props[pname] = {**existing, **pval, "_ambiguous": True}
+                    else:
+                        # Same type or missing type: last-wins merge for metadata
+                        merged_props[pname] = {**existing, **pval}
+                else:
+                    merged_props[pname] = dict(pval)
+            for req in sub.get("required", []):
+                if req not in merged_required:
+                    merged_required.append(req)
+            if "additionalProperties" in sub:
+                result["additionalProperties"] = sub["additionalProperties"]
+
+    # --- oneOf/anyOf ---
+    for combinator_key in ("oneOf", "anyOf"):
+        if combinator_key not in schema or not isinstance(schema[combinator_key], list):
+            continue
+        branches = schema[combinator_key]
+        if not branches:
+            continue
+
+        resolved_branches = [
+            canonicalize_composed_schema(b, visited=visited) for b in branches
+        ]
+
+        if has_discriminator:
+            # Discriminator present: union of all properties
+            for branch in resolved_branches:
+                for pname, pval in branch.get("properties", {}).items():
+                    if pname not in merged_props:
+                        merged_props[pname] = dict(pval)
+        else:
+            # No discriminator: intersection only
+            prop_sets = [
+                set(b.get("properties", {}).keys()) for b in resolved_branches
+            ]
+            if prop_sets:
+                intersection = prop_sets[0]
+                for ps in prop_sets[1:]:
+                    intersection &= ps
+                # Use properties from the first branch for the intersection
+                first_branch_props = resolved_branches[0].get("properties", {})
+                for pname in intersection:
+                    if pname not in merged_props:
+                        merged_props[pname] = dict(first_branch_props[pname])
+
+    # Preserve discriminator.
+    if has_discriminator:
+        result["discriminator"] = schema["discriminator"]
+
+    # Copy non-composition keys from original schema.
+    for key in ("type", "description", "title", "nullable", "deprecated"):
+        if key in schema:
+            result[key] = schema[key]
+
+    if merged_props:
+        result["properties"] = merged_props
+    if merged_required:
+        result["required"] = merged_required
+
+    # Type inference: if we have properties but no type, set object.
+    if "properties" in result and "type" not in result:
+        result["type"] = "object"
+
+    return result
+
+
 def infer_schema_type(schema: Dict[str, Any]) -> Dict[str, Any]:
     """Infer missing 'type' from sibling schema keys.
 
@@ -112,8 +276,8 @@ def extract_schema_fields(
     if not schema or max_depth <= 0:
         return {"type": "object", "properties": {}, "required": []}
 
-    # Preprocessing: unwrap trivial combinators and infer missing types.
-    schema = unwrap_single_item_combinator(schema)
+    # Preprocessing: canonicalize composed schemas (includes unwrapping), infer types.
+    schema = canonicalize_composed_schema(schema)
     schema = infer_schema_type(schema)
 
     result: Dict[str, Any] = {
@@ -122,13 +286,6 @@ def extract_schema_fields(
         "required": list(schema.get("required", [])),
         "properties": {},
     }
-
-    # Handle allOf (schema composition).
-    if "allOf" in schema:
-        for sub in schema["allOf"]:
-            merged = extract_schema_fields(ctx, sub, max_depth - 1)
-            result["properties"].update(merged.get("properties", {}))
-            result["required"].extend(merged.get("required", []))
 
     # Extract properties.
     for prop_name, prop_schema in schema.get("properties", {}).items():

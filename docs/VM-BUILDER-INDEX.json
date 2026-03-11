@@ -4,7 +4,7 @@
   "total_modules": 300,
   "cgc_mode": false,
   "git": {
-    "commit": "52a2beb032ca806111beb827a54bf4fa655bd763",
+    "commit": "1cad1095ed8c0a4ca7a4b277ec7e99bdd3145a30",
     "branch": "feat/crd-implementation",
     "dirty": true
   },
