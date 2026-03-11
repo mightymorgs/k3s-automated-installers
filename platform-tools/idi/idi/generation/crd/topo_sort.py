@@ -129,6 +129,30 @@ CORE_EXTERNAL_KINDS: frozenset[tuple[str, str]] = frozenset({
 # Edge type priority for deduplication: hard always wins.
 _EDGE_TYPE_PRIORITY: dict[str, int] = {"hard": 3, "optional": 2, "soft": 1}
 
+# Detection source suffixes allowed to produce hard edges.
+# Only structurally-proven detectors qualify; weak heuristic
+# detectors (parent_kind_name, enum_kind, fuzzy_kind_name) are
+# demoted to soft even when the field is required.
+_HARD_EDGE_SOURCES: frozenset[str] = frozenset({
+    "structural_ref",
+    "secret_key_selector",
+    "ref_tuple",
+    "kubernetes_ext_embedded",
+    "kubernetes_ext_list_map",
+    "operator_dict",
+    "kind_registry",
+    "array_ref",
+    "cataloged_shape",
+    "constraint_fk",
+    "embedded_workload",
+})
+
+
+def _is_hard_eligible(detection_source: str) -> bool:
+    """Check if detection source is allowed to produce hard edges."""
+    suffix = detection_source.rsplit(":", 1)[-1] if ":" in detection_source else detection_source
+    return suffix in _HARD_EDGE_SOURCES
+
 # Regex to strip TLD from API group for service derivation.
 _TLD_RE = re.compile(r"\.(io|dev|com|org|net|k8s\.io)$")
 
@@ -243,8 +267,10 @@ def build_dependency_graph(
                 continue  # skip self-loop edges
             if target_gk in external_kinds:
                 edge_type: Literal["hard", "soft", "optional"] = "soft"
-            elif cf.required:
+            elif cf.required and _is_hard_eligible(cf.detection_source):
                 edge_type = "hard"
+            elif cf.required:
+                edge_type = "soft"  # required but from weak detector
             else:
                 edge_type = "optional"
             raw_dep_edges.append(DependencyEdge(

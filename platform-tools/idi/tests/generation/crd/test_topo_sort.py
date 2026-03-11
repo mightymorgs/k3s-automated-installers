@@ -235,7 +235,7 @@ def _cf(
     target_group: str | None = "cert-manager.io",
     required: bool = True,
     confidence: float = 0.9,
-    detection_source: str = "detect_ref",
+    detection_source: str = "ref_detector:structural_ref",
 ) -> ClassifiedField:
     """Helper to build ClassifiedField with sensible defaults."""
     return ClassifiedField(
@@ -461,6 +461,123 @@ class TestBuildDependencyGraph:
             ],
         })
         assert len(g.dependency_edges) == 0
+
+
+# ---------------------------------------------------------------------------
+# Hard-Edge Source Gate Tests
+# ---------------------------------------------------------------------------
+
+
+class TestHardEdgeSourceGate:
+    """Tests for detection-source allowlist that governs hard edges."""
+
+    def test_structural_ref_required_creates_hard_edge(self):
+        """structural_ref + required=True → hard edge."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="ref_detector:structural_ref"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        assert len(hard) == 1
+
+    def test_parent_kind_name_required_creates_soft_edge(self):
+        """parent_kind_name + required=True → soft (NOT hard)."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="ref_detector:parent_kind_name"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        soft = [e for e in g.dependency_edges if e.edge_type == "soft"]
+        assert len(hard) == 0
+        assert len(soft) == 1
+
+    def test_enum_kind_required_creates_soft_edge(self):
+        """enum_kind + required=True → soft (NOT hard)."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="ref_detector:enum_kind"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        soft = [e for e in g.dependency_edges if e.edge_type == "soft"]
+        assert len(hard) == 0
+        assert len(soft) == 1
+
+    def test_secret_key_selector_required_creates_hard_edge(self):
+        """secret_key_selector + required=True → hard edge."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Secret", target_group="",
+                    required=True, detection_source="ref_detector:secret_key_selector"),
+            ],
+        })
+        # Secret is external → soft edge regardless
+        # Use internal target instead
+        g2 = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="ref_detector:secret_key_selector"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        hard = [e for e in g2.dependency_edges if e.edge_type == "hard"]
+        assert len(hard) == 1
+
+    def test_ref_tuple_required_creates_hard_edge(self):
+        """ref_tuple + required=True → hard edge."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="ref_detector:ref_tuple"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        assert len(hard) == 1
+
+    def test_prefixed_detection_source_still_hard(self):
+        """crd_dep:ref_detector:structural_ref (prefixed) → hard edge."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="crd_dep:ref_detector:structural_ref"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        assert len(hard) == 1
+
+    def test_not_required_any_source_creates_optional(self):
+        """required=False from any detection source → optional edge."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=False, detection_source="ref_detector:structural_ref"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        opt = [e for e in g.dependency_edges if e.edge_type == "optional"]
+        assert len(opt) == 1
+
+    def test_external_target_always_soft(self):
+        """External target → soft edge regardless of detection source."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Secret", target_group="",
+                    required=True, detection_source="ref_detector:structural_ref"),
+            ],
+        })
+        soft = [e for e in g.dependency_edges if e.edge_type == "soft"]
+        assert len(soft) == 1
+        assert soft[0].target_gk == "/Secret"
 
 
 # ---------------------------------------------------------------------------
