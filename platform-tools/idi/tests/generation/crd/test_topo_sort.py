@@ -1,6 +1,7 @@
 """Tests for CRD topological sort data types and constants."""
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -15,6 +16,9 @@ from idi.generation.crd.topo_sort import (
     KindNode,
     ProductionEdge,
     SortTier,
+    _cli_main,
+    _load_catalog_for_sort,
+    _load_olm_owned,
     _sanitize_path_segment,
     _write_json,
     build_dependency_graph,
@@ -1231,3 +1235,394 @@ class TestWriteSortResults:
         # Manifest gets sort_tier
         m_path = tmp_path / "cert-manager" / "cert-manager.io" / "cert-manager" / "Certificate" / "manifest.json"
         assert json.loads(m_path.read_text())["sort_tier"] == 0
+
+
+# ---------------------------------------------------------------------------
+# CLI — Section 07
+# ---------------------------------------------------------------------------
+
+
+def _write_ref_file(kind_dir, name, target_kind, target_group, required=False,
+                    confidence=0.9, detection_source="test", field_path=None):
+    """Helper: write a ref JSON file into a Kind's refs/ directory."""
+    refs_dir = kind_dir / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    ref_data = {
+        "name": name,
+        "field_path": field_path or f"spec.{name}",
+        "target_kind": target_kind,
+        "target_group": target_group,
+        "role": "input_ref",
+        "required": required,
+        "cross_namespace": False,
+        "fact_ref": f"crdfacts://{target_group or 'core'}/{target_kind}#name",
+        "fact_shape": "identity",
+        "satisfaction": "required_value" if required else "optional",
+        "detection_source": detection_source,
+        "confidence": confidence,
+    }
+    (refs_dir / f"{name}.json").write_text(
+        json.dumps(ref_data, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _setup_cli_catalog(tmp_path, services):
+    """Set up a minimal catalog layout for CLI tests.
+
+    services: list of dicts with keys: service, kinds.
+    Each kind: dict with kind, group, and optional refs (list of ref dicts).
+    Returns the catalog root path.
+    """
+    catalog = tmp_path / "catalog"
+    for svc_info in services:
+        svc_name = svc_info["service"]
+        for kind_info in svc_info["kinds"]:
+            kind = kind_info["kind"]
+            group = kind_info["group"]
+            kind_dir = catalog / group / svc_name / kind
+            kind_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "schema_version": "2.0",
+                "kind": kind,
+                "group": group,
+                "version": "v1",
+                "plural": kind.lower() + "s",
+                "scope": "Namespaced",
+                "service": svc_name,
+                "description": f"A {kind} resource",
+                "operations": ["apply"],
+                "refs": [],
+                "outputs": [],
+                "fields": [],
+                "status_conditions": ["Ready"],
+                "content_hash": "test",
+            }
+            # Write refs
+            for ref in kind_info.get("refs", []):
+                manifest["refs"].append(ref["name"])
+                _write_ref_file(
+                    kind_dir, ref["name"],
+                    target_kind=ref["target_kind"],
+                    target_group=ref.get("target_group", ""),
+                    required=ref.get("required", False),
+                    confidence=ref.get("confidence", 0.9),
+                    detection_source=ref.get("detection_source", "test"),
+                )
+            (kind_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            )
+    return catalog
+
+
+class TestLoadCatalogForSort:
+    """Tests for _load_catalog_for_sort helper."""
+
+    def test_loads_manifests_and_refs(self, tmp_path):
+        """Loads manifest and ref files, returns ClassifiedField data."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Certificate", "group": "cert-manager.io", "refs": [
+                    {"name": "issuerRef", "target_kind": "Issuer",
+                     "target_group": "cert-manager.io", "required": True},
+                ]},
+                {"kind": "Issuer", "group": "cert-manager.io", "refs": []},
+            ]},
+        ])
+        result = _load_catalog_for_sort(catalog)
+        assert ("cert-manager.io", "Certificate") in result["classified_fields"]
+        assert ("cert-manager.io", "Issuer") in result["classified_fields"]
+        cert_fields = result["classified_fields"][("cert-manager.io", "Certificate")]
+        assert len(cert_fields) == 1
+        assert cert_fields[0].target_kind == "Issuer"
+        assert cert_fields[0].required is True
+
+    def test_service_filter_excludes_other_services(self, tmp_path):
+        """service_filter skips manifests from other services."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+            ]},
+            {"service": "traefik", "kinds": [
+                {"kind": "IngressRoute", "group": "traefik.io"},
+            ]},
+        ])
+        result = _load_catalog_for_sort(catalog, service_filter="cert-manager")
+        assert ("cert-manager.io", "Issuer") in result["classified_fields"]
+        assert ("traefik.io", "IngressRoute") not in result["classified_fields"]
+
+    def test_empty_catalog_returns_empty(self, tmp_path):
+        """Empty catalog dir returns empty classified_fields."""
+        catalog = tmp_path / "catalog"
+        catalog.mkdir()
+        result = _load_catalog_for_sort(catalog)
+        assert result["classified_fields"] == {}
+
+    def test_reads_role_from_ref_file(self, tmp_path):
+        """Role field is read from ref JSON, not hardcoded."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "test", "kinds": [
+                {"kind": "Widget", "group": "test.io", "refs": [
+                    {"name": "parentRef", "target_kind": "Parent",
+                     "target_group": "test.io", "required": False},
+                ]},
+            ]},
+        ])
+        result = _load_catalog_for_sort(catalog)
+        field = result["classified_fields"][("test.io", "Widget")][0]
+        assert field.role == "input_ref"  # from the ref file's "role" key
+
+
+class TestLoadOlmOwned:
+    """Tests for _load_olm_owned OLM cache loader."""
+
+    def test_loads_owned_gvks_from_cache(self, tmp_path):
+        """Reads csv.yaml cache files and extracts owned GVKs."""
+        import yaml
+        olm_dir = tmp_path / "olm"
+        svc_dir = olm_dir / "cert-manager"
+        svc_dir.mkdir(parents=True)
+        csv_data = {
+            "spec": {
+                "customresourcedefinitions": {
+                    "owned": [
+                        {"kind": "Certificate", "name": "certificates.cert-manager.io", "version": "v1"},
+                        {"kind": "Issuer", "name": "issuers.cert-manager.io", "version": "v1"},
+                    ],
+                    "required": [],
+                },
+            },
+        }
+        (svc_dir / "csv.yaml").write_text(yaml.dump(csv_data))
+        result = _load_olm_owned(olm_dir)
+        assert "cert-manager" in result
+        kinds = {g.kind for g in result["cert-manager"]}
+        assert kinds == {"Certificate", "Issuer"}
+
+    def test_service_filter(self, tmp_path):
+        """service_filter restricts which services are loaded."""
+        import yaml
+        olm_dir = tmp_path / "olm"
+        for svc_name in ("cert-manager", "traefik"):
+            svc_dir = olm_dir / svc_name
+            svc_dir.mkdir(parents=True)
+            csv_data = {
+                "spec": {
+                    "customresourcedefinitions": {
+                        "owned": [{"kind": "Widget", "name": f"widgets.{svc_name}.io", "version": "v1"}],
+                    },
+                },
+            }
+            (svc_dir / "csv.yaml").write_text(yaml.dump(csv_data))
+        result = _load_olm_owned(olm_dir, service_filter="cert-manager")
+        assert "cert-manager" in result
+        assert "traefik" not in result
+
+    def test_missing_dir_returns_empty(self, tmp_path):
+        """Non-existent OLM cache dir returns empty dict."""
+        result = _load_olm_owned(tmp_path / "nonexistent")
+        assert result == {}
+
+    def test_malformed_yaml_skipped(self, tmp_path):
+        """Malformed csv.yaml files are skipped with a warning."""
+        olm_dir = tmp_path / "olm" / "bad"
+        olm_dir.mkdir(parents=True)
+        (olm_dir / "csv.yaml").write_text("{{{{not yaml")
+        result = _load_olm_owned(tmp_path / "olm")
+        assert result == {}
+
+
+class TestCLI:
+    """Tests for CLI entry point (_cli_main)."""
+
+    def test_cli_no_args_outputs_json(self, tmp_path):
+        """Running with catalog-dir outputs valid JSON with services key."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io", "refs": []},
+                {"kind": "Certificate", "group": "cert-manager.io", "refs": [
+                    {"name": "issuerRef", "target_kind": "Issuer",
+                     "target_group": "cert-manager.io", "required": True},
+                ]},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog)], stdout=out)
+        assert code == 0
+        data = json.loads(out.getvalue())
+        assert "services" in data
+
+    def test_cli_service_flag_filters_output(self, tmp_path):
+        """--service cert-manager produces output containing only cert-manager."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+            ]},
+            {"service": "traefik", "kinds": [
+                {"kind": "IngressRoute", "group": "traefik.io"},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog), "--service", "cert-manager"], stdout=out)
+        assert code == 0
+        data = json.loads(out.getvalue())
+        assert list(data["services"].keys()) == ["cert-manager"]
+
+    def test_cli_global_flag_includes_global_sort(self, tmp_path):
+        """--global adds a 'global' key with tiers and cross_service_edges."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+            ]},
+            {"service": "traefik", "kinds": [
+                {"kind": "IngressRoute", "group": "traefik.io"},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog), "--global"], stdout=out)
+        assert code == 0
+        data = json.loads(out.getvalue())
+        assert "global" in data
+        assert "tiers" in data["global"]
+        assert "cross_service_edges" in data["global"]
+
+    def test_cli_write_flag_creates_files(self, tmp_path):
+        """--write causes ordering.json and manifest updates in the catalog dir."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog), "--write"], stdout=out)
+        assert code == 0
+        # Check ordering.json was written
+        assert (catalog / "cert-manager" / "ordering.json").exists()
+        # Check manifest.json was updated with sort_tier
+        manifest = json.loads(
+            (catalog / "cert-manager.io" / "cert-manager" / "Issuer" / "manifest.json").read_text()
+        )
+        assert "sort_tier" in manifest
+
+    def test_cli_write_global_creates_global_ordering(self, tmp_path):
+        """--write --global creates global-ordering.json."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog), "--write", "--global"], stdout=out)
+        assert code == 0
+        assert (catalog / "global-ordering.json").exists()
+
+    def test_cli_verbose_includes_edges(self, tmp_path):
+        """--verbose adds edge provenance to tier entries."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+                {"kind": "Certificate", "group": "cert-manager.io", "refs": [
+                    {"name": "issuerRef", "target_kind": "Issuer",
+                     "target_group": "cert-manager.io", "required": True},
+                ]},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog), "--verbose"], stdout=out)
+        assert code == 0
+        data = json.loads(out.getvalue())
+        svc = data["services"]["cert-manager"]
+        # Certificate tier should have edges since it depends on Issuer
+        cert_tier = [t for t in svc["tiers"] if "Certificate" in t["kinds"]]
+        assert len(cert_tier) == 1
+        assert "edges" in cert_tier[0]
+        edge = cert_tier[0]["edges"][0]
+        assert "source" in edge
+        assert "target" in edge
+        assert "detection_source" in edge
+        assert "confidence" in edge
+
+    def test_cli_json_output_schema(self, tmp_path):
+        """Output JSON has the documented structure."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+                {"kind": "Certificate", "group": "cert-manager.io", "refs": [
+                    {"name": "issuerRef", "target_kind": "Issuer",
+                     "target_group": "cert-manager.io", "required": True},
+                ]},
+            ]},
+        ])
+        out = io.StringIO()
+        _cli_main(["--catalog-dir", str(catalog)], stdout=out)
+        data = json.loads(out.getvalue())
+        assert "services" in data
+        svc = data["services"]["cert-manager"]
+        assert "tiers" in svc
+        assert "cycles" in svc
+        assert "external_kinds" in svc
+        for tier in svc["tiers"]:
+            assert "tier" in tier
+            assert "kinds" in tier
+            assert isinstance(tier["tier"], int)
+            assert isinstance(tier["kinds"], list)
+
+    def test_cli_exit_code_zero(self, tmp_path):
+        """CLI returns exit code 0 on successful execution."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "test", "kinds": [
+                {"kind": "Widget", "group": "test.io"},
+            ]},
+        ])
+        out = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(catalog)], stdout=out)
+        assert code == 0
+
+    def test_cli_missing_catalog_dir_returns_1(self, tmp_path):
+        """Non-existent catalog dir returns exit code 1."""
+        out = io.StringIO()
+        err = io.StringIO()
+        code = _cli_main(["--catalog-dir", str(tmp_path / "nonexistent")], stdout=out, stderr=err)
+        assert code == 1
+
+    def test_cli_unknown_service_returns_1(self, tmp_path):
+        """--service with unknown name returns exit code 1."""
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Issuer", "group": "cert-manager.io"},
+            ]},
+        ])
+        out = io.StringIO()
+        err = io.StringIO()
+        code = _cli_main(
+            ["--catalog-dir", str(catalog), "--service", "nonexistent"],
+            stdout=out, stderr=err,
+        )
+        assert code == 1
+
+    def test_cli_olm_cache_flag(self, tmp_path):
+        """--olm-cache passes OLM data to the graph builder."""
+        import yaml
+        catalog = _setup_cli_catalog(tmp_path, [
+            {"service": "cert-manager", "kinds": [
+                {"kind": "Certificate", "group": "cert-manager.io"},
+            ]},
+        ])
+        olm_dir = tmp_path / "olm"
+        svc_dir = olm_dir / "cert-manager"
+        svc_dir.mkdir(parents=True)
+        csv_data = {
+            "spec": {
+                "customresourcedefinitions": {
+                    "owned": [
+                        {"kind": "Certificate", "name": "certificates.cert-manager.io", "version": "v1"},
+                    ],
+                },
+            },
+        }
+        (svc_dir / "csv.yaml").write_text(yaml.dump(csv_data))
+        out = io.StringIO()
+        code = _cli_main([
+            "--catalog-dir", str(catalog),
+            "--olm-cache", str(olm_dir),
+        ], stdout=out)
+        assert code == 0

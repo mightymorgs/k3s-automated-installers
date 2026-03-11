@@ -3,16 +3,20 @@
 Takes 301+ detected refs from the CRD pipeline and produces deterministic
 tier assignments for deployment ordering using Kahn's algorithm
 with Tarjan's SCC cycle resolution.
+
+CLI: python -m idi.generation.crd.topo_sort [--catalog-dir DIR] [--service SVC] [--global] [--write] [--verbose]
 """
 from __future__ import annotations
 
+import argparse
 import heapq
 import json
 import logging
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal
 
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.kind_registry import KindRegistry
@@ -912,3 +916,383 @@ def write_sort_results(
         result["global"] = path
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# CLI — catalog loader and entry point (section 07)
+# ---------------------------------------------------------------------------
+
+
+def _load_olm_owned(
+    olm_cache_dir: Path,
+    service_filter: str | None = None,
+) -> dict[str, list[GVKRef]]:
+    """Load OLM owned GVKs from disk cache.
+
+    Scans olm_cache_dir for {service}/csv.yaml files, extracts owned GVKs
+    using extract_gvk_dependencies(). No network calls — reads cache only.
+
+    Args:
+        olm_cache_dir: Path to OLM cache directory (e.g. catalog/specs/olm/).
+        service_filter: If set, only load this service's OLM data.
+
+    Returns:
+        Dict mapping service name to list of owned GVKRef objects.
+    """
+    from idi.generation.crd.olm_loader import extract_gvk_dependencies
+
+    result: dict[str, list[GVKRef]] = {}
+    if not olm_cache_dir.is_dir():
+        return result
+
+    resolved_root = olm_cache_dir.resolve()
+    for csv_path in sorted(olm_cache_dir.rglob("csv.yaml")):
+        if not csv_path.resolve().is_relative_to(resolved_root):
+            continue
+        service = csv_path.parent.name
+        if service_filter is not None and service != service_filter:
+            continue
+        try:
+            import yaml
+            csv_data = yaml.safe_load(csv_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Cannot read OLM cache %s: %s", csv_path, exc)
+            continue
+        if not isinstance(csv_data, dict):
+            continue
+        owned, _required = extract_gvk_dependencies(csv_data)
+        if owned:
+            result[service] = owned
+            logger.debug("Loaded %d OLM owned GVKs for %s", len(owned), service)
+
+    return result
+
+
+def _load_catalog_for_sort(
+    catalog_dir: Path,
+    service_filter: str | None = None,
+    olm_cache_dir: Path | None = None,
+) -> dict:
+    """Load catalog manifests and ref files for graph construction.
+
+    Single-pass walk: reads manifests, ref files, and apply.json outputs
+    in one traversal.
+
+    Args:
+        catalog_dir: Path to the CRD skills catalog directory.
+        service_filter: If set, skip manifests where service != filter.
+        olm_cache_dir: Path to OLM cache directory. If None, attempts
+            auto-discovery from catalog_dir.
+
+    Returns:
+        Dict with keys:
+            classified_fields: dict[(group, kind), list[ClassifiedField]]
+            rbac_outputs: dict[str, list[Output]]
+            olm_owned: dict[str, list[GVKRef]]
+            side_effect_dict: dict[(group, kind), list[dict]]
+            services: set[str] — all discovered service names
+    """
+    classified_fields: dict[tuple[str, str], list[ClassifiedField]] = {}
+    rbac_outputs: dict[str, list[Output]] = {}
+    services: set[str] = set()
+
+    resolved_root = catalog_dir.resolve()
+    for manifest_path in sorted(catalog_dir.rglob("manifest.json")):
+        if not manifest_path.resolve().is_relative_to(resolved_root):
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Cannot read manifest %s: %s", manifest_path, exc)
+            continue
+
+        kind = manifest.get("kind", "")
+        group = manifest.get("group", "")
+        service = manifest.get("service", "")
+        if not kind or not group:
+            continue
+        if service_filter is not None and service != service_filter:
+            continue
+
+        services.add(service)
+        key = (group, kind)
+        fields: list[ClassifiedField] = []
+
+        # Read ref files from refs/ sibling directory.
+        refs_dir = manifest_path.parent / "refs"
+        if refs_dir.is_dir():
+            for ref_path in sorted(refs_dir.glob("*.json")):
+                try:
+                    ref = json.loads(ref_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                fields.append(ClassifiedField(
+                    field=ref.get("field_path", ""),
+                    role=ref.get("role", "input_ref"),
+                    confidence=ref.get("confidence", 0.5),
+                    field_type="string",
+                    target_kind=ref.get("target_kind"),
+                    target_group=ref.get("target_group"),
+                    required=ref.get("required", False),
+                    detection_source=ref.get("detection_source", "catalog"),
+                ))
+
+        classified_fields[key] = fields
+
+        # Load RBAC outputs from operations/apply.json.
+        apply_path = manifest_path.parent / "operations" / "apply.json"
+        if apply_path.is_file():
+            try:
+                apply_data = json.loads(apply_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                apply_data = {}
+            for out_entry in apply_data.get("outputs", []):
+                fact_ref = out_entry.get("fact_ref", "")
+                if fact_ref:
+                    rbac_outputs.setdefault(service, []).append(Output(
+                        field=out_entry.get("field", out_entry.get("output", "")),
+                        fact_ref=fact_ref,
+                        source="catalog:apply.json",
+                    ))
+
+    # Load OLM owned GVKs from disk cache.
+    if olm_cache_dir is None:
+        # Auto-discover: if catalog_dir is catalog/skills/crd, try catalog/specs/olm
+        candidate = catalog_dir.parent.parent / "specs" / "olm"
+        if candidate.is_dir():
+            olm_cache_dir = candidate
+    olm_owned = _load_olm_owned(olm_cache_dir, service_filter) if olm_cache_dir else {}
+
+    # Side effects: load from side_effect_registry if available.
+    side_effect_dict: dict[tuple[str, str], list[dict]] = {}
+    try:
+        from idi.generation.crd.side_effect_registry import OPERATOR_SIDE_EFFECTS
+        side_effect_dict = dict(OPERATOR_SIDE_EFFECTS)
+    except ImportError:
+        pass
+
+    return {
+        "classified_fields": classified_fields,
+        "rbac_outputs": rbac_outputs,
+        "olm_owned": olm_owned,
+        "side_effect_dict": side_effect_dict,
+        "services": services,
+    }
+
+
+def _cli_main(
+    argv: list[str] | None = None,
+    stdout: IO[str] | None = None,
+    stderr: IO[str] | None = None,
+) -> int:
+    """CLI entry point for topological sort.
+
+    Args:
+        argv: Command-line arguments (None = sys.argv[1:]).
+        stdout: Output stream (None = sys.stdout).
+        stderr: Error stream (None = sys.stderr).
+
+    Returns:
+        Exit code (0 = success, 1 = error).
+    """
+    if stdout is None:
+        stdout = sys.stdout
+    if stderr is None:
+        stderr = sys.stderr
+
+    parser = argparse.ArgumentParser(
+        description="Topological sort for CRD Kind deployment ordering",
+    )
+    parser.add_argument(
+        "--service", type=str, default=None,
+        help="Sort only this service (by name, e.g. cert-manager)",
+    )
+    parser.add_argument(
+        "--global", dest="global_sort", action="store_true", default=False,
+        help="Include cross-service global sort in output",
+    )
+    parser.add_argument(
+        "--write", action="store_true", default=False,
+        help="Write results to catalog files (manifests + ordering.json)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", default=False,
+        help="Include edge details and provenance in JSON output",
+    )
+    parser.add_argument(
+        "--catalog-dir", type=str, default="catalog/skills/crd",
+        help="Path to the CRD skills catalog directory",
+    )
+    parser.add_argument(
+        "--olm-cache", type=str, default=None,
+        help="Path to OLM cache directory (default: auto-discover from catalog-dir)",
+    )
+    args = parser.parse_args(argv)
+
+    # Configure logging per-logger to avoid basicConfig idempotency issues.
+    topo_logger = logging.getLogger("idi.generation.crd.topo_sort")
+    if not topo_logger.handlers:
+        handler = logging.StreamHandler(stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        topo_logger.addHandler(handler)
+    topo_logger.setLevel(logging.DEBUG if args.verbose else logging.WARNING)
+
+    catalog_dir = Path(args.catalog_dir)
+    if not catalog_dir.is_dir():
+        print(f"Error: catalog directory not found: {catalog_dir}", file=stderr)
+        return 1
+
+    olm_cache_dir = Path(args.olm_cache) if args.olm_cache else None
+
+    # Load catalog data.
+    catalog_data = _load_catalog_for_sort(
+        catalog_dir, service_filter=args.service, olm_cache_dir=olm_cache_dir,
+    )
+    if not catalog_data["classified_fields"]:
+        if args.service:
+            all_data = _load_catalog_for_sort(catalog_dir, olm_cache_dir=olm_cache_dir)
+            available = sorted(all_data["services"])
+            print(
+                f"Error: service '{args.service}' not found. "
+                f"Available: {', '.join(available) if available else '(none)'}",
+                file=stderr,
+            )
+            return 1
+        print(f"Error: no manifests found in {catalog_dir}", file=stderr)
+        return 1
+
+    # Build graph and sort.
+    registry = KindRegistry()
+    graph = build_dependency_graph(
+        classified_fields=catalog_data["classified_fields"],
+        rbac_outputs=catalog_data["rbac_outputs"],
+        olm_owned=catalog_data["olm_owned"],
+        side_effect_dict=catalog_data["side_effect_dict"],
+        registry=registry,
+    )
+    tiers = topological_sort(graph)
+
+    # Write results to catalog if requested.
+    if args.write:
+        write_sort_results(graph, tiers, catalog_dir, write_global=args.global_sort)
+
+    # Build output JSON.
+    output = _build_output_json(graph, tiers, args.verbose, args.global_sort)
+    print(json.dumps(output, indent=2, sort_keys=True), file=stdout)
+    return 0
+
+
+def _build_output_json(
+    graph: DependencyGraph,
+    tiers: list[SortTier],
+    verbose: bool,
+    include_global: bool,
+) -> dict:
+    """Build the JSON output structure for CLI."""
+    # Pre-build edge index for verbose mode (O(E) instead of O(K*E)).
+    edges_by_source: dict[str, list[DependencyEdge]] = {}
+    if verbose:
+        for e in graph.dependency_edges:
+            edges_by_source.setdefault(e.source_gk, []).append(e)
+
+    # Group tiers by service.
+    service_tiers: dict[str, list[dict]] = {}
+    service_cycles: dict[str, list[str]] = {}
+    service_externals: dict[str, set[str]] = {}
+
+    for st in tiers:
+        for gk in st.kinds:
+            node = graph.nodes.get(gk)
+            if node is None or node.is_external:
+                continue
+            svc = node.service
+            service_tiers.setdefault(svc, [])
+            service_cycles.setdefault(svc, [])
+            service_externals.setdefault(svc, set())
+
+    # Build per-service tier data.
+    for st in tiers:
+        svc_kinds: dict[str, list[str]] = {}
+        for gk in st.kinds:
+            node = graph.nodes.get(gk)
+            if node is None or node.is_external:
+                continue
+            svc_kinds.setdefault(node.service, []).append(node.kind)
+
+        for svc, kinds in svc_kinds.items():
+            tier_entry: dict = {"tier": st.tier, "kinds": sorted(kinds)}
+            if verbose:
+                edges = []
+                for gk in st.kinds:
+                    n = graph.nodes.get(gk)
+                    if n is None or n.service != svc:
+                        continue
+                    for e in edges_by_source.get(gk, []):
+                        edges.append({
+                            "source": e.source_gk,
+                            "target": e.target_gk,
+                            "edge_type": e.edge_type,
+                            "field": e.source_field,
+                            "confidence": e.confidence,
+                            "detection_source": e.detection_source,
+                        })
+                if edges:
+                    tier_entry["edges"] = sorted(edges, key=lambda x: (x["source"], x["target"]))
+            service_tiers[svc].append(tier_entry)
+
+            if st.scc_group:
+                svc_scc = [
+                    graph.nodes[g].kind for g in st.scc_group
+                    if g in graph.nodes and graph.nodes[g].service == svc
+                ]
+                if svc_scc:
+                    service_cycles[svc].append(f"SCC: {', '.join(sorted(svc_scc))}")
+
+    # Collect external kinds per service.
+    for edge in graph.dependency_edges:
+        src = graph.nodes.get(edge.source_gk)
+        tgt = graph.nodes.get(edge.target_gk)
+        if src and tgt and not src.is_external and (tgt.is_external or edge.target_gk in graph.external_kinds):
+            service_externals.setdefault(src.service, set()).add(edge.target_gk)
+
+    services_output: dict[str, dict] = {}
+    for svc in sorted(service_tiers):
+        services_output[svc] = {
+            "tiers": sorted(service_tiers[svc], key=lambda t: t["tier"]),
+            "cycles": service_cycles.get(svc, []),
+            "external_kinds": sorted(service_externals.get(svc, set())),
+        }
+
+    result: dict = {"services": services_output}
+
+    if include_global:
+        global_tiers = []
+        for st in sorted(tiers, key=lambda t: t.tier):
+            entry: dict = {"tier": st.tier, "kinds": sorted(st.kinds)}
+            if st.scc_group:
+                entry["scc_group"] = sorted(st.scc_group)
+            global_tiers.append(entry)
+
+        cross_edges = []
+        for edge in graph.dependency_edges:
+            src = graph.nodes.get(edge.source_gk)
+            tgt = graph.nodes.get(edge.target_gk)
+            if src and tgt and src.service != tgt.service:
+                cross_edges.append({
+                    "source": edge.source_gk,
+                    "target": edge.target_gk,
+                    "edge_type": edge.edge_type,
+                    "detection_source": edge.detection_source,
+                })
+        cross_edges.sort(key=lambda x: (x["source"], x["target"]))
+
+        result["global"] = {
+            "tiers": global_tiers,
+            "cross_service_edges": cross_edges,
+        }
+
+    return result
+
+
+if __name__ == "__main__":
+    sys.exit(_cli_main())
