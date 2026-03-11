@@ -10,11 +10,14 @@ throughout the pipeline (output_writer.py, ref_detector.py, crd_dep.py).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from idi.generation.crd.kind_registry import KindRegistry
-from idi.generation.crd.schema_walker import walk_crd_schema
+from idi.generation.crd.schema_walker import WalkedField, walk_crd_schema
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,6 +37,65 @@ class ClassifiedField:
     fact_shape: str = ""        # "identity", "lifecycle", or "config"
     target_field: str = "name"  # canonical target field for URI fragment
     blocks_descendants: bool = False  # True = structural ref whose children are ref components
+
+
+@dataclass
+class CandidateEdge:
+    """A ClassifiedField wrapped with structural evidence signals for scoring."""
+
+    classified: ClassifiedField
+    is_list_map_key: bool = False
+    is_discriminator: bool = False
+    is_under_embedded_resource: bool = False
+    has_ref_shape_siblings: bool = False
+    field_is_required: bool = False
+
+
+PRECISION_THRESHOLD: float = 0.7
+
+_REF_SHAPE_SIBLINGS: frozenset[str] = frozenset({
+    "namespace", "apiGroup", "apiVersion", "group",
+})
+
+
+def score_candidate(candidate: CandidateEdge) -> float:
+    """Compute precision-biased evidence score for a candidate edge.
+
+    Positive signals increase score, negative signals decrease.
+    Veto signals (list-map key, discriminator) effectively kill the candidate.
+    """
+    score = candidate.classified.confidence
+    if candidate.has_ref_shape_siblings:
+        score += 0.3
+    if candidate.field_is_required:
+        score += 0.1
+    if candidate.is_list_map_key:
+        score -= 1.0
+    if candidate.is_discriminator:
+        score -= 1.0
+    if candidate.is_under_embedded_resource:
+        score -= 0.5
+    return score
+
+
+def _compute_signals(
+    classified: ClassifiedField,
+    field: WalkedField,
+) -> CandidateEdge:
+    """Wrap a ClassifiedField with computed structural evidence signals."""
+    from idi.generation.crd.ref_detector import is_inline_object_name
+
+    has_ref_shape = len(field.sibling_names & _REF_SHAPE_SIBLINGS) >= 1
+    is_list_map = is_inline_object_name(field)
+
+    return CandidateEdge(
+        classified=classified,
+        has_ref_shape_siblings=has_ref_shape,
+        field_is_required=field.required,
+        is_list_map_key=is_list_map,
+        is_discriminator=False,  # handled by Phase 1 gate in section 03
+        is_under_embedded_resource=False,  # handled by Phase 1 gate
+    )
 
 
 def classify_fields(
@@ -103,7 +165,19 @@ def classify_fields(
             if classified.role == "input_ref" and classified.blocks_descendants:
                 classified_blocking_ref_paths.add(field.path)
 
-        results.extend(classified_list)
+            # Score input_ref candidates and filter below threshold.
+            if classified.role == "input_ref":
+                candidate = _compute_signals(classified, field)
+                candidate_score = score_candidate(candidate)
+                if candidate_score < PRECISION_THRESHOLD:
+                    logger.debug(
+                        "Suppressed candidate: %s -> %s (score=%.2f, source=%s)",
+                        kind, classified.target_kind, candidate_score,
+                        classified.detection_source,
+                    )
+                    continue
+
+            results.append(classified)
 
     return results
 
