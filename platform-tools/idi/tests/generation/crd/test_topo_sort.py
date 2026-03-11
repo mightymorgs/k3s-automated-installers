@@ -6,9 +6,10 @@ import json
 
 import pytest
 
-from idi.generation.crd.field_classifier import ClassifiedField
+from idi.generation.crd.field_classifier import ClassifiedField, classify_fields
 from idi.generation.crd.kind_registry import KindRegistry
 from idi.generation.crd.olm_loader import GVKRef
+from idi.generation.crd.side_effect_registry import OPERATOR_SIDE_EFFECTS
 from idi.generation.crd.topo_sort import (
     CORE_EXTERNAL_KINDS,
     DependencyEdge,
@@ -1626,3 +1627,206 @@ class TestCLI:
             "--olm-cache", str(olm_dir),
         ], stdout=out)
         assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# Integration Tests — Section 08
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def classified_fields_all_services(all_fixtures, populated_registry):
+    """Classify all CRD fixture fields using the real detection pipeline.
+
+    Returns:
+        dict mapping (group, kind) -> list[ClassifiedField]
+    """
+    result: dict[tuple[str, str], list[ClassifiedField]] = {}
+    for fix in all_fixtures:
+        fields = classify_fields(
+            spec_properties=fix["spec_properties"],
+            spec_required=fix.get("spec_required", []),
+            group=fix["group"],
+            kind=fix["kind"],
+            registry=populated_registry,
+        )
+        result[(fix["group"], fix["kind"])] = fields
+    return result
+
+
+@pytest.fixture
+def integration_graph(classified_fields_all_services, populated_registry):
+    """Build a DependencyGraph from real classified fields."""
+    return build_dependency_graph(
+        classified_fields=classified_fields_all_services,
+        rbac_outputs={},
+        olm_owned={},
+        side_effect_dict=dict(OPERATOR_SIDE_EFFECTS),
+        registry=populated_registry,
+    )
+
+
+@pytest.fixture
+def integration_tiers(integration_graph):
+    """Sort the integration graph and return tier assignments."""
+    return topological_sort(integration_graph)
+
+
+def _gk_to_tier(tiers: list[SortTier]) -> dict[str, int]:
+    """Build gk -> tier number lookup."""
+    result = {}
+    for st in tiers:
+        for gk in st.kinds:
+            result[gk] = st.tier
+    return result
+
+
+class TestIntegration:
+    """End-to-end integration tests using real CRD fixtures."""
+
+    def test_full_pipeline_produces_valid_tiers(self, integration_tiers):
+        """Full pipeline produces non-empty, valid tier assignments."""
+        assert len(integration_tiers) >= 2
+        # All 21 Kinds appear exactly once.
+        all_gks = []
+        for st in integration_tiers:
+            all_gks.extend(st.kinds)
+        assert len(all_gks) == 21, f"Expected 21 Kinds, got {len(all_gks)}"
+        assert len(all_gks) == len(set(all_gks)), "Duplicate Kind in tiers"
+        # No external Kinds in output.
+        core_gks = {f"/{k}" for _, k in CORE_EXTERNAL_KINDS} | {f"{g}/{k}" for g, k in CORE_EXTERNAL_KINDS}
+        for gk in all_gks:
+            assert gk not in core_gks, f"External Kind {gk} found in tier output"
+        # Tier numbers are contiguous from 0.
+        tier_nums = sorted(st.tier for st in integration_tiers)
+        assert tier_nums == list(range(len(tier_nums)))
+
+    def test_cert_manager_issuer_before_certificate(self, integration_tiers):
+        """cert-manager: Issuer/ClusterIssuer must be in a lower tier than Certificate."""
+        lookup = _gk_to_tier(integration_tiers)
+        assert "cert-manager.io/Issuer" in lookup
+        assert "cert-manager.io/Certificate" in lookup
+        assert lookup["cert-manager.io/Issuer"] < lookup["cert-manager.io/Certificate"]
+        assert lookup["cert-manager.io/ClusterIssuer"] < lookup["cert-manager.io/Certificate"]
+
+    def test_external_secrets_secretstore_before_externalsecret(self, integration_tiers):
+        """external-secrets: SecretStore in same or lower tier than ExternalSecret.
+
+        Note: secretStoreRef may be classified as optional/soft depending on
+        the detection pipeline, which places them in the same tier.
+        """
+        lookup = _gk_to_tier(integration_tiers)
+        assert "external-secrets.io/SecretStore" in lookup
+        assert "external-secrets.io/ExternalSecret" in lookup
+        assert lookup["external-secrets.io/SecretStore"] <= lookup["external-secrets.io/ExternalSecret"]
+        assert lookup["external-secrets.io/ClusterSecretStore"] <= lookup["external-secrets.io/ExternalSecret"]
+
+    def test_traefik_middleware_before_ingressroute(self, integration_tiers):
+        """traefik: Middleware/TraefikService in lower or equal tier to IngressRoute."""
+        lookup = _gk_to_tier(integration_tiers)
+        assert "traefik.io/Middleware" in lookup
+        assert "traefik.io/IngressRoute" in lookup
+        assert lookup["traefik.io/Middleware"] <= lookup["traefik.io/IngressRoute"]
+        assert lookup["traefik.io/TraefikService"] <= lookup["traefik.io/IngressRoute"]
+
+    def test_global_sort_respects_hard_edges(self, integration_tiers, integration_graph):
+        """Every hard dep edge has target in same or earlier tier than source."""
+        lookup = _gk_to_tier(integration_tiers)
+        for edge in integration_graph.dependency_edges:
+            if edge.edge_type != "hard":
+                continue
+            if edge.source_gk not in lookup or edge.target_gk not in lookup:
+                continue  # one end is external
+            assert lookup[edge.target_gk] < lookup[edge.source_gk], (
+                f"Hard edge {edge.source_gk} -> {edge.target_gk}: "
+                f"target tier {lookup[edge.target_gk]} >= source tier {lookup[edge.source_gk]}"
+            )
+
+    def test_secret_deadlock_regression(self, integration_graph, integration_tiers):
+        """Secret is always external with in-degree 0 — no deadlock.
+
+        The detection pipeline produces target_group='core' for core types,
+        so external_kinds contains 'core/Secret'.
+        """
+        assert "core/Secret" in integration_graph.external_kinds
+        all_gks = {gk for st in integration_tiers for gk in st.kinds}
+        assert "core/Secret" not in all_gks
+        assert "cert-manager.io/ClusterIssuer" in all_gks
+        assert "cert-manager.io/Certificate" in all_gks
+        assert len(integration_tiers) > 0
+
+    def test_all_kinds_placed_in_tiers(self, integration_tiers, classified_fields_all_services):
+        """Every CRD Kind from the input appears in exactly one tier."""
+        expected = {f"{g}/{k}" for g, k in classified_fields_all_services}
+        actual = {gk for st in integration_tiers for gk in st.kinds}
+        assert expected == actual
+
+    def test_integration_determinism(self, classified_fields_all_services, populated_registry):
+        """Running the pipeline 5 times produces identical tier assignments."""
+        results = []
+        for _ in range(5):
+            graph = build_dependency_graph(
+                classified_fields=classified_fields_all_services,
+                rbac_outputs={},
+                olm_owned={},
+                side_effect_dict=dict(OPERATOR_SIDE_EFFECTS),
+                registry=populated_registry,
+            )
+            tiers = topological_sort(graph)
+            canonical = [(st.tier, sorted(st.kinds)) for st in sorted(tiers, key=lambda t: t.tier)]
+            results.append(canonical)
+        for i in range(1, 5):
+            assert results[i] == results[0], f"Run {i} differs from run 0"
+
+    def test_self_loops_stripped_in_integration(self, integration_tiers):
+        """Traefik self-loops are stripped; Kinds appear without scc_group."""
+        all_gks = {gk for st in integration_tiers for gk in st.kinds}
+        assert "traefik.io/Middleware" in all_gks
+        assert "traefik.io/TraefikService" in all_gks
+        # Trivial SCCs (self-loops) should not produce scc_group.
+        for st in integration_tiers:
+            if "traefik.io/Middleware" in st.kinds:
+                assert st.scc_group is None, "Middleware should not have scc_group (trivial SCC)"
+                break
+
+    def test_write_sort_results_end_to_end(self, integration_graph, integration_tiers, tmp_path):
+        """write_sort_results writes all expected output files."""
+        # Set up minimal manifests so update_manifests_with_tiers has files to update.
+        for gk, node in integration_graph.nodes.items():
+            if node.is_external:
+                continue
+            kind_dir = tmp_path / node.service / node.group / node.service / node.kind
+            kind_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "schema_version": "2.0",
+                "kind": node.kind,
+                "group": node.group,
+                "service": node.service,
+            }
+            (kind_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            )
+
+        write_sort_results(integration_graph, integration_tiers, tmp_path)
+
+        # Per-service ordering files.
+        for svc in ("cert-manager", "external-secrets", "traefik"):
+            ordering = tmp_path / svc / "ordering.json"
+            assert ordering.exists(), f"Missing {ordering}"
+            data = json.loads(ordering.read_text())
+            assert data["schema_version"] == "1.0"
+            assert data["service"] == svc
+            assert "tiers" in data
+            assert data["sort_metadata"]["total_kinds"] > 0
+
+        # Global ordering.
+        global_path = tmp_path / "global-ordering.json"
+        assert global_path.exists()
+        global_data = json.loads(global_path.read_text())
+        assert global_data["schema_version"] == "1.0"
+        assert global_data["sort_metadata"]["total_kinds"] > 0
+
+        # Verify canonical JSON format (sorted keys, 2-space indent, trailing newline).
+        raw = global_path.read_text()
+        expected = json.dumps(global_data, indent=2, sort_keys=True) + "\n"
+        assert raw == expected, "global-ordering.json is not canonical JSON"
