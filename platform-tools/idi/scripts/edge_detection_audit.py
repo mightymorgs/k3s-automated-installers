@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Systematic edge detection audit across all 3 CRD services.
+"""Systematic edge detection audit across all CRD services in the catalog.
 
+Dynamically discovers CRD services by scanning catalog/skills/crd/ for
+generated skill directories and matching them to spec files in catalog/specs/.
 Walks every CRD spec with NO depth limit, identifies all fields that should
 be cross-resource references, and compares against what the pipeline actually
 detected. Categorizes root causes for every gap.
@@ -21,11 +23,7 @@ from typing import Any
 # ── Configuration ─────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-SPECS = {
-    "cert-manager": ROOT / "catalog" / "specs" / "cert-manager-openapi.json",
-    "external-secrets": ROOT / "catalog" / "specs" / "external-secrets-openapi.json",
-    "traefik": ROOT / "catalog" / "specs" / "traefik-openapi.json",
-}
+SPECS_DIR = ROOT / "catalog" / "specs"
 SKILLS_DIR = ROOT / "catalog" / "skills" / "crd"
 
 # All known resource Kinds (core K8s + CRD)
@@ -39,16 +37,51 @@ CORE_KINDS = {
     "HorizontalPodAutoscaler", "ReplicaSet",
 }
 
-CRD_KINDS = {
-    "Certificate", "CertificateRequest", "Issuer", "ClusterIssuer",
-    "Challenge", "Order",
-    "ExternalSecret", "ClusterExternalSecret", "SecretStore",
-    "ClusterSecretStore", "PushSecret",
-    "IngressRoute", "IngressRouteTCP", "IngressRouteUDP",
-    "Middleware", "MiddlewareTCP", "TLSOption", "TLSStore",
-    "TraefikService", "ServersTransport", "ServersTransportTCP",
-}
 
+def discover_crd_services() -> dict[str, Path]:
+    """Discover CRD services by scanning catalog/skills/crd/ and matching specs.
+
+    Returns dict mapping service name to spec file path.
+    Only includes services that have both a skills directory and a spec file.
+    """
+    specs: dict[str, Path] = {}
+    if not SKILLS_DIR.is_dir():
+        return specs
+    for service_dir in sorted(SKILLS_DIR.iterdir()):
+        if not service_dir.is_dir():
+            continue
+        service = service_dir.name
+        spec_path = SPECS_DIR / f"{service}-openapi.json"
+        if spec_path.is_file():
+            specs[service] = spec_path
+        else:
+            print(
+                f"  WARNING: No spec file for service '{service}' "
+                f"(expected {spec_path})",
+                file=sys.stderr,
+            )
+    return specs
+
+
+def discover_crd_kinds() -> set[str]:
+    """Discover all CRD Kind names from catalog manifest.json files."""
+    kinds: set[str] = set()
+    if not SKILLS_DIR.is_dir():
+        return kinds
+    for manifest_path in SKILLS_DIR.rglob("manifest.json"):
+        try:
+            data = json.loads(manifest_path.read_text())
+            kind = data.get("kind")
+            if kind:
+                kinds.add(kind)
+        except (json.JSONDecodeError, OSError):
+            continue
+    return kinds
+
+
+# Discovered at module load time
+SPECS = discover_crd_services()
+CRD_KINDS = discover_crd_kinds()
 KNOWN_KINDS = CORE_KINDS | CRD_KINDS
 
 # Pipeline walker's excluded fields (matches schema_walker.EXCLUDED_FIELDS)
@@ -92,6 +125,8 @@ class ExpectedRef:
     confidence: str
     parent_path: str = ""
     has_excluded_sibling_kind: bool = False  # True if sibling 'kind' field has enum but is excluded
+    actionable: bool = True
+    non_actionable_reason: str = ""
 
 
 @dataclass
@@ -177,11 +212,28 @@ def walk_schema_unlimited(
 # ── Reference Detection Heuristics ───────────────────────────────────────
 
 def is_secret_key_selector_shape(schema: dict) -> bool:
-    """Check if schema is a SecretKeySelector-like shape {key, name, namespace?}."""
+    """Check if schema is a SecretKeySelector-like shape {key, name, namespace?}.
+
+    Matches the pipeline's detect_secret_key_selector: key and name must be
+    string typed, all other props must be strings or the known 'optional' boolean.
+    """
     if schema.get("type") != "object":
         return False
     props = schema.get("properties", {})
-    return "key" in props and "name" in props
+    key_prop = props.get("key", {})
+    name_prop = props.get("name", {})
+    if not isinstance(key_prop, dict) or key_prop.get("type") != "string":
+        return False
+    if not isinstance(name_prop, dict) or name_prop.get("type") != "string":
+        return False
+    # All other props must be strings or 'optional' (boolean)
+    _KNOWN = {"key", "name", "namespace", "optional"}
+    for pname, pschema in props.items():
+        if pname in _KNOWN:
+            continue
+        if isinstance(pschema, dict) and pschema.get("type") != "string":
+            return False
+    return True
 
 
 def extract_kind_from_suffix(field_name: str) -> str | None:
@@ -333,6 +385,25 @@ def extract_expected_refs(service: str, spec: dict) -> list[ExpectedRef]:
             # Method 1: Suffix pattern matching (*Ref, *SecretRef, etc.)
             target = extract_kind_from_suffix(fname)
             if target:
+                # Skip container objects whose children are themselves
+                # ref-like fields. E.g. aws.auth.secretRef is a container
+                # with accessKeyIDSecretRef, secretAccessKeySecretRef inside.
+                # But serviceAccountRef with {name, namespace, audiences} is
+                # a leaf ref, not a container.
+                if (fschema.get("type") == "object"
+                        and fschema.get("properties")
+                        and not is_secret_key_selector_shape(fschema)):
+                    child_props = fschema.get("properties", {})
+                    has_ref_children = any(
+                        extract_kind_from_suffix(cp) is not None
+                        or is_secret_key_selector_shape(
+                            child_props.get(cp, {}))
+                        for cp in child_props
+                    )
+                    if has_ref_children:
+                        # Container with ref-like children — skip, let children count
+                        continue
+
                 # Check if this is actually a SecretKeySelector shape
                 # where the field name implies a different Kind but the
                 # schema is {key, name, namespace?} pointing to a Secret
@@ -362,23 +433,17 @@ def extract_expected_refs(service: str, spec: dict) -> list[ExpectedRef]:
                 continue
 
             # Method 3: SecretKeySelector shape {key, name, namespace?}
-            # where field name contains "secret" or ends with "Ref"
+            # The pipeline's detect_secret_key_selector matches purely on
+            # schema shape — no field name filter. Match that behavior here.
             if is_secret_key_selector_shape(fschema):
-                lower = fname.lower()
-                is_secret_ref = (
-                    "secret" in lower
-                    or lower.endswith("ref")
-                    or lower.endswith("refs")
-                )
-                if is_secret_ref:
-                    results.append(ExpectedRef(
-                        service=service, kind=kind, field_path=fpath,
-                        field_name=fname, expected_target="Secret",
-                        detection_method="secret_key_selector", depth=fdepth,
-                        confidence="high", parent_path=parent_path,
-                    ))
-                    detected_paths.add(fpath)
-                    continue
+                results.append(ExpectedRef(
+                    service=service, kind=kind, field_path=fpath,
+                    field_name=fname, expected_target="Secret",
+                    detection_method="secret_key_selector", depth=fdepth,
+                    confidence="high", parent_path=parent_path,
+                ))
+                detected_paths.add(fpath)
+                continue
 
             # Method 4: Ref tuple shape {name, namespace?, kind?, apiGroup?}
             # (but NOT SecretKeySelector shapes which are handled above)
@@ -400,12 +465,15 @@ def extract_expected_refs(service: str, spec: dict) -> list[ExpectedRef]:
                                         tuple_target = val
                                         break
                             target_str = tuple_target or "UNKNOWN_KIND"
+                            is_actionable = tuple_target is not None
                             results.append(ExpectedRef(
                                 service=service, kind=kind, field_path=fpath,
                                 field_name=fname, expected_target=target_str,
                                 detection_method="ref_tuple", depth=fdepth,
                                 confidence="high" if tuple_target else "medium",
                                 parent_path=parent_path,
+                                actionable=is_actionable,
+                                non_actionable_reason="" if is_actionable else "ref_tuple_no_kind_enum",
                             ))
                             detected_paths.add(fpath)
                             continue
@@ -684,21 +752,48 @@ def generate_report(expected, detected, missing) -> str:
     total_detected = sum(len(v) for v in detected.values())
     services = sorted(set(r.service for r in expected))
 
-    lines.append("| Service | Kinds | Expected Refs | Detected | Missing | Rate |")
-    lines.append("|---------|:---:|:---:|:---:|:---:|:---:|")
+    # Build non-actionable set for filtering (includes service to prevent cross-service bleed)
+    non_actionable_keys: set[tuple[str, str, str]] = {
+        (r.service, r.kind, r.field_path) for r in expected if not r.actionable
+    }
+
+    lines.append("| Service | Kinds | Expected | Actionable | Detected | Missing | Actionable Rate | Total Rate |")
+    lines.append("|---------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
 
     for svc in services:
         svc_expected = [r for r in expected if r.service == svc]
         svc_missing = [m for m in missing if m.service == svc]
         svc_kinds = len(set(r.kind for r in svc_expected))
         svc_matched = len(svc_expected) - len(svc_missing)
-        rate = (svc_matched / len(svc_expected) * 100) if svc_expected else 0
-        lines.append(f"| {svc} | {svc_kinds} | {len(svc_expected)} | {svc_matched} | {len(svc_missing)} | {rate:.1f}% |")
+        svc_total_rate = (svc_matched / len(svc_expected) * 100) if svc_expected else 0
+
+        svc_actionable_expected = [r for r in svc_expected if r.actionable]
+        svc_actionable_missing = [
+            m for m in svc_missing
+            if (m.service, m.kind, m.field_path) not in non_actionable_keys
+        ]
+        actionable_matched = len(svc_actionable_expected) - len(svc_actionable_missing)
+        actionable_rate = (actionable_matched / len(svc_actionable_expected) * 100) if svc_actionable_expected else 0
+
+        lines.append(
+            f"| {svc} | {svc_kinds} | {len(svc_expected)} | {len(svc_actionable_expected)} "
+            f"| {svc_matched} | {len(svc_missing)} | {actionable_rate:.1f}% | {svc_total_rate:.1f}% |"
+        )
 
     total_matched = len(expected) - len(missing)
     total_rate = (total_matched / len(expected) * 100) if expected else 0
     total_kinds = len(set(r.kind for r in expected))
-    lines.append(f"| **TOTAL** | **{total_kinds}** | **{len(expected)}** | **{total_matched}** | **{len(missing)}** | **{total_rate:.1f}%** |")
+    total_actionable = [r for r in expected if r.actionable]
+    total_actionable_missing = [
+        m for m in missing
+        if (m.service, m.kind, m.field_path) not in non_actionable_keys
+    ]
+    total_actionable_matched = len(total_actionable) - len(total_actionable_missing)
+    total_actionable_rate = (total_actionable_matched / len(total_actionable) * 100) if total_actionable else 0
+    lines.append(
+        f"| **TOTAL** | **{total_kinds}** | **{len(expected)}** | **{len(total_actionable)}** "
+        f"| **{total_matched}** | **{len(missing)}** | **{total_actionable_rate:.1f}%** | **{total_rate:.1f}%** |"
+    )
     lines.append("")
 
     # ── 2. Root Cause Categories ──
@@ -710,7 +805,7 @@ def generate_report(expected, detected, missing) -> str:
         categories[m.root_cause_category].append(m)
 
     cat_desc = {
-        "DEPTH_LIMIT": "Field depth exceeds schema_walker max_depth (5)",
+        "DEPTH_LIMIT": f"Field depth exceeds schema_walker max_depth ({PIPELINE_MAX_DEPTH})",
         "EXCLUDED_ANCESTOR": "An ancestor field is in EXCLUDED_FIELDS, blocking walker traversal",
         "EXCLUDED_FIELD_SELF": "The ref field itself is in EXCLUDED_FIELDS",
         "EXCLUDED_KIND_SIBLING": "Sibling 'kind' field has enum values but is excluded from walking",
@@ -804,7 +899,7 @@ def generate_report(expected, detected, missing) -> str:
     for cat, edges in sorted(categories.items(), key=lambda x: len(x[1]), reverse=True):
         impact = len(edges)
         if cat == "DEPTH_LIMIT":
-            effort, action = "Low", "Change `max_depth=5` to `max_depth=8` in schema_walker.py"
+            effort, action = "Low", f"Increase max_depth in schema_walker.py (currently {PIPELINE_MAX_DEPTH})"
         elif cat in ("EXCLUDED_ANCESTOR", "EXCLUDED_FIELD_SELF"):
             effort, action = "Low", "Remove 'selector' from EXCLUDED_FIELDS or add context-aware bypass"
         elif cat == "EXCLUDED_KIND_SIBLING":
@@ -886,24 +981,22 @@ def generate_report(expected, detected, missing) -> str:
     # ── 7. Key Architectural Insights ──
     lines.append("## 7. Key Architectural Insights")
     lines.append("")
-    lines.append("### The Three Systemic Gaps")
+    lines.append("### Applied Fixes (schema_walker.py + ref_detector.py)")
     lines.append("")
-    lines.append("1. **`kind` in EXCLUDED_FIELDS** (Traefik impact): The walker excludes `kind` at every")
-    lines.append("   level to avoid confusion with the K8s envelope `kind` field. But inside array items")
-    lines.append("   like `routes[].services[]`, the `kind` field carries a discriminator enum")
-    lines.append("   (`[\"Service\", \"TraefikService\"]`). The `detect_enum_kind` detector never sees it.")
-    lines.append("   Fix: exempt `kind` from exclusion when it's inside array items at depth > 1,")
-    lines.append("   or read sibling schemas from the parent without requiring the walker to yield them.")
+    lines.append("1. **`kind` exempted at depth > 1**: The walker now allows `kind` fields at deeper")
+    lines.append("   levels (e.g., `routes[].services[].kind` with enum `[\"Service\", \"TraefikService\"]`).")
+    lines.append("   Only root-level `kind` (K8s envelope) is excluded.")
     lines.append("")
-    lines.append("2. **`selector` in EXCLUDED_FIELDS** (PushSecret impact): PushSecret.spec.selector")
-    lines.append("   contains `secret.name` (ref to Secret) and `generatorRef` (ref to generator).")
-    lines.append("   Both are blocked because `selector` is excluded.")
-    lines.append("   Fix: remove `selector` from EXCLUDED_FIELDS or add depth/context awareness.")
+    lines.append("2. **`selector` removed from EXCLUDED_FIELDS**: Unblocks PushSecret.spec.selector")
+    lines.append("   subtree including `secret.name` and `generatorRef`. Label selectors don't")
+    lines.append("   trigger ref detection anyway, so removal is safe.")
     lines.append("")
-    lines.append("3. **max_depth=5 vs. provider schemas** (SecretStore/ClusterSecretStore impact):")
-    lines.append("   Provider auth chains in external-secrets regularly nest to depth 6-7.")
-    lines.append("   The walker stops at depth 5, missing serviceAccountRef and other refs.")
-    lines.append("   Fix: increase max_depth to 7 or 8 (low risk, ~20% more fields walked).")
+    lines.append(f"3. **max_depth increased to {PIPELINE_MAX_DEPTH}**: Covers external-secrets provider")
+    lines.append("   auth chains that nest to depth 6-7.")
+    lines.append("")
+    lines.append("4. **SecretKeySelector `optional` field**: The `detect_secret_key_selector` detector")
+    lines.append("   now accepts the standard K8s `optional: boolean` field alongside `key`, `name`,")
+    lines.append("   and `namespace`. Previously rejected Prometheus-style SecretKeySelectors.")
     lines.append("")
 
     return "\n".join(lines)
@@ -913,6 +1006,8 @@ def main():
     print("=" * 60, file=sys.stderr)
     print("CRD Edge Detection Audit", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
+    print(f"Discovered {len(SPECS)} services: {', '.join(sorted(SPECS.keys()))}", file=sys.stderr)
+    print(f"Discovered {len(CRD_KINDS)} CRD Kinds", file=sys.stderr)
 
     expected, detected, missing = run_audit()
     report = generate_report(expected, detected, missing)
