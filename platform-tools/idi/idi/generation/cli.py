@@ -12,9 +12,12 @@ that thread a :class:`GeneratorContext` through the call chain.
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 from idi.generation.context import GeneratorContext
 from idi.generation.dep_adapters import DepAdapterRegistry, OperationInfo as DepOpInfo
@@ -157,26 +160,6 @@ def _generate_json_v2(
     dep_registry = DepAdapterRegistry()
     known_resources = get_all_resource_names(ctx, include_non_post=True)
 
-    # Build resource→operations map for target operation resolution.
-    # When a dep adapter targets "create" but the resource doesn't have one,
-    # fall back to the best available operation.
-    _OPERATION_PREFERENCE = ("create", "list", "replace", "update", "retrieve")
-    resource_ops: Dict[str, set] = {}
-    for res_name, res_operations in resources.items():
-        resource_ops[res_name] = {
-            op_data["op_info"]["operation"] for op_data in res_operations
-        }
-
-    def _resolve_target_operation(target_resource: str, desired_op: str) -> str:
-        """Resolve to the best available operation for a target resource."""
-        available = resource_ops.get(target_resource)
-        if available is None or desired_op in (available or set()):
-            return desired_op
-        for fallback in _OPERATION_PREFERENCE:
-            if fallback in available:
-                return fallback
-        return desired_op  # keep original if nothing matches
-
     for resource, operations in resources.items():
         seen: set = set()
         v2_operations: List[Dict[str, Any]] = []
@@ -205,7 +188,7 @@ def _generate_json_v2(
             # -- Detect dependencies via adapter registry --------------------
             params_raw = extract_parameters(ctx, operation_obj, op_data["path_params"])
             body_schema = {}
-            if op_type in ("create", "update", "replace") and params_raw.get("body"):
+            if params_raw.get("body"):
                 body_schema = params_raw["body"].get("schema", {})
 
             api_path = op_info.get("path", "")
@@ -226,29 +209,35 @@ def _generate_json_v2(
                 dep_op, ctx.schema, known_resources,
             )
 
-            depends_on: List[Dict[str, Any]] = [
-                {
-                    "path": f"{d.target_service or ctx.api_name}/{d.target_resource}/{_resolve_target_operation(d.target_resource, d.target_operation)}",
+            depends_on: List[Dict[str, Any]] = []
+            validated_deps: list = []
+            for d in deps_detected:
+                dep_path = f"{d.target_service or ctx.api_name}/{d.target_resource}/{d.target_operation}"
+                # Cross-service deps bypass validation (can't check other services)
+                if not d.target_service and dep_path not in ctx.generated_skill_paths:
+                    logger.debug("Dropping phantom target: %s (field=%s)", dep_path, d.field)
+                    continue
+                validated_deps.append(d)
+                depends_on.append({
+                    "path": dep_path,
                     "source": d.source,
                     "field": d.field,
                     "type": "unknown",
                     "fact_ref": d.fact_ref,
                     "lineage_type": d.lineage_type,
                     "discriminator_value": d.discriminator_value,
-                }
-                for d in deps_detected
-            ]
+                })
 
-            # Build field_refs_map and all_field_refs for downstream use.
+            # Build field_refs_map and all_field_refs from validated deps only.
             field_refs_map: Dict[str, str] = {}
-            for d in deps_detected:
+            for d in validated_deps:
                 fn = camel_to_snake(d.field)
                 if d.fact_ref and fn not in field_refs_map:
                     field_refs_map[fn] = d.fact_ref
 
             all_field_refs.extend(
                 {"field": d.field, "target_resource": d.target_resource, "fact_ref": d.fact_ref}
-                for d in deps_detected
+                for d in validated_deps
             )
 
             # -- Add path parameters as request fields ---------------------

@@ -1032,3 +1032,162 @@ class TestDepthConfidenceDecay:
         f9 = next((f for f in fields if f.depth == 9), None)
         assert f9 is not None
         assert f9.depth_confidence == pytest.approx(0.9)
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint memoization (section-11)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoization:
+    """Tests for fingerprint-based schema memoization in the walker."""
+
+    def test_same_shape_different_depths_yields_same_fields(self):
+        """Same schema shape at depth 3 and depth 10 yields identical field
+        structure (names and relative paths), but different depth_confidence."""
+        leaf_shape = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "key": {"type": "string"},
+            },
+        }
+        deep = leaf_shape
+        for level_name in reversed(
+            ["a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"]
+        ):
+            deep = {
+                "type": "object",
+                "properties": {level_name: deep},
+            }
+        props = {
+            "shallow": {
+                "type": "object",
+                "properties": {"beta": leaf_shape},
+            },
+            "deep_root": deep,
+        }
+        fields = list(walk_crd_schema(
+            props, max_depth=12,
+            full_confidence_depth=8, depth_decay=0.9,
+        ))
+        shallow_name = [
+            f for f in fields
+            if f.name == "name" and "shallow" in f.path
+        ]
+        deep_name = [
+            f for f in fields
+            if f.name == "name" and "deep_root" in f.path
+        ]
+        assert len(shallow_name) >= 1
+        assert len(deep_name) >= 1
+        assert shallow_name[0].depth_confidence == 1.0
+        assert deep_name[0].depth_confidence < 1.0
+
+    def test_memoization_produces_correct_relative_paths(self):
+        """Memoized replay adjusts prefix correctly so field paths are
+        accurate at the replay site."""
+        leaf_shape = {
+            "type": "object",
+            "properties": {
+                "secretName": {"type": "string"},
+                "port": {"type": "integer"},
+            },
+        }
+        props = {
+            "primary": leaf_shape,
+            "secondary": leaf_shape,
+        }
+        fields = list(walk_crd_schema(props))
+        primary_fields = {
+            f.name for f in fields if f.path.startswith("spec.primary.")
+        }
+        secondary_fields = {
+            f.name for f in fields if f.path.startswith("spec.secondary.")
+        }
+        assert primary_fields == {"secretName", "port"}
+        assert secondary_fields == {"secretName", "port"}
+
+    def test_cache_is_per_call(self):
+        """Cache from one walk_crd_schema call does not leak to the next."""
+        leaf = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+        }
+        fields_1 = list(walk_crd_schema({"a": leaf}))
+        fields_2 = list(walk_crd_schema({"b": leaf}))
+        paths_1 = {f.path for f in fields_1}
+        paths_2 = {f.path for f in fields_2}
+        assert "spec.a" in paths_1
+        assert "spec.b" in paths_2
+        assert "spec.b" not in paths_1
+        assert "spec.a" not in paths_2
+
+    def test_recursive_generators_memoized(self):
+        """Recursive ApplicationSet-like generators do not cause exponential
+        walk. The same generator shape encountered at multiple depths is
+        replayed from cache."""
+        git_shape = {
+            "type": "object",
+            "properties": {
+                "repoURL": {"type": "string"},
+                "path": {"type": "string"},
+            },
+        }
+        generator_item = {
+            "type": "object",
+            "properties": {
+                "git": git_shape,
+            },
+        }
+        outer_generator_item = {
+            "type": "object",
+            "properties": {
+                "git": git_shape,
+                "matrix": {
+                    "type": "object",
+                    "properties": {
+                        "generators": {
+                            "type": "array",
+                            "items": generator_item,
+                        },
+                    },
+                },
+            },
+        }
+        props = {
+            "generators": {
+                "type": "array",
+                "items": outer_generator_item,
+            },
+        }
+        fields = list(walk_crd_schema(props, max_depth=12))
+        repo_fields = [f for f in fields if f.name == "repoURL"]
+        assert len(repo_fields) >= 2
+
+    def test_performance_memoized_vs_depth_increase(self):
+        """Wide, deep schema with repeated shapes completes quickly
+        thanks to memoization."""
+        import time
+
+        leaf = {
+            "type": "object",
+            "properties": {f"f{i}": {"type": "string"} for i in range(5)},
+        }
+        level = leaf
+        for i in range(10):
+            level = {
+                "type": "object",
+                "properties": {
+                    f"branch_a_{i}": level,
+                    f"branch_b_{i}": level,
+                },
+            }
+        props = {"root": level}
+
+        start = time.perf_counter()
+        fields = list(walk_crd_schema(props, max_depth=12))
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 5.0
+        assert len(fields) > 0

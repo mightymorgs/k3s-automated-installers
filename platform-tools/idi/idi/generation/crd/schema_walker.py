@@ -114,6 +114,36 @@ class WalkedField:
     sibling_names: frozenset[str] = frozenset()  # Parent object's property names
 
 
+def _compute_schema_fingerprint(
+    properties: dict[str, dict],
+    required: list[str] | None = None,
+) -> str:
+    """Compute a structural fingerprint from schema properties.
+
+    Returns sorted name:type pairs with ? suffix for optional properties.
+    Example: "key:string?,name:string,namespace:string?"
+
+    Local copy of ref_detector.compute_schema_fingerprint to avoid
+    circular imports (ref_detector imports from schema_walker).
+    """
+    if not properties:
+        return ""
+    required_set = set(required) if required else set()
+    parts: list[str] = []
+    for prop_name in sorted(properties.keys()):
+        prop_schema = properties[prop_name]
+        prop_type = prop_schema.get("type", "string") if isinstance(prop_schema, dict) else "string"
+        suffix = "" if prop_name in required_set else "?"
+        parts.append(f"{prop_name}:{prop_type}{suffix}")
+    return ",".join(parts)
+
+
+# Type alias for the memoization cache.
+# Key: fingerprint string
+# Value: list of (relative_path, depth_offset, field_schema, is_array_item, required, sibling_names) tuples
+_CacheEntry = list[tuple[str, int, dict, bool, bool, frozenset]]
+
+
 def walk_crd_schema(
     properties: dict[str, Any],
     required: list[str] | None = None,
@@ -123,6 +153,9 @@ def walk_crd_schema(
     depth_decay: float = 0.9,
 ) -> Iterator[WalkedField]:
     """Recursively yield every field in a CRD spec schema.
+
+    Uses fingerprint-based memoization to avoid re-walking identical
+    sub-schema shapes. Cache is per-call (not shared across invocations).
 
     Args:
         properties: The properties dict from the spec schema.
@@ -135,6 +168,7 @@ def walk_crd_schema(
     Yields:
         WalkedField for each property at every level.
     """
+    cache: dict[str, _CacheEntry] = {}
     yield from _walk_recursive(
         properties=properties,
         required=required or [],
@@ -146,6 +180,7 @@ def walk_crd_schema(
         skip_status_in_excluded=True,
         full_confidence_depth=full_confidence_depth,
         depth_decay=depth_decay,
+        cache=cache,
     )
 
 
@@ -168,6 +203,7 @@ def walk_crd_status(
     Yields:
         WalkedField for each status property.
     """
+    cache: dict[str, _CacheEntry] = {}
     yield from _walk_recursive(
         properties=status_properties,
         required=[],
@@ -177,7 +213,43 @@ def walk_crd_status(
         is_array_item=False,
         skip_envelope=False,
         skip_status_in_excluded=False,
+        cache=cache,
     )
+
+
+def _replay_cached(
+    cached: _CacheEntry,
+    prefix: str,
+    base_depth: int,
+    max_depth: int,
+    full_confidence_depth: int,
+    depth_decay: float,
+) -> Iterator[WalkedField]:
+    """Replay cached fields with adjusted paths and recomputed depth_confidence."""
+    for rel_path, depth_offset, schema, cached_is_array, cached_required, cached_siblings in cached:
+        actual_depth = base_depth + depth_offset
+        if actual_depth > max_depth:
+            continue
+        actual_path = f"{prefix}.{rel_path}" if rel_path else prefix
+        # Recompute depth_confidence from actual depth at replay site
+        if actual_depth <= full_confidence_depth:
+            dc = 1.0
+        else:
+            dc = depth_decay ** (actual_depth - full_confidence_depth)
+        # Derive parent_path from actual_path
+        dot_idx = actual_path.rfind(".")
+        parent = actual_path[:dot_idx] if dot_idx > 0 else prefix
+        yield WalkedField(
+            path=actual_path,
+            name=actual_path.rsplit(".", 1)[-1],
+            schema=schema,
+            depth=actual_depth,
+            is_array_item=cached_is_array,
+            required=cached_required,
+            parent_path=parent,
+            sibling_names=cached_siblings,
+            depth_confidence=dc,
+        )
 
 
 def _walk_recursive(
@@ -191,6 +263,7 @@ def _walk_recursive(
     skip_status_in_excluded: bool,
     full_confidence_depth: int = 8,
     depth_decay: float = 0.9,
+    cache: dict[str, _CacheEntry] | None = None,
 ) -> Iterator[WalkedField]:
     """Internal recursive walker.
 
@@ -205,6 +278,7 @@ def _walk_recursive(
         skip_status_in_excluded: Whether to skip "status" from EXCLUDED_FIELDS.
         full_confidence_depth: Depth up to which depth_confidence stays 1.0.
         depth_decay: Confidence multiplier per level beyond full_confidence_depth.
+        cache: Per-call fingerprint memoization cache.
     """
     if current_depth > max_depth:
         return
@@ -261,14 +335,16 @@ def _walk_recursive(
 
         # Recurse into nested objects.
         if effective_schema.get("type") == "object" and "properties" in effective_schema:
-            yield from _walk_recursive(
-                properties=effective_schema["properties"],
-                required=effective_schema.get("required", []),
+            child_props = effective_schema["properties"]
+            child_required = effective_schema.get("required", [])
+            yield from _walk_subtree_cached(
+                cache=cache,
+                child_props=child_props,
+                child_required=child_required,
                 prefix=field_path,
                 max_depth=max_depth,
                 current_depth=current_depth + 1,
                 is_array_item=is_array_item,
-                skip_envelope=False,
                 skip_status_in_excluded=skip_status_in_excluded,
                 full_confidence_depth=full_confidence_depth,
                 depth_decay=depth_decay,
@@ -280,15 +356,116 @@ def _walk_recursive(
             if isinstance(items, dict):
                 items = _flatten_composed(items)
             if isinstance(items, dict) and "properties" in items:
-                yield from _walk_recursive(
-                    properties=items["properties"],
-                    required=items.get("required", []),
+                child_props = items["properties"]
+                child_required = items.get("required", [])
+                yield from _walk_subtree_cached(
+                    cache=cache,
+                    child_props=child_props,
+                    child_required=child_required,
                     prefix=field_path,
                     max_depth=max_depth,
                     current_depth=current_depth + 1,
                     is_array_item=True,
-                    skip_envelope=False,
                     skip_status_in_excluded=skip_status_in_excluded,
                     full_confidence_depth=full_confidence_depth,
                     depth_decay=depth_decay,
                 )
+
+
+def _walk_subtree_cached(
+    cache: dict[str, _CacheEntry] | None,
+    child_props: dict[str, Any],
+    child_required: list[str],
+    prefix: str,
+    max_depth: int,
+    current_depth: int,
+    is_array_item: bool,
+    skip_status_in_excluded: bool,
+    full_confidence_depth: int,
+    depth_decay: float,
+) -> Iterator[WalkedField]:
+    """Walk a subtree with fingerprint-based memoization.
+
+    On first encounter of a fingerprint, walks normally and caches the results
+    as relative entries. On subsequent encounters, replays from cache with
+    adjusted paths and recomputed depth_confidence.
+    """
+    if cache is None:
+        # No cache provided — fall through to normal recursion.
+        yield from _walk_recursive(
+            properties=child_props,
+            required=child_required,
+            prefix=prefix,
+            max_depth=max_depth,
+            current_depth=current_depth,
+            is_array_item=is_array_item,
+            skip_envelope=False,
+            skip_status_in_excluded=skip_status_in_excluded,
+            full_confidence_depth=full_confidence_depth,
+            depth_decay=depth_decay,
+            cache=cache,
+        )
+        return
+
+    fingerprint = _compute_schema_fingerprint(child_props, child_required)
+
+    # Don't cache empty fingerprints (no benefit, could cause spurious hits).
+    if not fingerprint:
+        yield from _walk_recursive(
+            properties=child_props,
+            required=child_required,
+            prefix=prefix,
+            max_depth=max_depth,
+            current_depth=current_depth,
+            is_array_item=is_array_item,
+            skip_envelope=False,
+            skip_status_in_excluded=skip_status_in_excluded,
+            full_confidence_depth=full_confidence_depth,
+            depth_decay=depth_decay,
+            cache=cache,
+        )
+        return
+
+    if fingerprint in cache:
+        # Replay from cache with adjusted paths and recomputed depth_confidence.
+        yield from _replay_cached(
+            cached=cache[fingerprint],
+            prefix=prefix,
+            base_depth=current_depth,
+            max_depth=max_depth,
+            full_confidence_depth=full_confidence_depth,
+            depth_decay=depth_decay,
+        )
+        return
+
+    # First encounter — walk normally, collect results, and cache.
+    results: _CacheEntry = []
+    for field in _walk_recursive(
+        properties=child_props,
+        required=child_required,
+        prefix=prefix,
+        max_depth=max_depth,
+        current_depth=current_depth,
+        is_array_item=is_array_item,
+        skip_envelope=False,
+        skip_status_in_excluded=skip_status_in_excluded,
+        full_confidence_depth=full_confidence_depth,
+        depth_decay=depth_decay,
+        cache=cache,
+    ):
+        yield field
+        # Store relative path (strip prefix) and depth offset for replay.
+        if field.path.startswith(prefix + "."):
+            rel_path = field.path[len(prefix) + 1:]
+        else:
+            rel_path = ""
+        depth_offset = field.depth - current_depth
+        results.append((
+            rel_path,
+            depth_offset,
+            field.schema,
+            field.is_array_item,
+            field.required,
+            field.sibling_names,
+        ))
+    cache[fingerprint] = results
