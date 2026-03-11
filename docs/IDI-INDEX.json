@@ -1,11 +1,11 @@
 {
   "package": "idi",
-  "generated_at": "2026-03-09",
-  "total_modules": 53,
+  "generated_at": "2026-03-11",
+  "total_modules": 60,
   "cgc_mode": false,
   "git": {
-    "commit": "e7b739932b9f7b8142129203db20f3312d1eb2e9",
-    "branch": "main",
+    "commit": "52a2beb032ca806111beb827a54bf4fa655bd763",
+    "branch": "feat/crd-implementation",
     "dirty": true
   },
   "surface_dirs": [
@@ -93,12 +93,6 @@
         "tags": []
       },
       {
-        "path": "generation/adapters/kubernetes_crd.py",
-        "group": "generation/adapters/ — Schema Family Adapters",
-        "docstring": "Kubernetes CRD schema adapter.",
-        "tags": []
-      },
-      {
         "path": "generation/adapters/openapi_rest.py",
         "group": "generation/adapters/ — Schema Family Adapters",
         "docstring": "OpenAPI REST schema adapter for FK detection.",
@@ -151,7 +145,13 @@
       {
         "path": "generation/crd/field_classifier.py",
         "group": "generation/crd/ — CRD Schema Processing",
-        "docstring": "RESTler-adapted field classifier for CRD schemas.",
+        "docstring": "CRD field classifier — delegates to schema_walker + ref_detector pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/crd/kind_registry.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "Unified Kind registry for CRD field classification.",
         "tags": []
       },
       {
@@ -161,15 +161,35 @@
         "tags": []
       },
       {
+        "path": "generation/crd/olm_loader.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "OLM CSV loader — fetch OperatorHub.io CSV data with disk caching.",
+        "tags": []
+      },
+      {
         "path": "generation/crd/output_writer.py",
         "group": "generation/crd/ — CRD Schema Processing",
         "docstring": "CRD skill JSON output writer.",
         "tags": []
       },
       {
+        "path": "generation/crd/ref_detector.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "Multi-strategy ref/output detection for CRD schemas.",
+        "tags": []
+      },
+      {
         "path": "generation/crd/schema_loader.py",
         "group": "generation/crd/ — CRD Schema Processing",
         "docstring": "CRD schema loader — fetch ArtifactHub Helm charts, extract CRD schemas + values.yaml.",
+        "tags": [
+          "model"
+        ]
+      },
+      {
+        "path": "generation/crd/schema_walker.py",
+        "group": "generation/crd/ — CRD Schema Processing",
+        "docstring": "Recursive CRD schema traversal.",
         "tags": [
           "model"
         ]
@@ -210,7 +230,7 @@
       {
         "path": "generation/dep_adapters/crd_dep.py",
         "group": "generation/dep_adapters/ — Dependency Detection Adapters",
-        "docstring": "CRD bridge dep adapter -- delegates to KubernetesCrdAdapter.",
+        "docstring": "CRD dep adapter — orchestrates schema walker + ref detector.",
         "tags": []
       },
       {
@@ -244,6 +264,12 @@
         "tags": []
       },
       {
+        "path": "generation/dep_adapters/olm_deps.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "OLM dependency adapter — translates OLM CSV required GVKs into Dependencies.",
+        "tags": []
+      },
+      {
         "path": "generation/dep_adapters/output_detection.py",
         "group": "generation/dep_adapters/ — Dependency Detection Adapters",
         "docstring": "Response ID field output detection for write operations.",
@@ -259,6 +285,12 @@
         "path": "generation/dep_adapters/query_fk.py",
         "group": "generation/dep_adapters/ — Dependency Detection Adapters",
         "docstring": "Query parameter FK detection adapter.",
+        "tags": []
+      },
+      {
+        "path": "generation/dep_adapters/rbac_deps.py",
+        "group": "generation/dep_adapters/ — Dependency Detection Adapters",
+        "docstring": "RBAC dependency adapter — extracts operator-resource edges from Helm chart RBAC rules.",
         "tags": []
       },
       {
@@ -335,6 +367,18 @@
         "path": "generation/resource_namer.py",
         "group": "Generation — OpenAPI-to-Skill Pipeline",
         "docstring": "Resource naming logic for the skill generation pipeline.",
+        "tags": []
+      },
+      {
+        "path": "generation/scripts/__init__.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Package init for scripts/.",
+        "tags": []
+      },
+      {
+        "path": "generation/scripts/build_shape_catalog.py",
+        "group": "Generation — OpenAPI-to-Skill Pipeline",
+        "docstring": "Build a cross-CRD shape catalog from confirmed reference fingerprints.",
         "tags": []
       },
       {
@@ -577,42 +621,6 @@
         "import_path": "idi.generation.adapters.github_openapi:GitHubOpenApiAdapter",
         "line_start": 195,
         "line_end": 238
-      },
-      {
-        "name": "KubernetesCrdAdapter",
-        "file": "generation/adapters/kubernetes_crd.py",
-        "kind": "class",
-        "tags": [],
-        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
-        "line_start": 130,
-        "line_end": 378
-      },
-      {
-        "name": "KubernetesCrdAdapter.extract_field_refs",
-        "file": "generation/adapters/kubernetes_crd.py",
-        "kind": "method",
-        "tags": [],
-        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
-        "line_start": 143,
-        "line_end": 246
-      },
-      {
-        "name": "KubernetesCrdAdapter.extract_outputs",
-        "file": "generation/adapters/kubernetes_crd.py",
-        "kind": "method",
-        "tags": [],
-        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
-        "line_start": 309,
-        "line_end": 366
-      },
-      {
-        "name": "KubernetesCrdAdapter.is_namespaced",
-        "file": "generation/adapters/kubernetes_crd.py",
-        "kind": "method",
-        "tags": [],
-        "import_path": "idi.generation.adapters.kubernetes_crd:KubernetesCrdAdapter",
-        "line_start": 368,
-        "line_end": 378
       },
       {
         "name": "OpenApiRestAdapter",
@@ -932,8 +940,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.crd.field_classifier:ClassifiedField",
-        "line_start": 26,
-        "line_end": 37
+        "line_start": 21,
+        "line_end": 35
       },
       {
         "name": "classify_fields",
@@ -941,8 +949,116 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.field_classifier:classify_fields",
+        "line_start": 38,
+        "line_end": 102
+      },
+      {
+        "name": "KindEntry",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindEntry",
+        "line_start": 15,
+        "line_end": 21
+      },
+      {
+        "name": "KindRegistry",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
         "line_start": 40,
-        "line_end": 78
+        "line_end": 290
+      },
+      {
+        "name": "KindRegistry.all_kinds",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 275,
+        "line_end": 277
+      },
+      {
+        "name": "KindRegistry.all_plurals",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 279,
+        "line_end": 281
+      },
+      {
+        "name": "KindRegistry.core_plurals",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 283,
+        "line_end": 290
+      },
+      {
+        "name": "KindRegistry.group_for_kind",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 259,
+        "line_end": 264
+      },
+      {
+        "name": "KindRegistry.is_ref_field",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 138,
+        "line_end": 199
+      },
+      {
+        "name": "KindRegistry.kind_to_plural",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 248,
+        "line_end": 253
+      },
+      {
+        "name": "KindRegistry.kinds_for_group",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 266,
+        "line_end": 273
+      },
+      {
+        "name": "KindRegistry.plural_to_kind",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 255,
+        "line_end": 257
+      },
+      {
+        "name": "KindRegistry.register",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 84,
+        "line_end": 107
+      },
+      {
+        "name": "KindRegistry.register_from_crd",
+        "file": "generation/crd/kind_registry.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.kind_registry:KindRegistry",
+        "line_start": 124,
+        "line_end": 136
       },
       {
         "name": "CrdDependency",
@@ -981,13 +1097,40 @@
         "line_end": 113
       },
       {
-        "name": "build_crd_skill_json",
+        "name": "GVKRef",
+        "file": "generation/crd/olm_loader.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.olm_loader:GVKRef",
+        "line_start": 30,
+        "line_end": 36
+      },
+      {
+        "name": "extract_gvk_dependencies",
+        "file": "generation/crd/olm_loader.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.olm_loader:extract_gvk_dependencies",
+        "line_start": 134,
+        "line_end": 164
+      },
+      {
+        "name": "fetch_olm_csv",
+        "file": "generation/crd/olm_loader.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.olm_loader:fetch_olm_csv",
+        "line_start": 75,
+        "line_end": 131
+      },
+      {
+        "name": "build_decomposed_skill",
         "file": "generation/crd/output_writer.py",
         "kind": "function",
         "tags": [],
-        "import_path": "idi.generation.crd.output_writer:build_crd_skill_json",
-        "line_start": 43,
-        "line_end": 107
+        "import_path": "idi.generation.crd.output_writer:build_decomposed_skill",
+        "line_start": 142,
+        "line_end": 304
       },
       {
         "name": "build_helm_spec_json",
@@ -995,17 +1138,17 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.output_writer:build_helm_spec_json",
-        "line_start": 110,
-        "line_end": 159
+        "line_start": 383,
+        "line_end": 432
       },
       {
-        "name": "write_crd_skill",
+        "name": "write_decomposed_skill",
         "file": "generation/crd/output_writer.py",
         "kind": "function",
         "tags": [],
-        "import_path": "idi.generation.crd.output_writer:write_crd_skill",
-        "line_start": 162,
-        "line_end": 188
+        "import_path": "idi.generation.crd.output_writer:write_decomposed_skill",
+        "line_start": 307,
+        "line_end": 375
       },
       {
         "name": "write_helm_spec",
@@ -1013,8 +1156,215 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.output_writer:write_helm_spec",
-        "line_start": 191,
-        "line_end": 219
+        "line_start": 435,
+        "line_end": 463
+      },
+      {
+        "name": "CatalogEntry",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:CatalogEntry",
+        "line_start": 119,
+        "line_end": 126
+      },
+      {
+        "name": "ManifestFlags",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:ManifestFlags",
+        "line_start": 43,
+        "line_end": 52
+      },
+      {
+        "name": "ShapeCatalog",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:ShapeCatalog",
+        "line_start": 130,
+        "line_end": 173
+      },
+      {
+        "name": "WorkloadFingerprint",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:WorkloadFingerprint",
+        "line_start": 60,
+        "line_end": 67
+      },
+      {
+        "name": "classify_walked_field",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:classify_walked_field",
+        "line_start": 1449,
+        "line_end": 1627
+      },
+      {
+        "name": "compute_schema_fingerprint",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:compute_schema_fingerprint",
+        "line_start": 176,
+        "line_end": 194
+      },
+      {
+        "name": "detect_apigroup_literal",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_apigroup_literal",
+        "line_start": 964,
+        "line_end": 1010
+      },
+      {
+        "name": "detect_cataloged_shape",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_cataloged_shape",
+        "line_start": 376,
+        "line_end": 413
+      },
+      {
+        "name": "detect_constraint_fk",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_constraint_fk",
+        "line_start": 425,
+        "line_end": 489
+      },
+      {
+        "name": "detect_embedded_workload",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_embedded_workload",
+        "line_start": 533,
+        "line_end": 583
+      },
+      {
+        "name": "detect_enum_kind",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_enum_kind",
+        "line_start": 1083,
+        "line_end": 1159
+      },
+      {
+        "name": "detect_example_kinds",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_example_kinds",
+        "line_start": 895,
+        "line_end": 961
+      },
+      {
+        "name": "detect_kubernetes_extensions",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_kubernetes_extensions",
+        "line_start": 297,
+        "line_end": 373
+      },
+      {
+        "name": "detect_namespace",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_namespace",
+        "line_start": 1238,
+        "line_end": 1246
+      },
+      {
+        "name": "detect_passthrough_manifest",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_passthrough_manifest",
+        "line_start": 1013,
+        "line_end": 1080
+      },
+      {
+        "name": "detect_ref",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_ref",
+        "line_start": 605,
+        "line_end": 708
+      },
+      {
+        "name": "detect_ref_tuple",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_ref_tuple",
+        "line_start": 743,
+        "line_end": 852
+      },
+      {
+        "name": "detect_scale_subresource",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_scale_subresource",
+        "line_start": 215,
+        "line_end": 271
+      },
+      {
+        "name": "detect_status_output",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_status_output",
+        "line_start": 1162,
+        "line_end": 1235
+      },
+      {
+        "name": "split_camel_case",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:split_camel_case",
+        "line_start": 1249,
+        "line_end": 1257
+      },
+      {
+        "name": "suppress_false_positives",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:suppress_false_positives",
+        "line_start": 1365,
+        "line_end": 1405
+      },
+      {
+        "name": "ShapeCatalog.load",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:ShapeCatalog",
+        "line_start": 136,
+        "line_end": 169
+      },
+      {
+        "name": "ShapeCatalog.lookup",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:ShapeCatalog",
+        "line_start": 171,
+        "line_end": 173
       },
       {
         "name": "extract_crds_from_chart",
@@ -1061,13 +1411,46 @@
         "line_end": 27
       },
       {
+        "name": "WalkedField",
+        "file": "generation/crd/schema_walker.py",
+        "kind": "class",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_walker:WalkedField",
+        "line_start": 47,
+        "line_end": 56
+      },
+      {
+        "name": "walk_crd_schema",
+        "file": "generation/crd/schema_walker.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_walker:walk_crd_schema",
+        "line_start": 59,
+        "line_end": 87
+      },
+      {
+        "name": "walk_crd_status",
+        "file": "generation/crd/schema_walker.py",
+        "kind": "function",
+        "tags": [
+          "model"
+        ],
+        "import_path": "idi.generation.crd.schema_walker:walk_crd_status",
+        "line_start": 90,
+        "line_end": 118
+      },
+      {
         "name": "classify_name_field",
         "file": "generation/crd/side_effect_registry.py",
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.side_effect_registry:classify_name_field",
-        "line_start": 76,
-        "line_end": 103
+        "line_start": 83,
+        "line_end": 110
       },
       {
         "name": "get_side_effects",
@@ -1075,8 +1458,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.side_effect_registry:get_side_effects",
-        "line_start": 56,
-        "line_end": 58
+        "line_start": 63,
+        "line_end": 65
       },
       {
         "name": "is_output_by_description",
@@ -1084,8 +1467,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.side_effect_registry:is_output_by_description",
-        "line_start": 61,
-        "line_end": 73
+        "line_start": 68,
+        "line_end": 80
       },
       {
         "name": "build_crd_paths",
@@ -1153,8 +1536,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.base:DepAdapter",
-        "line_start": 49,
-        "line_end": 68
+        "line_start": 50,
+        "line_end": 69
       },
       {
         "name": "Dependency",
@@ -1163,7 +1546,7 @@
         "tags": [],
         "import_path": "idi.generation.dep_adapters.base:Dependency",
         "line_start": 24,
-        "line_end": 35
+        "line_end": 36
       },
       {
         "name": "OperationInfo",
@@ -1180,8 +1563,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.base:Output",
-        "line_start": 39,
-        "line_end": 45
+        "line_start": 40,
+        "line_end": 46
       },
       {
         "name": "DepAdapter.detect_dependencies",
@@ -1189,8 +1572,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.base:DepAdapter",
-        "line_start": 57,
-        "line_end": 62
+        "line_start": 58,
+        "line_end": 63
       },
       {
         "name": "DepAdapter.detect_outputs",
@@ -1198,8 +1581,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.base:DepAdapter",
-        "line_start": 64,
-        "line_end": 68
+        "line_start": 65,
+        "line_end": 69
       },
       {
         "name": "DepAdapter.matches",
@@ -1207,8 +1590,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.base:DepAdapter",
-        "line_start": 55,
-        "line_end": 55
+        "line_start": 56,
+        "line_end": 56
       },
       {
         "name": "detect_body_deps",
@@ -1225,8 +1608,8 @@
         "kind": "attribute",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
-        "line_start": 39,
-        "line_end": 39
+        "line_start": 27,
+        "line_end": 27
       },
       {
         "name": "CrdDepAdapter.priority",
@@ -1234,8 +1617,8 @@
         "kind": "attribute",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
-        "line_start": 40,
-        "line_end": 40
+        "line_start": 28,
+        "line_end": 28
       },
       {
         "name": "CrdDepAdapter",
@@ -1243,8 +1626,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
-        "line_start": 36,
-        "line_end": 190
+        "line_start": 24,
+        "line_end": 296
       },
       {
         "name": "CrdDepAdapter.detect_dependencies",
@@ -1252,8 +1635,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
-        "line_start": 49,
-        "line_end": 76
+        "line_start": 46,
+        "line_end": 138
       },
       {
         "name": "CrdDepAdapter.detect_outputs",
@@ -1261,8 +1644,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
-        "line_start": 170,
-        "line_end": 190
+        "line_start": 140,
+        "line_end": 209
       },
       {
         "name": "CrdDepAdapter.matches",
@@ -1270,8 +1653,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.dep_adapters.crd_dep:CrdDepAdapter",
-        "line_start": 42,
-        "line_end": 47
+        "line_start": 39,
+        "line_end": 44
       },
       {
         "name": "DiscriminatorAdapter.name",
@@ -1562,6 +1945,60 @@
         "line_end": 34
       },
       {
+        "name": "OlmDepAdapter.name",
+        "file": "generation/dep_adapters/olm_deps.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.olm_deps:OlmDepAdapter",
+        "line_start": 25,
+        "line_end": 25
+      },
+      {
+        "name": "OlmDepAdapter.priority",
+        "file": "generation/dep_adapters/olm_deps.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.olm_deps:OlmDepAdapter",
+        "line_start": 26,
+        "line_end": 26
+      },
+      {
+        "name": "OlmDepAdapter",
+        "file": "generation/dep_adapters/olm_deps.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.olm_deps:OlmDepAdapter",
+        "line_start": 22,
+        "line_end": 101
+      },
+      {
+        "name": "OlmDepAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/olm_deps.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.olm_deps:OlmDepAdapter",
+        "line_start": 86,
+        "line_end": 93
+      },
+      {
+        "name": "OlmDepAdapter.detect_outputs",
+        "file": "generation/dep_adapters/olm_deps.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.olm_deps:OlmDepAdapter",
+        "line_start": 95,
+        "line_end": 101
+      },
+      {
+        "name": "OlmDepAdapter.matches",
+        "file": "generation/dep_adapters/olm_deps.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.olm_deps:OlmDepAdapter",
+        "line_start": 32,
+        "line_end": 37
+      },
+      {
         "name": "detect_outputs",
         "file": "generation/dep_adapters/output_detection.py",
         "kind": "function",
@@ -1587,6 +2024,78 @@
         "import_path": "idi.generation.dep_adapters.query_fk:detect_query_deps",
         "line_start": 55,
         "line_end": 122
+      },
+      {
+        "name": "RbacDepAdapter.name",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:RbacDepAdapter",
+        "line_start": 474,
+        "line_end": 474
+      },
+      {
+        "name": "RbacDepAdapter.priority",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "attribute",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:RbacDepAdapter",
+        "line_start": 475,
+        "line_end": 475
+      },
+      {
+        "name": "RbacDepAdapter",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "class",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:RbacDepAdapter",
+        "line_start": 471,
+        "line_end": 622
+      },
+      {
+        "name": "extract_rbac_edges",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:extract_rbac_edges",
+        "line_start": 175,
+        "line_end": 247
+      },
+      {
+        "name": "extract_webhook_dependencies",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:extract_webhook_dependencies",
+        "line_start": 300,
+        "line_end": 396
+      },
+      {
+        "name": "RbacDepAdapter.detect_dependencies",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:RbacDepAdapter",
+        "line_start": 607,
+        "line_end": 614
+      },
+      {
+        "name": "RbacDepAdapter.detect_outputs",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:RbacDepAdapter",
+        "line_start": 616,
+        "line_end": 622
+      },
+      {
+        "name": "RbacDepAdapter.matches",
+        "file": "generation/dep_adapters/rbac_deps.py",
+        "kind": "method",
+        "tags": [],
+        "import_path": "idi.generation.dep_adapters.rbac_deps:RbacDepAdapter",
+        "line_start": 481,
+        "line_end": 486
       },
       {
         "name": "DepAdapterRegistry",
@@ -2173,8 +2682,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.generate_all:cli",
-        "line_start": 392,
-        "line_end": 471
+        "line_start": 435,
+        "line_end": 514
       },
       {
         "name": "generate_all",
@@ -2182,8 +2691,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.generate_all:generate_all",
-        "line_start": 306,
-        "line_end": 349
+        "line_start": 331,
+        "line_end": 392
       },
       {
         "name": "generate_service",
@@ -2191,8 +2700,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.generate_all:generate_service",
-        "line_start": 58,
-        "line_end": 130
+        "line_start": 60,
+        "line_end": 134
       },
       {
         "name": "list_services",
@@ -2200,8 +2709,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.generate_all:list_services",
-        "line_start": 357,
-        "line_end": 384
+        "line_start": 400,
+        "line_end": 427
       },
       {
         "name": "load_manifest",
@@ -2209,8 +2718,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.generate_all:load_manifest",
-        "line_start": 26,
-        "line_end": 50
+        "line_start": 28,
+        "line_end": 52
       },
       {
         "name": "emit_field",
@@ -2337,6 +2846,15 @@
         "import_path": "idi.generation.resource_namer:strip_api_version_prefix",
         "line_start": 158,
         "line_end": 187
+      },
+      {
+        "name": "build_shape_catalog",
+        "file": "generation/scripts/build_shape_catalog.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.scripts.build_shape_catalog:build_shape_catalog",
+        "line_start": 92,
+        "line_end": 212
       },
       {
         "name": "create_context",

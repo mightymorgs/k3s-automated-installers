@@ -103,7 +103,10 @@ class CrdDepAdapter:
                 # Resolve target against known_resources.
                 target_plural = self.registry.kind_to_plural(classified.target_kind)
                 if not target_plural:
-                    continue
+                    # Derive fallback plural from Kind name for CRD Kinds
+                    # not yet in the registry (e.g., auto-discovery path
+                    # without a pre-populated registry).
+                    target_plural = self._derive_plural(classified.target_kind)
 
                 resolved, cross_service = self._resolve_target(
                     target_plural, known_resources,
@@ -228,6 +231,19 @@ class CrdDepAdapter:
         if lower_target in self.registry.core_plurals():
             return target, True
         return None, False
+
+    @staticmethod
+    def _derive_plural(kind: str) -> str:
+        """Derive a plural from a Kind name when not in the registry.
+
+        Simple heuristic: lowercase + "s". Handles common K8s patterns:
+        Issuer → issuers, Certificate → certificates. Edge cases like
+        Ingress → ingresses are covered by the bootstrap registry.
+        """
+        lower = kind.lower()
+        if lower.endswith("s"):
+            return lower + "es"
+        return lower + "s"
 
     @staticmethod
     def _extract_kind(body: dict[str, Any]) -> str:

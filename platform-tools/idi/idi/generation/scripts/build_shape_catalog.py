@@ -39,6 +39,56 @@ _SEED_SOURCES: frozenset[str] = frozenset({
 })
 
 
+def _collect_from_ref_entry(
+    ref_entry: Any,
+    source_kind: str,
+    data_points: list[tuple[str, str, str]],
+) -> None:
+    """Extract a fingerprint data point from a single ref entry dict."""
+    if not isinstance(ref_entry, dict):
+        return
+
+    source = ref_entry.get("source", ref_entry.get("detection_source", ""))
+    if source not in _SEED_SOURCES:
+        return
+
+    target_kind = ref_entry.get("target_kind", "")
+    if not target_kind:
+        return
+
+    # Build fingerprint from the ref's schema if available.
+    schema = ref_entry.get("schema", {})
+    if not isinstance(schema, dict) or not schema.get("properties"):
+        props: dict[str, dict] = {}
+        for fname in ("name", "namespace", "key", "kind", "apiGroup", "apiVersion"):
+            if fname in ref_entry:
+                props[fname] = {"type": "string"}
+        if not props:
+            return
+        required = ref_entry.get("required_fields", [])
+        fp = compute_schema_fingerprint(props, required)
+    else:
+        properties = schema["properties"]
+        required = schema.get("required", [])
+        fp = compute_schema_fingerprint(properties, required)
+
+    if fp:
+        data_points.append((fp, target_kind, source_kind))
+
+
+def _collect_ref_data_point(
+    ref_file: Path,
+    source_kind: str,
+    data_points: list[tuple[str, str, str]],
+) -> None:
+    """Read a decomposed ref/output file and collect its fingerprint."""
+    try:
+        ref_entry = json.loads(ref_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    _collect_from_ref_entry(ref_entry, source_kind, data_points)
+
+
 def build_shape_catalog(
     skills_dir: str = "catalog/skills/crd/",
     output_path: str = "catalog/shape_catalog.json",
@@ -55,52 +105,55 @@ def build_shape_catalog(
     # Collect (fingerprint, target_kind, source_crd_kind) tuples.
     data_points: list[tuple[str, str, str]] = []
 
-    # Walk all skill directories.
-    for ref_file in skills_path.rglob("*.json"):
+    # Walk all skill directories — supports both decomposed (v2.0) and
+    # monolithic (v1.0) formats.
+    for manifest_file in skills_path.rglob("manifest.json"):
         try:
-            data = json.loads(ref_file.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
 
-        if not isinstance(data, dict):
+        if not isinstance(manifest, dict):
             continue
 
-        # Look for ref entries in input_refs or output_declarations.
+        source_kind = manifest.get("kind", "")
+        kind_dir = manifest_file.parent
+
+        # Decomposed v2.0: read individual ref files from refs/ and outputs/.
+        for subdir in ("refs", "outputs"):
+            ref_dir = kind_dir / subdir
+            if not ref_dir.is_dir():
+                continue
+            for ref_file in ref_dir.iterdir():
+                if not ref_file.suffix == ".json":
+                    continue
+                _collect_ref_data_point(
+                    ref_file, source_kind, data_points,
+                )
+
+        # Also check for inline ref data in manifest.json itself
+        # (backward compatibility with monolithic-style manifests).
+        for section_key in ("input_refs", "output_declarations"):
+            for ref_entry in manifest.get(section_key, []):
+                _collect_from_ref_entry(ref_entry, source_kind, data_points)
+
+    # Also scan for monolithic v1.0 files (non-manifest JSON files).
+    for json_file in skills_path.rglob("*.json"):
+        if json_file.name == "manifest.json":
+            continue  # Already handled above.
+        # Skip files inside known decomposed subdirectories.
+        if any(p in ("refs", "outputs", "fields", "operations") for p in json_file.parts):
+            continue
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
         source_kind = data.get("kind", "")
         for section_key in ("input_refs", "output_declarations"):
             for ref_entry in data.get(section_key, []):
-                if not isinstance(ref_entry, dict):
-                    continue
-
-                # Check detection source.
-                source = ref_entry.get("source", ref_entry.get("detection_source", ""))
-                if source not in _SEED_SOURCES:
-                    continue
-
-                target_kind = ref_entry.get("target_kind", "")
-                if not target_kind:
-                    continue
-
-                # Build fingerprint from the ref's schema if available.
-                schema = ref_entry.get("schema", {})
-                if not isinstance(schema, dict) or not schema.get("properties"):
-                    # Try to build from the ref entry fields directly.
-                    # Minimal fingerprint from the entry's known fields.
-                    props: dict[str, dict] = {}
-                    for fname in ("name", "namespace", "key", "kind", "apiGroup", "apiVersion"):
-                        if fname in ref_entry:
-                            props[fname] = {"type": "string"}
-                    if not props:
-                        continue
-                    required = ref_entry.get("required_fields", [])
-                    fp = compute_schema_fingerprint(props, required)
-                else:
-                    properties = schema["properties"]
-                    required = schema.get("required", [])
-                    fp = compute_schema_fingerprint(properties, required)
-
-                if fp:
-                    data_points.append((fp, target_kind, source_kind))
+                _collect_from_ref_entry(ref_entry, source_kind, data_points)
 
     if not data_points:
         return _empty_catalog(output_path)
