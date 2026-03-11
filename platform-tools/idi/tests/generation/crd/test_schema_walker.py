@@ -633,3 +633,112 @@ class TestEdgeCases:
         optional = next(f for f in fields if f.name == "optional")
         assert match.required is True
         assert optional.required is False
+
+
+# ---------------------------------------------------------------------------
+# allOf / oneOf / anyOf composition handling
+# ---------------------------------------------------------------------------
+
+
+class TestComposedSchemaTraversal:
+    """Tests for allOf/oneOf/anyOf traversal in schema walker."""
+
+    def test_allof_properties_merged(self):
+        """Properties in allOf sub-schemas are traversed."""
+        props = {
+            "config": {
+                "allOf": [
+                    {
+                        "properties": {
+                            "secretRef": {"type": "object", "properties": {"name": {"type": "string"}}},
+                        },
+                    },
+                    {
+                        "properties": {
+                            "endpoint": {"type": "string"},
+                        },
+                    },
+                ],
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        names = {f.name for f in fields}
+        # config itself + its composed children
+        assert "config" in names
+        assert "secretRef" in names
+        assert "endpoint" in names
+
+    def test_single_oneof_unwrapped(self):
+        """oneOf with exactly 1 item is unwrapped."""
+        props = {
+            "provider": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "vault": {"type": "object", "properties": {"url": {"type": "string"}}},
+                        },
+                    },
+                ],
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        names = {f.name for f in fields}
+        assert "vault" in names
+
+    def test_multi_oneof_not_traversed(self):
+        """oneOf with multiple items is not merged (ambiguous)."""
+        props = {
+            "target": {
+                "oneOf": [
+                    {"type": "object", "properties": {"option_a": {"type": "string"}}},
+                    {"type": "object", "properties": {"option_b": {"type": "string"}}},
+                ],
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        names = {f.name for f in fields}
+        # Only the parent field, no children (ambiguous merge avoided)
+        assert "target" in names
+        assert "option_a" not in names
+        assert "option_b" not in names
+
+    def test_allof_with_existing_properties(self):
+        """allOf compositions merge with existing direct properties."""
+        props = {
+            "auth": {
+                "type": "object",
+                "properties": {
+                    "token": {"type": "string"},
+                },
+                "allOf": [
+                    {
+                        "properties": {
+                            "secretRef": {"type": "object", "properties": {"name": {"type": "string"}}},
+                        },
+                    },
+                ],
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        names = {f.name for f in fields}
+        assert "token" in names
+        assert "secretRef" in names
+
+    def test_allof_in_array_items(self):
+        """allOf inside array items is flattened."""
+        props = {
+            "solvers": {
+                "type": "array",
+                "items": {
+                    "allOf": [
+                        {"properties": {"dns01": {"type": "object"}}},
+                        {"properties": {"http01": {"type": "object"}}},
+                    ],
+                },
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        names = {f.name for f in fields}
+        assert "dns01" in names
+        assert "http01" in names

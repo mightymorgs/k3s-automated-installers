@@ -4,7 +4,7 @@
   "total_modules": 60,
   "cgc_mode": false,
   "git": {
-    "commit": "52a2beb032ca806111beb827a54bf4fa655bd763",
+    "commit": "b6ed7ee6a0866da9e9bb994b8d2b5a80baadc57a",
     "branch": "feat/crd-implementation",
     "dirty": true
   },
@@ -1165,8 +1165,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:CatalogEntry",
-        "line_start": 119,
-        "line_end": 126
+        "line_start": 122,
+        "line_end": 129
       },
       {
         "name": "ManifestFlags",
@@ -1174,8 +1174,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:ManifestFlags",
-        "line_start": 43,
-        "line_end": 52
+        "line_start": 46,
+        "line_end": 55
       },
       {
         "name": "ShapeCatalog",
@@ -1183,8 +1183,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:ShapeCatalog",
-        "line_start": 130,
-        "line_end": 173
+        "line_start": 133,
+        "line_end": 176
       },
       {
         "name": "WorkloadFingerprint",
@@ -1192,8 +1192,8 @@
         "kind": "class",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:WorkloadFingerprint",
-        "line_start": 60,
-        "line_end": 67
+        "line_start": 63,
+        "line_end": 70
       },
       {
         "name": "classify_walked_field",
@@ -1201,8 +1201,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:classify_walked_field",
-        "line_start": 1449,
-        "line_end": 1627
+        "line_start": 1595,
+        "line_end": 1799
       },
       {
         "name": "compute_schema_fingerprint",
@@ -1210,8 +1210,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:compute_schema_fingerprint",
-        "line_start": 176,
-        "line_end": 194
+        "line_start": 179,
+        "line_end": 197
       },
       {
         "name": "detect_apigroup_literal",
@@ -1219,8 +1219,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_apigroup_literal",
-        "line_start": 964,
-        "line_end": 1010
+        "line_start": 1110,
+        "line_end": 1156
       },
       {
         "name": "detect_cataloged_shape",
@@ -1228,8 +1228,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_cataloged_shape",
-        "line_start": 376,
-        "line_end": 413
+        "line_start": 379,
+        "line_end": 416
       },
       {
         "name": "detect_constraint_fk",
@@ -1237,8 +1237,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_constraint_fk",
-        "line_start": 425,
-        "line_end": 489
+        "line_start": 428,
+        "line_end": 492
       },
       {
         "name": "detect_embedded_workload",
@@ -1246,8 +1246,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_embedded_workload",
-        "line_start": 533,
-        "line_end": 583
+        "line_start": 536,
+        "line_end": 586
       },
       {
         "name": "detect_enum_kind",
@@ -1255,8 +1255,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_enum_kind",
-        "line_start": 1083,
-        "line_end": 1159
+        "line_start": 1229,
+        "line_end": 1305
       },
       {
         "name": "detect_example_kinds",
@@ -1264,8 +1264,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_example_kinds",
-        "line_start": 895,
-        "line_end": 961
+        "line_start": 1041,
+        "line_end": 1107
       },
       {
         "name": "detect_kubernetes_extensions",
@@ -1273,8 +1273,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_kubernetes_extensions",
-        "line_start": 297,
-        "line_end": 373
+        "line_start": 300,
+        "line_end": 376
       },
       {
         "name": "detect_namespace",
@@ -1282,8 +1282,17 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_namespace",
-        "line_start": 1238,
-        "line_end": 1246
+        "line_start": 1384,
+        "line_end": 1392
+      },
+      {
+        "name": "detect_parent_kind_name",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_parent_kind_name",
+        "line_start": 767,
+        "line_end": 854
       },
       {
         "name": "detect_passthrough_manifest",
@@ -1291,8 +1300,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_passthrough_manifest",
-        "line_start": 1013,
-        "line_end": 1080
+        "line_start": 1159,
+        "line_end": 1226
       },
       {
         "name": "detect_ref",
@@ -1300,8 +1309,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_ref",
-        "line_start": 605,
-        "line_end": 708
+        "line_start": 608,
+        "line_end": 711
       },
       {
         "name": "detect_ref_tuple",
@@ -1309,8 +1318,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_ref_tuple",
-        "line_start": 743,
-        "line_end": 852
+        "line_start": 889,
+        "line_end": 998
       },
       {
         "name": "detect_scale_subresource",
@@ -1318,8 +1327,17 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_scale_subresource",
-        "line_start": 215,
-        "line_end": 271
+        "line_start": 218,
+        "line_end": 274
+      },
+      {
+        "name": "detect_secret_key_selector",
+        "file": "generation/crd/ref_detector.py",
+        "kind": "function",
+        "tags": [],
+        "import_path": "idi.generation.crd.ref_detector:detect_secret_key_selector",
+        "line_start": 714,
+        "line_end": 764
       },
       {
         "name": "detect_status_output",
@@ -1327,8 +1345,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_status_output",
-        "line_start": 1162,
-        "line_end": 1235
+        "line_start": 1308,
+        "line_end": 1381
       },
       {
         "name": "split_camel_case",
@@ -1336,8 +1354,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:split_camel_case",
-        "line_start": 1249,
-        "line_end": 1257
+        "line_start": 1395,
+        "line_end": 1403
       },
       {
         "name": "suppress_false_positives",
@@ -1345,8 +1363,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:suppress_false_positives",
-        "line_start": 1365,
-        "line_end": 1405
+        "line_start": 1511,
+        "line_end": 1551
       },
       {
         "name": "ShapeCatalog.load",
@@ -1354,8 +1372,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:ShapeCatalog",
-        "line_start": 136,
-        "line_end": 169
+        "line_start": 139,
+        "line_end": 172
       },
       {
         "name": "ShapeCatalog.lookup",
@@ -1363,8 +1381,8 @@
         "kind": "method",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:ShapeCatalog",
-        "line_start": 171,
-        "line_end": 173
+        "line_start": 174,
+        "line_end": 176
       },
       {
         "name": "extract_crds_from_chart",
@@ -1418,8 +1436,8 @@
           "model"
         ],
         "import_path": "idi.generation.crd.schema_walker:WalkedField",
-        "line_start": 47,
-        "line_end": 56
+        "line_start": 103,
+        "line_end": 112
       },
       {
         "name": "walk_crd_schema",
@@ -1429,8 +1447,8 @@
           "model"
         ],
         "import_path": "idi.generation.crd.schema_walker:walk_crd_schema",
-        "line_start": 59,
-        "line_end": 87
+        "line_start": 115,
+        "line_end": 143
       },
       {
         "name": "walk_crd_status",
@@ -1440,8 +1458,8 @@
           "model"
         ],
         "import_path": "idi.generation.crd.schema_walker:walk_crd_status",
-        "line_start": 90,
-        "line_end": 118
+        "line_start": 146,
+        "line_end": 174
       },
       {
         "name": "classify_name_field",

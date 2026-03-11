@@ -43,6 +43,62 @@ EXCLUDED_FIELDS = frozenset({
 _K8S_ENVELOPE = frozenset({"apiVersion", "kind", "metadata", "status"})
 
 
+def _flatten_composed(schema: dict[str, Any]) -> dict[str, Any]:
+    """Flatten allOf/oneOf/anyOf compositions into a single schema.
+
+    - allOf: merge all sub-schemas' properties and required lists.
+    - oneOf/anyOf with exactly 1 item: unwrap the single sub-schema.
+    - oneOf/anyOf with multiple items: skip (ambiguous).
+
+    Returns the original schema if no composition is present, or a merged
+    copy with composed properties folded in. Does NOT modify the input.
+    """
+    has_allof = isinstance(schema.get("allOf"), list)
+    has_oneof = isinstance(schema.get("oneOf"), list)
+    has_anyof = isinstance(schema.get("anyOf"), list)
+
+    if not (has_allof or has_oneof or has_anyof):
+        return schema
+
+    # Start with a shallow copy so we don't mutate the input.
+    merged: dict[str, Any] = {}
+    merged_props: dict[str, Any] = dict(schema.get("properties", {}))
+    merged_required: list[str] = list(schema.get("required", []))
+
+    # allOf: merge all sub-schemas.
+    if has_allof:
+        for sub in schema["allOf"]:
+            if isinstance(sub, dict):
+                merged_props.update(sub.get("properties", {}))
+                merged_required.extend(sub.get("required", []))
+
+    # oneOf/anyOf: unwrap if exactly one item.
+    for key in ("oneOf", "anyOf"):
+        items = schema.get(key)
+        if isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict):
+            sub = items[0]
+            merged_props.update(sub.get("properties", {}))
+            merged_required.extend(sub.get("required", []))
+
+    if not merged_props:
+        return schema
+
+    # Copy all non-composition keys from original.
+    for k, v in schema.items():
+        if k not in ("allOf", "oneOf", "anyOf", "properties", "required"):
+            merged[k] = v
+
+    merged["properties"] = merged_props
+    if merged_required:
+        merged["required"] = list(dict.fromkeys(merged_required))  # deduplicate, preserve order
+
+    # Infer type if not set.
+    if "type" not in merged and merged_props:
+        merged["type"] = "object"
+
+    return merged
+
+
 @dataclass(frozen=True)
 class WalkedField:
     """A single field yielded by the schema walker."""
@@ -181,11 +237,14 @@ def _walk_recursive(
             parent_path=prefix,
         )
 
+        # Flatten composed schemas (allOf/oneOf/anyOf) before recursion.
+        effective_schema = _flatten_composed(prop_schema)
+
         # Recurse into nested objects.
-        if prop_schema.get("type") == "object" and "properties" in prop_schema:
+        if effective_schema.get("type") == "object" and "properties" in effective_schema:
             yield from _walk_recursive(
-                properties=prop_schema["properties"],
-                required=prop_schema.get("required", []),
+                properties=effective_schema["properties"],
+                required=effective_schema.get("required", []),
                 prefix=field_path,
                 max_depth=max_depth,
                 current_depth=current_depth + 1,
@@ -195,8 +254,10 @@ def _walk_recursive(
             )
 
         # Recurse into array items.
-        if prop_schema.get("type") == "array":
-            items = prop_schema.get("items")
+        if effective_schema.get("type") == "array":
+            items = effective_schema.get("items")
+            if isinstance(items, dict):
+                items = _flatten_composed(items)
             if isinstance(items, dict) and "properties" in items:
                 yield from _walk_recursive(
                     properties=items["properties"],

@@ -8,7 +8,9 @@ from idi.generation.crd.ref_detector import (
     classify_walked_field,
     detect_enum_kind,
     detect_namespace,
+    detect_parent_kind_name,
     detect_ref,
+    detect_secret_key_selector,
     detect_status_output,
 )
 from idi.generation.crd.schema_walker import WalkedField
@@ -568,3 +570,217 @@ class TestClassifyWalkedField:
         assert results[0].role == "output_declaration"
         assert results[0].detection_source == "side_effect:operator_dict"
         assert results[0].confidence == 0.95
+
+
+# ---------------------------------------------------------------------------
+# detect_secret_key_selector
+# ---------------------------------------------------------------------------
+
+
+class TestDetectSecretKeySelector:
+    """Tests for SecretKeySelector shape detection."""
+
+    def test_basic_secret_key_selector(self):
+        """Field with {key, name} properties → Secret ref."""
+        field = _make_field("apiKeyRef", schema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "name": {"type": "string"},
+            },
+        }, path="spec.provider.auth.apiKeyRef", parent_path="spec.provider.auth")
+        result = detect_secret_key_selector(field)
+        assert result is not None
+        assert result.role == "input_ref"
+        assert result.target_kind == "Secret"
+        assert result.target_group == "core"
+        assert result.confidence == 0.85
+        assert result.detection_source == "ref_detector:secret_key_selector"
+
+    def test_with_namespace(self):
+        """Field with {key, name, namespace} → cross-namespace Secret ref."""
+        field = _make_field("authRef", schema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "name": {"type": "string"},
+                "namespace": {"type": "string"},
+            },
+        }, path="spec.provider.authRef", parent_path="spec.provider")
+        result = detect_secret_key_selector(field)
+        assert result is not None
+        assert result.cross_namespace is True
+
+    def test_no_key_property(self):
+        """Object with {name, namespace} but no key → not SecretKeySelector."""
+        field = _make_field("someRef", schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "namespace": {"type": "string"},
+            },
+        })
+        result = detect_secret_key_selector(field)
+        assert result is None
+
+    def test_non_string_key(self):
+        """Object with non-string key property → not SecretKeySelector."""
+        field = _make_field("someRef", schema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "integer"},
+                "name": {"type": "string"},
+            },
+        })
+        result = detect_secret_key_selector(field)
+        assert result is None
+
+    def test_non_string_extra_property_excluded(self):
+        """Object with a non-string extra property → not SecretKeySelector."""
+        field = _make_field("ref", schema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "name": {"type": "string"},
+                "retries": {"type": "integer"},
+            },
+        })
+        result = detect_secret_key_selector(field)
+        assert result is None
+
+    def test_pipeline_integration(self, registry):
+        """SecretKeySelector detected through classify_walked_field pipeline."""
+        field = _make_field("passcodeRef", schema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "name": {"type": "string"},
+            },
+        }, path="spec.auth.passcodeRef", parent_path="spec.auth")
+        results = classify_walked_field(field, registry, "SecretStore", "external-secrets.io")
+        assert len(results) == 1
+        assert results[0].target_kind == "Secret"
+        assert results[0].detection_source == "ref_detector:secret_key_selector"
+
+
+# ---------------------------------------------------------------------------
+# detect_parent_kind_name
+# ---------------------------------------------------------------------------
+
+
+class TestDetectParentKindName:
+    """Tests for parent-name → Kind resolution (C12 port)."""
+
+    def test_singular_parent_secret(self, registry):
+        """Parent 'secret' → Secret."""
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.templateFrom.secret.name",
+                            parent_path="spec.templateFrom.secret")
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "Secret"
+        assert result.confidence == 0.80
+        assert result.detection_source == "ref_detector:parent_kind_name"
+
+    def test_plural_parent_secrets(self, registry):
+        """Parent 'secrets' → Secret (depluralize)."""
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.webhook.secrets.name",
+                            parent_path="spec.webhook.secrets")
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "Secret"
+
+    def test_plural_parent_services(self, registry):
+        """Parent 'services' → Service (depluralize)."""
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.routes.services.name",
+                            parent_path="spec.routes.services")
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "Service"
+
+    def test_camelcase_parent(self, registry):
+        """Parent 'serviceAccount' → ServiceAccount."""
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.auth.serviceAccount.name",
+                            parent_path="spec.auth.serviceAccount")
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "ServiceAccount"
+
+    def test_plural_parent_configmaps(self, registry):
+        """Parent 'configMap' → ConfigMap."""
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.templateFrom.configMap.name",
+                            parent_path="spec.templateFrom.configMap")
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "ConfigMap"
+
+    def test_non_name_field_ignored(self, registry):
+        """Field not named 'name' → None."""
+        field = _make_field("key", schema={"type": "string"},
+                            path="spec.secret.key",
+                            parent_path="spec.secret")
+        result = detect_parent_kind_name(field, registry)
+        assert result is None
+
+    def test_non_string_field_ignored(self, registry):
+        """Non-string 'name' field → None."""
+        field = _make_field("name", schema={"type": "integer"},
+                            path="spec.secret.name",
+                            parent_path="spec.secret")
+        result = detect_parent_kind_name(field, registry)
+        assert result is None
+
+    def test_unregistered_parent_ignored(self, registry):
+        """Parent name not in KindRegistry → None."""
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.foobar.name",
+                            parent_path="spec.foobar")
+        result = detect_parent_kind_name(field, registry)
+        assert result is None
+
+    def test_pipeline_integration(self, registry):
+        """Parent-name detected through classify_walked_field pipeline."""
+        # Register Middleware so it can be found.
+        registry.register("Middleware", "middlewares", "traefik.io")
+        field = _make_field("name", schema={"type": "string"},
+                            path="spec.routes.middlewares.name",
+                            parent_path="spec.routes.middlewares",
+                            depth=3, is_array_item=True)
+        results = classify_walked_field(field, registry, "IngressRoute", "traefik.io")
+        assert len(results) == 1
+        assert results[0].target_kind == "Middleware"
+        assert results[0].detection_source == "ref_detector:parent_kind_name"
+
+
+# ---------------------------------------------------------------------------
+# readOnly → output_declaration
+# ---------------------------------------------------------------------------
+
+
+class TestReadOnlyOutputClassification:
+    """Tests for readOnly field → output_declaration."""
+
+    def test_readonly_becomes_output(self, registry):
+        """Field with readOnly: true → output_declaration."""
+        field = _make_field("observedGeneration", schema={
+            "type": "integer",
+            "readOnly": True,
+        })
+        results = classify_walked_field(field, registry, "Cert", "cert-manager.io")
+        assert len(results) == 1
+        assert results[0].role == "output_declaration"
+        assert results[0].confidence == 0.8
+        assert results[0].detection_source == "ref_detector:readonly"
+
+    def test_non_readonly_stays_config(self, registry):
+        """Field without readOnly → config_field."""
+        field = _make_field("observedGeneration", schema={
+            "type": "integer",
+        })
+        results = classify_walked_field(field, registry, "Cert", "cert-manager.io")
+        assert len(results) == 1
+        assert results[0].role == "config_field"

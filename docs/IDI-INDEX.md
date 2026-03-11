@@ -140,7 +140,7 @@ Machine-readable edit-safety hints (available in JSON sidecar).
 
 ### Symbol Index
 
-270 public symbols from 6 surface directories.
+272 public symbols from 6 surface directories.
 
 | Symbol | File | Kind | Lines |
 |---|---|---|---|
@@ -226,36 +226,38 @@ Machine-readable edit-safety hints (available in JSON sidecar).
 | `build_helm_spec_json` | `generation/crd/output_writer.py` | function | L383-432 |
 | `write_decomposed_skill` | `generation/crd/output_writer.py` | function | L307-375 |
 | `write_helm_spec` | `generation/crd/output_writer.py` | function | L435-463 |
-| `CatalogEntry` | `generation/crd/ref_detector.py` | class | L119-126 |
-| `ManifestFlags` | `generation/crd/ref_detector.py` | class | L43-52 |
-| `ShapeCatalog` | `generation/crd/ref_detector.py` | class | L130-173 |
-| `WorkloadFingerprint` | `generation/crd/ref_detector.py` | class | L60-67 |
-| `classify_walked_field` | `generation/crd/ref_detector.py` | function | L1449-1627 |
-| `compute_schema_fingerprint` | `generation/crd/ref_detector.py` | function | L176-194 |
-| `detect_apigroup_literal` | `generation/crd/ref_detector.py` | function | L964-1010 |
-| `detect_cataloged_shape` | `generation/crd/ref_detector.py` | function | L376-413 |
-| `detect_constraint_fk` | `generation/crd/ref_detector.py` | function | L425-489 |
-| `detect_embedded_workload` | `generation/crd/ref_detector.py` | function | L533-583 |
-| `detect_enum_kind` | `generation/crd/ref_detector.py` | function | L1083-1159 |
-| `detect_example_kinds` | `generation/crd/ref_detector.py` | function | L895-961 |
-| `detect_kubernetes_extensions` | `generation/crd/ref_detector.py` | function | L297-373 |
-| `detect_namespace` | `generation/crd/ref_detector.py` | function | L1238-1246 |
-| `detect_passthrough_manifest` | `generation/crd/ref_detector.py` | function | L1013-1080 |
-| `detect_ref` | `generation/crd/ref_detector.py` | function | L605-708 |
-| `detect_ref_tuple` | `generation/crd/ref_detector.py` | function | L743-852 |
-| `detect_scale_subresource` | `generation/crd/ref_detector.py` | function | L215-271 |
-| `detect_status_output` | `generation/crd/ref_detector.py` | function | L1162-1235 |
-| `split_camel_case` | `generation/crd/ref_detector.py` | function | L1249-1257 |
-| `suppress_false_positives` | `generation/crd/ref_detector.py` | function | L1365-1405 |
-| `ShapeCatalog.load` | `generation/crd/ref_detector.py` | method | L136-169 |
-| `ShapeCatalog.lookup` | `generation/crd/ref_detector.py` | method | L171-173 |
+| `CatalogEntry` | `generation/crd/ref_detector.py` | class | L122-129 |
+| `ManifestFlags` | `generation/crd/ref_detector.py` | class | L46-55 |
+| `ShapeCatalog` | `generation/crd/ref_detector.py` | class | L133-176 |
+| `WorkloadFingerprint` | `generation/crd/ref_detector.py` | class | L63-70 |
+| `classify_walked_field` | `generation/crd/ref_detector.py` | function | L1595-1799 |
+| `compute_schema_fingerprint` | `generation/crd/ref_detector.py` | function | L179-197 |
+| `detect_apigroup_literal` | `generation/crd/ref_detector.py` | function | L1110-1156 |
+| `detect_cataloged_shape` | `generation/crd/ref_detector.py` | function | L379-416 |
+| `detect_constraint_fk` | `generation/crd/ref_detector.py` | function | L428-492 |
+| `detect_embedded_workload` | `generation/crd/ref_detector.py` | function | L536-586 |
+| `detect_enum_kind` | `generation/crd/ref_detector.py` | function | L1229-1305 |
+| `detect_example_kinds` | `generation/crd/ref_detector.py` | function | L1041-1107 |
+| `detect_kubernetes_extensions` | `generation/crd/ref_detector.py` | function | L300-376 |
+| `detect_namespace` | `generation/crd/ref_detector.py` | function | L1384-1392 |
+| `detect_parent_kind_name` | `generation/crd/ref_detector.py` | function | L767-854 |
+| `detect_passthrough_manifest` | `generation/crd/ref_detector.py` | function | L1159-1226 |
+| `detect_ref` | `generation/crd/ref_detector.py` | function | L608-711 |
+| `detect_ref_tuple` | `generation/crd/ref_detector.py` | function | L889-998 |
+| `detect_scale_subresource` | `generation/crd/ref_detector.py` | function | L218-274 |
+| `detect_secret_key_selector` | `generation/crd/ref_detector.py` | function | L714-764 |
+| `detect_status_output` | `generation/crd/ref_detector.py` | function | L1308-1381 |
+| `split_camel_case` | `generation/crd/ref_detector.py` | function | L1395-1403 |
+| `suppress_false_positives` | `generation/crd/ref_detector.py` | function | L1511-1551 |
+| `ShapeCatalog.load` | `generation/crd/ref_detector.py` | method | L139-172 |
+| `ShapeCatalog.lookup` | `generation/crd/ref_detector.py` | method | L174-176 |
 | `extract_crds_from_chart` | `generation/crd/schema_loader.py` | function | L38-72 |
 | `extract_spec_properties` | `generation/crd/schema_loader.py` | function | L30-35 |
 | `load_crd_schemas` | `generation/crd/schema_loader.py` | function | L124-148 |
 | `strip_helm_directives` | `generation/crd/schema_loader.py` | function | L25-27 |
-| `WalkedField` | `generation/crd/schema_walker.py` | class | L47-56 |
-| `walk_crd_schema` | `generation/crd/schema_walker.py` | function | L59-87 |
-| `walk_crd_status` | `generation/crd/schema_walker.py` | function | L90-118 |
+| `WalkedField` | `generation/crd/schema_walker.py` | class | L103-112 |
+| `walk_crd_schema` | `generation/crd/schema_walker.py` | function | L115-143 |
+| `walk_crd_status` | `generation/crd/schema_walker.py` | function | L146-174 |
 | `classify_name_field` | `generation/crd/side_effect_registry.py` | function | L83-110 |
 | `get_side_effects` | `generation/crd/side_effect_registry.py` | function | L63-65 |
 | `is_output_by_description` | `generation/crd/side_effect_registry.py` | function | L68-80 |

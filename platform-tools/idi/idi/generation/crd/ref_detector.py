@@ -19,6 +19,9 @@ C22: embedded workload shape matching (Phase 5A)
 C29: constraint-based FK inference (Phase 5A)
 C30: cross-CRD reference shape mining (Phase 5A)
 C32: x-kubernetes extension fingerprinting (Phase 5A)
+SecretKeySelector shape detection (Remediation)
+Parent-name → Kind resolution / C12 port (Remediation)
+readOnly → output classification (Remediation)
 
 Critical: Precision > recall. No edge emitted below confidence 0.7.
 """
@@ -704,6 +707,149 @@ def detect_ref(
                     fact_shape="identity",
                     target_field="name",
                 )
+
+    return None
+
+
+def detect_secret_key_selector(
+    field: WalkedField,
+) -> ClassifiedField | None:
+    """Detect SecretKeySelector shape: {key: string, name: string, namespace?: string}.
+
+    This K8s pattern indicates a reference to a specific key within a Secret.
+    Field names vary widely (apiKeyRef, userRef, authRef, passcodeRef, etc.)
+    so we match purely on structural shape, not field naming.
+
+    Confidence: 0.85 (strong structural evidence).
+    """
+    schema = field.schema
+    if schema.get("type") != "object":
+        return None
+
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return None
+
+    # Must have both 'key' and 'name' as string properties.
+    key_prop = properties.get("key")
+    name_prop = properties.get("name")
+    if not key_prop or not isinstance(key_prop, dict) or key_prop.get("type") != "string":
+        return None
+    if not name_prop or not isinstance(name_prop, dict) or name_prop.get("type") != "string":
+        return None
+
+    # All other properties (if any) must also be strings to avoid
+    # matching generic objects that happen to have key+name.
+    for prop_name, prop_schema in properties.items():
+        if prop_name in ("key", "name", "namespace"):
+            continue
+        if isinstance(prop_schema, dict) and prop_schema.get("type") != "string":
+            return None
+
+    cross_ns = "namespace" in properties
+
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=0.85,
+        field_type="object",
+        target_kind="Secret",
+        target_group="core",
+        required=field.required,
+        cross_namespace=cross_ns,
+        description=schema.get("description", ""),
+        detection_source="ref_detector:secret_key_selector",
+        fact_shape="identity",
+        target_field="name",
+    )
+
+
+def detect_parent_kind_name(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> ClassifiedField | None:
+    """Detect refs where parent field name implies the Kind (C12 port).
+
+    When a string field named "name" sits inside an object/array whose parent
+    field name can be depluralized to a registered Kind, emit an input_ref.
+
+    Examples:
+        templateFrom.secret.name → Secret (parent "secret")
+        routes.middlewares.name → Middleware (parent "middlewares")
+        routes.services.name → Service (parent "services")
+        auth.serviceAccount.name → ServiceAccount (parent "serviceAccount")
+
+    Confidence: 0.80 (structural + naming convention).
+    """
+    # Only triggers on string fields named "name".
+    if field.name != "name" or field.schema.get("type") != "string":
+        return None
+
+    # Extract the immediate parent field name from the parent_path.
+    parent_path = field.parent_path
+    if "." not in parent_path:
+        return None
+    parent_name = parent_path.rsplit(".", 1)[-1]
+    if not parent_name:
+        return None
+
+    # Try to resolve parent name to a Kind:
+    # 1. Direct PascalCase (serviceAccount → ServiceAccount)
+    # 2. Depluralize then PascalCase (middlewares → Middleware, secrets → Secret)
+    candidates: list[str] = []
+
+    # Direct: capitalize first letter.
+    candidates.append(parent_name[0].upper() + parent_name[1:])
+
+    # Depluralize: strip trailing "s" or "es".
+    lower = parent_name.lower()
+    if lower.endswith("ies"):
+        candidates.append(lower[:-3].capitalize() + "y")
+    elif lower.endswith("ses") or lower.endswith("xes") or lower.endswith("zes"):
+        candidates.append(lower[:-2].capitalize())
+    elif lower.endswith("es"):
+        candidates.append(lower[:-2].capitalize())
+        candidates.append(lower[:-1].capitalize())
+    elif lower.endswith("s") and not lower.endswith("ss"):
+        candidates.append(lower[:-1].capitalize())
+
+    all_kinds = registry.all_kinds()
+    all_kinds_lower = {k.lower(): k for k in all_kinds}
+
+    for candidate in candidates:
+        # Try exact match.
+        if candidate in all_kinds:
+            target_group = registry.group_for_kind(candidate) or ""
+            return ClassifiedField(
+                field=field.path,
+                role="input_ref",
+                confidence=0.80,
+                field_type="string",
+                target_kind=candidate,
+                target_group=target_group,
+                required=field.required,
+                description=field.schema.get("description", ""),
+                detection_source="ref_detector:parent_kind_name",
+                fact_shape="identity",
+                target_field="name",
+            )
+        # Try case-insensitive match.
+        canonical = all_kinds_lower.get(candidate.lower())
+        if canonical:
+            target_group = registry.group_for_kind(canonical) or ""
+            return ClassifiedField(
+                field=field.path,
+                role="input_ref",
+                confidence=0.80,
+                field_type="string",
+                target_kind=canonical,
+                target_group=target_group,
+                required=field.required,
+                description=field.schema.get("description", ""),
+                detection_source="ref_detector:parent_kind_name",
+                fact_shape="identity",
+                target_field="name",
+            )
 
     return None
 
@@ -1456,23 +1602,26 @@ def classify_walked_field(
 ) -> list[ClassifiedField]:
     """Top-level orchestrator for spec field classification.
 
-    Runs detectors in priority order (Phase 5A updated pipeline):
+    Runs detectors in priority order (remediation-updated pipeline):
     Step  0: Side-effect dictionary (0.95) — *Name override
     Step  1: detect_ref (0.9) — exclusive
-    Step  2: detect_ref_tuple (0.85) — exclusive
-    Step  3: detect_kubernetes_extensions (0.8-0.95) — C32
+    Step  2: detect_secret_key_selector (0.85) — exclusive
+    Step  3: detect_parent_kind_name (0.80) — exclusive
+    Step  4: detect_ref_tuple (0.85) — exclusive
+    Step  5: detect_kubernetes_extensions (0.8-0.95) — C32
              embedded-resource: exclusive at 0.95
              list-map: additive at 0.8
-    Step  4: detect_enum_kind (0.95)
-    Step  5: detect_example_kinds (0.8) — additive
-    Step  6: detect_apigroup_literal (0.85) — additive
-    Step  7: detect_passthrough_manifest (0.95)
-    Step  8: detect_constraint_fk (0.75) — C29, additive
-    Step  9: detect_embedded_workload (0.8) — C22, additive
-    Step 10: detect_cataloged_shape (0.8-0.85) — C30, additive
-    Step 11: Side-effect NLP
-    Step 12: Default config_field
-    Step 13: suppress_false_positives — post-filter
+    Step  6: detect_enum_kind (0.95)
+    Step  7: detect_example_kinds (0.8) — additive
+    Step  8: detect_apigroup_literal (0.85) — additive
+    Step  9: detect_passthrough_manifest (0.95)
+    Step 10: detect_constraint_fk (0.75) — C29, additive
+    Step 11: detect_embedded_workload (0.8) — C22, additive
+    Step 12: detect_cataloged_shape (0.8-0.85) — C30, additive
+    Step 13: Side-effect NLP
+    Step 14: readOnly → output_declaration (0.8)
+    Step 15: Default config_field
+    Step 16: suppress_false_positives — post-filter
 
     Note: detect_status_output is NOT called here — it is invoked
     separately on status fields by callers.
@@ -1521,12 +1670,22 @@ def classify_walked_field(
     if ref_result is not None:
         return [ref_result]
 
-    # Step 2: Reference tuple detection (C19, exclusive).
+    # Step 2: SecretKeySelector shape detection (exclusive).
+    sks_result = detect_secret_key_selector(field)
+    if sks_result is not None:
+        return [sks_result]
+
+    # Step 3: Parent-name → Kind resolution (exclusive).
+    parent_result = detect_parent_kind_name(field, registry)
+    if parent_result is not None:
+        return [parent_result]
+
+    # Step 4: Reference tuple detection (C19, exclusive).
     tuple_results = detect_ref_tuple(field, registry)
     if tuple_results:
         return tuple_results
 
-    # --- Additive detectors (steps 3-10): results accumulate ---
+    # --- Additive detectors (steps 5-12): results accumulate ---
     additive_results: list[ClassifiedField] = []
 
     # Step 3: x-kubernetes extension fingerprinting (C32).
@@ -1613,7 +1772,20 @@ def classify_walked_field(
                 fact_shape="identity" if target_kind else "config",
             )]
 
-    # Step 12: Default — config_field.
+    # Step 12: readOnly field → output_declaration.
+    if field.schema.get("readOnly") is True:
+        return [ClassifiedField(
+            field=field.path,
+            role="output_declaration",
+            confidence=0.8,
+            field_type=field.schema.get("type", "string"),
+            required=field.required,
+            description=field.schema.get("description", ""),
+            detection_source="ref_detector:readonly",
+            fact_shape="identity",
+        )]
+
+    # Step 13: Default — config_field.
     return [ClassifiedField(
         field=field.path,
         role="config_field",
