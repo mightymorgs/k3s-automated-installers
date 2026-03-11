@@ -350,6 +350,62 @@ class TestIsRefFieldAliases:
 # ---------------------------------------------------------------------------
 
 
+class TestKindEntryService:
+    """Tests for service-aware KindEntry registration (section-04)."""
+
+    def test_register_with_service_stores_service(self):
+        """register() with service= stores service string on KindEntry."""
+        reg = KindRegistry()
+        reg.register("Gateway", "gateways", "networking.istio.io", service="istio")
+        entries = reg._kind_to_entries["Gateway"]
+        assert len(entries) == 1
+        assert entries[0].service == "istio"
+
+    def test_core_resources_have_empty_service(self):
+        """Core K8s resources registered at init have service='' (empty string)."""
+        reg = KindRegistry()
+        entries = reg._kind_to_entries["Secret"]
+        assert all(e.service == "" for e in entries)
+
+    def test_register_without_service_defaults_empty(self):
+        """register() without service= defaults to empty string."""
+        reg = KindRegistry()
+        reg.register("MyKind", "mykinds", "example.io")
+        entries = reg._kind_to_entries["MyKind"]
+        assert entries[0].service == ""
+
+    def test_plural_to_entries_returns_list(self):
+        """_plural_to_entries maps plural string to list of KindEntry."""
+        reg = KindRegistry()
+        reg.register("Gateway", "gateways", "networking.istio.io", service="istio")
+        entries = reg._plural_to_entries.get("gateways", [])
+        assert len(entries) == 1
+        assert entries[0].kind == "Gateway"
+        assert entries[0].service == "istio"
+
+    def test_plural_to_entries_multiple_services(self):
+        """Same plural from different services produces multiple entries."""
+        reg = KindRegistry()
+        reg.register("Gateway", "gateways", "networking.istio.io", service="istio")
+        reg.register("Gateway", "gateways", "gateway.networking.k8s.io", service="contour")
+        entries = reg._plural_to_entries.get("gateways", [])
+        assert len(entries) == 2
+        services = {e.service for e in entries}
+        assert services == {"istio", "contour"}
+
+    def test_plural_to_kind_still_works(self):
+        """Public plural_to_kind() method continues to work after internal change."""
+        reg = KindRegistry()
+        assert reg.plural_to_kind("secrets") == "Secret"
+        reg.register("Gateway", "gateways", "networking.istio.io", service="istio")
+        assert reg.plural_to_kind("gateways") == "Gateway"
+
+    def test_plural_to_kind_returns_none_for_unknown(self):
+        """plural_to_kind() still returns None for unregistered plurals."""
+        reg = KindRegistry()
+        assert reg.plural_to_kind("notregistered") is None
+
+
 class TestRefPatternsCoverage:
     """Verify every entry from the old K8S_REF_PATTERNS is covered."""
 

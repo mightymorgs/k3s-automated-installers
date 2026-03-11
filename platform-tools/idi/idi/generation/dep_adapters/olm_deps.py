@@ -53,7 +53,7 @@ class OlmDepAdapter:
 
         # Register owned GVKs in KindRegistry.
         for gvk in owned:
-            self.registry.register(gvk.kind, gvk.plural, group=gvk.group)
+            self.registry.register(gvk.kind, gvk.plural, group=gvk.group, service=service)
             logger.debug(
                 "olm_deps:owned_register %s/%s (plural=%s)",
                 gvk.group, gvk.kind, gvk.plural,

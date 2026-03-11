@@ -206,5 +206,6 @@ def populated_registry(core_only_registry, all_fixtures):
             kind=fix["kind"],
             plural=fix["plural"],
             group=fix["group"],
+            service=fix.get("service", ""),
         )
     return core_only_registry

@@ -91,7 +91,7 @@ class TestDetectApigroupLiteral:
         """Test registry with single core Kind -> emits."""
         reg = KindRegistry.__new__(KindRegistry)
         reg._kind_to_entries = {}
-        reg._plural_to_kind = {}
+        reg._plural_to_entries = {}
         reg._sorted_entries = []
         # Manually register only one core kind
         reg.register("Pod", "pods", "")

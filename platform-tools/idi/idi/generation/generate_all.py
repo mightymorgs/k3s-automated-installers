@@ -89,6 +89,21 @@ def generate_service(
     schema_path = specs_dir / schema_rel
     output_dir = output_base / output_rel
 
+    # Route chart-based CRD services directly (no local schema file needed).
+    if style == "kubernetes" and config.get("chart"):
+        if dry_run:
+            return {"success": True, "message": f"Would generate: {name} (chart) -> {output_rel}"}
+        return _generate_crd_service(name, config, output_dir, specs_dir, registry=registry)
+
+    # Route style=kubernetes with crd_kinds to CRD pipeline.
+    crd_kinds = config.get("crd_kinds")
+    if style == "kubernetes" and crd_kinds:
+        if not schema_path.exists():
+            return {"success": False, "message": f"Schema not found: {schema_rel}"}
+        if dry_run:
+            return {"success": True, "message": f"Would generate: {name} ({style}) -> {output_rel}"}
+        return _generate_crd_service(name, config, output_dir, specs_dir, registry=registry)
+
     if not schema_path.exists():
         return {
             "success": False,
@@ -100,11 +115,6 @@ def generate_service(
             "success": True,
             "message": f"Would generate: {name} ({style}) -> {output_rel}",
         }
-
-    # Route style=kubernetes with crd_kinds to CRD pipeline.
-    crd_kinds = config.get("crd_kinds")
-    if style == "kubernetes" and crd_kinds:
-        return _generate_crd_service(name, config, output_dir, specs_dir, registry=registry)
 
     try:
         from idi.generation.cli import generate
@@ -228,7 +238,7 @@ def _load_crd_schemas_for_service(
     """
     if config.get("chart"):
         from idi.generation.crd.schema_loader import load_crd_schemas
-        schemas, _values = load_crd_schemas(name, config)
+        schemas, _values = load_crd_schemas(name, config["chart"])
         return schemas
     elif specs_dir:
         return _load_schemas_from_spec(name, config, specs_dir)
@@ -281,6 +291,7 @@ def _generate_crd_service(
             for schema in schemas:
                 registry.register(
                     schema["kind"], schema["plural"], schema.get("group", ""),
+                    service=name,
                 )
 
         # Classify fields for each CRD kind.
@@ -374,6 +385,7 @@ def generate_all(
             for schema in schemas:
                 registry.register(
                     schema["kind"], schema["plural"], schema.get("group", ""),
+                    service=svc_name,
                 )
 
     # PASS 2: Generate skills for filtered services.

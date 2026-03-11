@@ -19,6 +19,7 @@ class KindEntry:
     plural: str     # e.g., "secrets"
     group: str      # e.g., "core"
     is_core: bool   # True for bootstrap resources
+    service: str = ""  # Service that owns this Kind; "" for core K8s resources
 
 
 # Well-known compound patterns that cannot be derived from generic suffix matching.
@@ -49,7 +50,7 @@ class KindRegistry:
     def __init__(self) -> None:
         """Initialize with core K8s resources."""
         self._kind_to_entries: dict[str, list[KindEntry]] = {}
-        self._plural_to_kind: dict[str, str] = {}
+        self._plural_to_entries: dict[str, list[KindEntry]] = {}
         self._sorted_entries: list[KindEntry] = []
         self._load_core_resources()
 
@@ -87,22 +88,24 @@ class KindRegistry:
         plural: str,
         group: str = "",
         is_core: bool = False,
+        service: str = "",
     ) -> None:
-        """Register a Kind with its plural form and optional API group.
+        """Register a Kind with its plural form, optional API group, and owning service.
 
         Appends to existing entries if the same Kind is registered with a
         different group. Rebuilds the sorted entry list after each call.
         """
-        entry = KindEntry(kind=kind, plural=plural, group=group, is_core=is_core)
+        entry = KindEntry(kind=kind, plural=plural, group=group, is_core=is_core, service=service)
 
         entries = self._kind_to_entries.setdefault(kind, [])
         # Avoid duplicates.
         if entry not in entries:
             entries.append(entry)
 
-        # Update plural -> kind mapping (first-registered wins).
-        if plural not in self._plural_to_kind:
-            self._plural_to_kind[plural] = kind
+        # Update plural -> entries mapping (append, no longer first-wins).
+        plural_list = self._plural_to_entries.setdefault(plural, [])
+        if entry not in plural_list:
+            plural_list.append(entry)
 
         self._rebuild_sorted()
 
@@ -112,16 +115,16 @@ class KindRegistry:
         for entries in self._kind_to_entries.values():
             all_entries.extend(entries)
         # Deduplicate (same entry from multiple register calls).
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, str]] = set()
         unique: list[KindEntry] = []
         for e in all_entries:
-            key = (e.kind, e.plural, e.group)
+            key = (e.kind, e.plural, e.group, e.service)
             if key not in seen:
                 seen.add(key)
                 unique.append(e)
         self._sorted_entries = sorted(unique, key=lambda e: len(e.kind), reverse=True)
 
-    def register_from_crd(self, crd_spec: dict) -> None:
+    def register_from_crd(self, crd_spec: dict, service: str = "") -> None:
         """Auto-register from CRD spec sub-dict.
 
         Expects: {"group": "...", "names": {"kind": "...", "plural": "..."}}.
@@ -133,7 +136,7 @@ class KindRegistry:
         group = crd_spec.get("group", "")
         if not kind or not plural:
             return
-        self.register(kind, plural, group)
+        self.register(kind, plural, group, service=service)
 
     def is_ref_field(
         self,
@@ -254,7 +257,10 @@ class KindRegistry:
 
     def plural_to_kind(self, plural: str) -> str | None:
         """Return Kind for a plural. Returns None if not registered."""
-        return self._plural_to_kind.get(plural)
+        entries = self._plural_to_entries.get(plural, [])
+        if entries:
+            return entries[0].kind
+        return None
 
     def group_for_kind(self, kind: str) -> str | None:
         """Return group for a Kind. Returns None if not registered."""
@@ -278,7 +284,7 @@ class KindRegistry:
 
     def all_plurals(self) -> set[str]:
         """All registered plural names."""
-        return set(self._plural_to_kind.keys())
+        return set(self._plural_to_entries.keys())
 
     def core_plurals(self) -> set[str]:
         """Only bootstrap (is_core=True) resource plurals."""
