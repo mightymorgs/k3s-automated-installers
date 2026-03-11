@@ -651,6 +651,9 @@ def detect_ref(
                 return None
 
         cross_ns = detect_namespace(field)
+        # Structural objects with ref indicators block descendants;
+        # string-type fields have no children so the flag is irrelevant.
+        is_structural = (schema.get("type") == "object" and "properties" in schema)
         return ClassifiedField(
             field=field.path,
             role="input_ref",
@@ -664,6 +667,7 @@ def detect_ref(
             detection_source="ref_detector:kind_registry",
             fact_shape="identity",
             target_field="name",
+            blocks_descendants=is_structural,
         )
 
     # Step 4: Structural ref.
@@ -694,6 +698,7 @@ def detect_ref(
                     detection_source="ref_detector:structural_ref",
                     fact_shape="identity",
                     target_field="name",
+                    blocks_descendants=True,
                 )
 
     # Step 5: Array ref (C7).
@@ -773,6 +778,7 @@ def detect_secret_key_selector(
         detection_source="ref_detector:secret_key_selector",
         fact_shape="identity",
         target_field="name",
+        blocks_descendants=True,
     )
 
 
@@ -964,6 +970,7 @@ def detect_ref_tuple(
                         detection_source="ref_detector:ref_tuple",
                         fact_shape="identity",
                         target_field="name",
+                        blocks_descendants=True,
                     ))
             if results:
                 return results
@@ -1004,6 +1011,7 @@ def detect_ref_tuple(
                     detection_source="ref_detector:ref_tuple",
                     fact_shape="identity",
                     target_field="name",
+                    blocks_descendants=True,
                 )]
 
     # Step 6: Cannot resolve Kind -> return empty.

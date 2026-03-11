@@ -33,6 +33,7 @@ class ClassifiedField:
     detection_source: str = ""  # Identifies which classification layer produced this result
     fact_shape: str = ""        # "identity", "lifecycle", or "config"
     target_field: str = "name"  # canonical target field for URI fragment
+    blocks_descendants: bool = False  # True = structural ref whose children are ref components
 
 
 def classify_fields(
@@ -68,11 +69,14 @@ def classify_fields(
         registry = KindRegistry()
 
     results: list[ClassifiedField] = []
-    classified_ref_paths: set[str] = set()
+    classified_blocking_ref_paths: set[str] = set()
 
     for field in walk_crd_schema(spec_properties, spec_required, prefix=prefix):
-        # Parent-child deduplication: skip descendants of classified refs.
-        if any(field.path.startswith(ref_path + ".") for ref_path in classified_ref_paths):
+        # Parent-child deduplication: skip descendants of BLOCKING refs only.
+        # Structural detectors (SKS, ref_tuple, structural_ref) set
+        # blocks_descendants=True, meaning their children are ref components
+        # (name, key, namespace) not independent references.
+        if any(field.path.startswith(ref_path + ".") for ref_path in classified_blocking_ref_paths):
             continue
 
         # Get sibling fields for enum_kind detection and constraint_fk (C29).
@@ -94,8 +98,8 @@ def classify_fields(
         )
 
         for classified in classified_list:
-            if classified.role == "input_ref":
-                classified_ref_paths.add(field.path)
+            if classified.role == "input_ref" and classified.blocks_descendants:
+                classified_blocking_ref_paths.add(field.path)
 
         results.extend(classified_list)
 

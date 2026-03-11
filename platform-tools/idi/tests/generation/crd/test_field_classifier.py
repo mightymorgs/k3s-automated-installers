@@ -257,6 +257,80 @@ class TestDeduplication:
         assert "Secret" in target_kinds
         assert "ConfigMap" in target_kinds
 
+    def test_non_structural_ref_does_not_block_descendant(self):
+        """Non-structural ref (e.g., enum_kind) at spec.x does NOT suppress spec.x.y."""
+        props = {
+            "typeSelector": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["Certificate", "Issuer"],
+                    },
+                    "secretRef": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "key": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        }
+        fields = classify_fields(props, [], "cert-manager.io", "Test",
+                                registry=self.registry)
+        refs = [f for f in fields if f.role == "input_ref"]
+        ref_paths = {f.field for f in refs}
+        # The SKS child should appear as an independent ref
+        assert "spec.typeSelector.secretRef" in ref_paths
+
+    def test_structural_ref_still_blocks_descendants(self):
+        """SKS-shape ref at spec.secretRef blocks spec.secretRef.namespace."""
+        props = {
+            "secretRef": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "key": {"type": "string"},
+                    "namespace": {"type": "string"},
+                },
+            },
+        }
+        fields = classify_fields(props, [], "core", "Test",
+                                registry=self.registry)
+        refs = [f for f in fields if f.role == "input_ref"]
+        ref_paths = {f.field for f in refs}
+        assert "spec.secretRef" in ref_paths
+        # Children of structural ref must NOT appear as independent refs
+        assert "spec.secretRef.namespace" not in ref_paths
+        assert "spec.secretRef.name" not in ref_paths
+        assert "spec.secretRef.key" not in ref_paths
+
+    def test_ref_tuple_blocks_descendants(self):
+        """ref_tuple detection ({kind, name, namespace}) blocks descendant classification."""
+        props = {
+            "sourceRef": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["Certificate"],
+                    },
+                    "name": {"type": "string"},
+                    "namespace": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        }
+        fields = classify_fields(props, [], "cert-manager.io", "Test",
+                                registry=self.registry)
+        refs = [f for f in fields if f.role == "input_ref"]
+        ref_paths = {f.field for f in refs}
+        assert "spec.sourceRef" in ref_paths
+        # Descendants must be blocked by ref_tuple
+        assert "spec.sourceRef.name" not in ref_paths
+        assert "spec.sourceRef.namespace" not in ref_paths
+
     def test_config_parent_does_not_suppress_child(self):
         """config_field parent does NOT suppress child classification."""
         props = {
@@ -316,6 +390,24 @@ class TestClassifiedFieldExtensions:
         assert cf.detection_source == ""
         assert cf.fact_shape == ""
         assert cf.target_field == "name"
+
+    def test_blocks_descendants_defaults_to_false(self):
+        """blocks_descendants defaults to False for backward compatibility."""
+        cf = ClassifiedField(
+            field="spec.foo", role="config_field",
+            confidence=0.5, field_type="string",
+        )
+        assert cf.blocks_descendants is False
+
+    def test_blocks_descendants_can_be_set_true(self):
+        """blocks_descendants can be explicitly set to True."""
+        cf = ClassifiedField(
+            field="spec.secretRef", role="input_ref",
+            confidence=0.85, field_type="object",
+            target_kind="Secret", target_group="core",
+            blocks_descendants=True,
+        )
+        assert cf.blocks_descendants is True
 
     def test_new_fields_can_be_set_explicitly(self):
         cf = ClassifiedField(
