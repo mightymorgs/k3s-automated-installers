@@ -13,11 +13,72 @@ from idi.generation.dep_adapters.naming import normalize_id_suffix, singularize
 _EXCLUDED: frozenset[str] = frozenset({"namespace", "namespaces", "ns"})
 _SKIP_SEGMENTS: re.Pattern = re.compile(r"^(v\d+|api|apis)$", re.IGNORECASE)
 
+# Thresholds for statistical namespace detection.
+_NS_FREQUENCY_THRESHOLD = 0.30  # param must appear in ≥30% of operations
+_NS_DISPERSION_THRESHOLD = 5    # param must have ≥5 distinct child segments
+
 # Suffixes stripped from path param names to infer the resource.
 _FK_SUFFIXES: tuple[str, ...] = (
     "_id", "_pk", "_uuid", "_guid", "_key", "_ref", "_slug",
     "Id", "Pk", "Uuid", "Guid", "Key", "Ref", "Slug",
 )
+
+
+def detect_namespace_params(spec: dict) -> frozenset[str]:
+    """Detect routing/namespace params from spec path structure.
+
+    Two-factor rule:
+      1. Frequency: param appears in ≥30% of operations
+      2. Dispersion: param has ≥5 distinct non-param child segments
+
+    Returns frozenset of lowercased param names classified as namespace params.
+    """
+    paths = spec.get("paths", {})
+    if not paths:
+        return frozenset()
+
+    # Count total operations and per-param stats.
+    total_ops = 0
+    # param → set of operations it appears in (use path+method as key)
+    param_ops: dict[str, set[str]] = {}
+    # param → set of distinct child resource segments
+    param_children: dict[str, set[str]] = {}
+
+    _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+    for path, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
+        segments = path.strip("/").split("/")
+        for method in methods:
+            if method not in _HTTP_METHODS:
+                continue
+            total_ops += 1
+            op_key = f"{method}:{path}"
+
+            for idx, seg in enumerate(segments):
+                if not seg.startswith("{"):
+                    continue
+                param = seg.strip("{}").lower()
+                param_ops.setdefault(param, set()).add(op_key)
+
+                # Find first non-param segment after this param.
+                for j in range(idx + 1, len(segments)):
+                    child = segments[j]
+                    if not child.startswith("{"):
+                        param_children.setdefault(param, set()).add(child.lower())
+                        break
+
+    if total_ops == 0:
+        return frozenset()
+
+    result: set[str] = set()
+    for param, ops in param_ops.items():
+        frequency = len(ops) / total_ops
+        dispersion = len(param_children.get(param, set()))
+        if frequency >= _NS_FREQUENCY_THRESHOLD and dispersion >= _NS_DISPERSION_THRESHOLD:
+            result.add(param)
+
+    return frozenset(result)
 
 
 def _match_segment(candidate: str, known_resources: set[str]) -> str | None:
@@ -105,12 +166,13 @@ def detect_path_deps(
     segments = operation.path.strip("/").split("/")
     results: list[Dependency] = []
     seen: set[tuple[str, str]] = set()
+    excluded = _EXCLUDED | (operation.namespace_params or frozenset())
 
     for i, seg in enumerate(segments):
         if not seg.startswith("{"):
             continue
         param = seg.strip("{}")
-        if param.lower() in _EXCLUDED:
+        if param.lower() in excluded:
             continue
 
         # Skip params with enum constraints — routing selectors, not FKs

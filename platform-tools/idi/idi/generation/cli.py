@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from idi.generation.context import GeneratorContext
 from idi.generation.dep_adapters import DepAdapterRegistry, OperationInfo as DepOpInfo
+from idi.generation.dep_adapters.path_deps import detect_namespace_params
 from idi.generation.field_extractor import (
     extract_request_fields,
     extract_response_fields,
@@ -159,6 +160,7 @@ def _generate_json_v2(
     """
     dep_registry = DepAdapterRegistry()
     known_resources = get_all_resource_names(ctx, include_non_post=True)
+    namespace_params = detect_namespace_params(ctx.schema)
 
     for resource, operations in resources.items():
         seen: set = set()
@@ -212,6 +214,7 @@ def _generate_json_v2(
                 path_params=_PATH_PARAM_RE.findall(endpoint),
                 query_params=params_raw.get("query", []),
                 path_param_schemas=path_param_schemas,
+                namespace_params=namespace_params,
             )
 
             deps_detected, outputs_detected = dep_registry.detect(
