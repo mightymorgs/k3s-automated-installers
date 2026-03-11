@@ -1,7 +1,7 @@
-"""Tests for _type_factor schema gates in target_inference.py (section-03)."""
+"""Tests for target_inference.py — schema gates (s03) + suffix hardening (s09)."""
 import pytest
 
-from idi.generation.dep_adapters.target_inference import _type_factor
+from idi.generation.dep_adapters.target_inference import _match_resource, _type_factor
 
 
 class TestTypeFactorSchemaGates:
@@ -76,3 +76,62 @@ class TestTypeFactorSchemaGates:
     def test_never_fk_field_still_returns_zero(self):
         info = {"type": "string"}
         assert _type_factor("description", info) == 0.0
+
+
+class TestSuffixContainmentHardening:
+    """Suffix containment minimum token length raised from 4 to 7 (section-09)."""
+
+    # Resources used as the known-set for suffix matching.
+    _RESOURCES = frozenset({
+        "qualityprofile",          # suffix match for "profile" (7 chars)
+        "auth-provider",           # suffix match for "provider" (8 chars)
+        "sysmfamethod",            # would false-match "method" (6 chars)
+        "managed-resources",       # would false-match "source" (6 chars)
+        "roles-composites-realm",  # would false-match "realm" (5 chars)
+        "some-type-resource",      # would false-match "type" (4 chars)
+    })
+
+    def test_4char_type_does_not_suffix_match(self):
+        """'type' (4 chars) must NOT match via suffix containment."""
+        result = _match_resource("type", self._RESOURCES)
+        assert result is None
+
+    def test_5char_realm_does_not_suffix_match(self):
+        """'realm' (5 chars) must NOT match via suffix containment."""
+        result = _match_resource("realm", self._RESOURCES)
+        assert result is None
+
+    def test_6char_method_does_not_suffix_match(self):
+        """'method' (6 chars) must NOT match via suffix containment."""
+        result = _match_resource("method", self._RESOURCES)
+        assert result is None
+
+    def test_6char_source_does_not_suffix_match(self):
+        """'source' (6 chars) must NOT match 'managed-resources' via suffix."""
+        result = _match_resource("source", self._RESOURCES)
+        assert result is None
+
+    def test_7char_profile_does_suffix_match(self):
+        """'profile' (7 chars) DOES match 'qualityprofile' via suffix."""
+        result = _match_resource("profile", self._RESOURCES)
+        assert result is not None
+        name, confidence = result
+        assert name == "qualityprofile"
+        assert confidence == 0.2
+
+    def test_8char_provider_does_suffix_match(self):
+        """'provider' (8 chars) DOES match 'auth-provider' via suffix."""
+        result = _match_resource("provider", self._RESOURCES)
+        assert result is not None
+        name, confidence = result
+        assert name == "auth-provider"
+        assert confidence == 0.2
+
+    def test_short_candidates_still_match_via_other_strategies(self):
+        """Candidates below suffix threshold can still match exactly."""
+        resources = frozenset({"type", "realm", "method"})
+        # Exact match still works for short candidates
+        for candidate in ("type", "realm", "method"):
+            result = _match_resource(candidate, resources)
+            assert result is not None, f"'{candidate}' should exact-match"
+            assert result[0] == candidate

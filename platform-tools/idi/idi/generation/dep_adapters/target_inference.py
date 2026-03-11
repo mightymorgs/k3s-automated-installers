@@ -370,7 +370,7 @@ def _match_resource(
 
     # Suffix containment: 'profile' is a suffix of 'qualityprofile'.
     # Also tries inflected plural form of the candidate.
-    if len(candidate) >= 4:
+    if len(candidate) >= 7:
         candidate_flat = candidate.replace("__", "")
         inflect_flat = _engine.plural_noun(candidate_flat) if candidate_flat else ""
         suffix_matches: list[str] = []
