@@ -229,14 +229,25 @@ class TestDetectRefStructural:
         result = detect_ref(field, registry)
         assert result is None
 
-    def test_ref_suffix_but_no_name_property(self, registry):
-        """issuerRef but no name property in schema — KindRegistry match (step 3) still works."""
+    def test_ref_suffix_wrapper_object_skipped(self, registry):
+        """issuerRef with non-ref-shaped properties (wrapper) → None.
+
+        Objects named *Ref but without ref indicators (name, key, namespace)
+        are wrapper objects containing nested refs, not direct refs.
+        """
         field = _make_field("issuerRef", schema={
             "type": "object",
             "properties": {"group": {"type": "string"}},
         })
-        # This won't match structural (no "name" property) but will match
-        # KindRegistry (step 3) since "issuerRef" matches Issuer via is_ref_field.
+        result = detect_ref(field, registry)
+        assert result is None
+
+    def test_ref_suffix_with_name_property_matches(self, registry):
+        """issuerRef with name property → KindRegistry match."""
+        field = _make_field("issuerRef", schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "group": {"type": "string"}},
+        })
         result = detect_ref(field, registry)
         assert result is not None
         assert result.detection_source == "ref_detector:kind_registry"

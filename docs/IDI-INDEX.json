@@ -4,7 +4,7 @@
   "total_modules": 60,
   "cgc_mode": false,
   "git": {
-    "commit": "b6ed7ee6a0866da9e9bb994b8d2b5a80baadc57a",
+    "commit": "1cad1095ed8c0a4ca7a4b277ec7e99bdd3145a30",
     "branch": "feat/crd-implementation",
     "dirty": true
   },
@@ -1201,8 +1201,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:classify_walked_field",
-        "line_start": 1595,
-        "line_end": 1799
+        "line_start": 1607,
+        "line_end": 1811
       },
       {
         "name": "compute_schema_fingerprint",
@@ -1219,8 +1219,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_apigroup_literal",
-        "line_start": 1110,
-        "line_end": 1156
+        "line_start": 1122,
+        "line_end": 1168
       },
       {
         "name": "detect_cataloged_shape",
@@ -1255,8 +1255,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_enum_kind",
-        "line_start": 1229,
-        "line_end": 1305
+        "line_start": 1241,
+        "line_end": 1317
       },
       {
         "name": "detect_example_kinds",
@@ -1264,8 +1264,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_example_kinds",
-        "line_start": 1041,
-        "line_end": 1107
+        "line_start": 1053,
+        "line_end": 1119
       },
       {
         "name": "detect_kubernetes_extensions",
@@ -1282,8 +1282,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_namespace",
-        "line_start": 1384,
-        "line_end": 1392
+        "line_start": 1396,
+        "line_end": 1404
       },
       {
         "name": "detect_parent_kind_name",
@@ -1291,8 +1291,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_parent_kind_name",
-        "line_start": 767,
-        "line_end": 854
+        "line_start": 779,
+        "line_end": 866
       },
       {
         "name": "detect_passthrough_manifest",
@@ -1300,8 +1300,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_passthrough_manifest",
-        "line_start": 1159,
-        "line_end": 1226
+        "line_start": 1171,
+        "line_end": 1238
       },
       {
         "name": "detect_ref",
@@ -1310,7 +1310,7 @@
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_ref",
         "line_start": 608,
-        "line_end": 711
+        "line_end": 723
       },
       {
         "name": "detect_ref_tuple",
@@ -1318,8 +1318,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_ref_tuple",
-        "line_start": 889,
-        "line_end": 998
+        "line_start": 901,
+        "line_end": 1010
       },
       {
         "name": "detect_scale_subresource",
@@ -1336,8 +1336,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_secret_key_selector",
-        "line_start": 714,
-        "line_end": 764
+        "line_start": 726,
+        "line_end": 776
       },
       {
         "name": "detect_status_output",
@@ -1345,8 +1345,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:detect_status_output",
-        "line_start": 1308,
-        "line_end": 1381
+        "line_start": 1320,
+        "line_end": 1393
       },
       {
         "name": "split_camel_case",
@@ -1354,8 +1354,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:split_camel_case",
-        "line_start": 1395,
-        "line_end": 1403
+        "line_start": 1407,
+        "line_end": 1415
       },
       {
         "name": "suppress_false_positives",
@@ -1363,8 +1363,8 @@
         "kind": "function",
         "tags": [],
         "import_path": "idi.generation.crd.ref_detector:suppress_false_positives",
-        "line_start": 1511,
-        "line_end": 1551
+        "line_start": 1523,
+        "line_end": 1563
       },
       {
         "name": "ShapeCatalog.load",

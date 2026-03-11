@@ -638,6 +638,18 @@ def detect_ref(
         field.name,
     )
     if is_ref and target_kind:
+        # Guard: if the field is type: object with properties, verify it has
+        # reference-shaped children (name, key, namespace). Fields like
+        # "authSecretRef" can be wrapper objects containing nested SecretRefs
+        # rather than direct Secret references. Skip these — the walker will
+        # recurse into children and detect the actual refs.
+        if schema.get("type") == "object" and "properties" in schema:
+            props = schema["properties"]
+            ref_indicators = {"name", "key", "namespace", "apiVersion", "kind", "apiGroup"}
+            if not any(ind in props for ind in ref_indicators):
+                # Wrapper object — don't classify as ref, let walker recurse.
+                return None
+
         cross_ns = detect_namespace(field)
         return ClassifiedField(
             field=field.path,
