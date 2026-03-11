@@ -16,9 +16,10 @@ _ID_FIELD_PRECEDENCE: list[str] = [
 ]
 
 _METHOD_PRIORITY: dict[str, int] = {
-    "POST": 3,
-    "PUT": 2,
-    "PATCH": 1,
+    "POST": 4,
+    "PUT": 3,
+    "PATCH": 2,
+    "GET": 1,
 }
 
 
@@ -34,6 +35,7 @@ def detect_outputs(operation: OperationInfo) -> list[Output]:
         return []
 
     # PUT/PATCH with resource-specific path param = update, not create.
+    # GET always reads (produces) data regardless of path structure.
     if operation.method in ("PUT", "PATCH") and _has_resource_id_in_path(operation):
         return []
 
@@ -44,8 +46,14 @@ def detect_outputs(operation: OperationInfo) -> list[Output]:
     results: list[Output] = []
     seen: set[str] = set()
 
+    # Classify readOnly/writeOnly fields from response schema.
+    readonly_fields, writeonly_fields = classify_readonly_writeonly(props)
+    writeonly_set = set(writeonly_fields)
+
     for field_name in _ID_FIELD_PRECEDENCE:
         if field_name not in props:
+            continue
+        if field_name in writeonly_set:
             continue
         canonical = canonicalize_field(field_name)
         fact_ref = f"facts://{operation.service}/{operation.resource}#{canonical}"
@@ -53,12 +61,47 @@ def detect_outputs(operation: OperationInfo) -> list[Output]:
             results.append(Output(
                 field=field_name,
                 fact_ref=fact_ref,
-                source="generic_odg",
+                source="readonly_field" if field_name in readonly_fields else "generic_odg",
+                priority=priority,
+            ))
+            seen.add(fact_ref)
+
+    # Also register readOnly fields not in _ID_FIELD_PRECEDENCE as outputs.
+    for field_name in readonly_fields:
+        if field_name in writeonly_set:
+            continue
+        canonical = canonicalize_field(field_name)
+        fact_ref = f"facts://{operation.service}/{operation.resource}#{canonical}"
+        if fact_ref not in seen:
+            results.append(Output(
+                field=field_name,
+                fact_ref=fact_ref,
+                source="readonly_field",
                 priority=priority,
             ))
             seen.add(fact_ref)
 
     return results
+
+
+def classify_readonly_writeonly(
+    props: dict,
+) -> tuple[list[str], list[str]]:
+    """Classify fields by readOnly/writeOnly attributes.
+
+    Returns (readonly_fields, writeonly_fields) where each is a list
+    of field names.
+    """
+    readonly: list[str] = []
+    writeonly: list[str] = []
+    for name, schema in props.items():
+        if not isinstance(schema, dict):
+            continue
+        if schema.get("readOnly"):
+            readonly.append(name)
+        if schema.get("writeOnly"):
+            writeonly.append(name)
+    return readonly, writeonly
 
 
 def _has_resource_id_in_path(operation: OperationInfo) -> bool:

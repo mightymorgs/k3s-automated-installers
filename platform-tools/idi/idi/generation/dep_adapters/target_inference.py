@@ -15,12 +15,14 @@ Key differences from the previous implementation:
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Any
 
 from idi.generation.dep_adapters.naming import (
     _engine,
     normalize,
+    normalize_id_suffix,
     singularize,
     split_words,
     stem,
@@ -29,7 +31,16 @@ from idi.generation.resource_namer import strip_api_version_prefix
 
 _COMMON_FK_SUFFIXES: tuple[str, ...] = (
     "_id", "_pk", "_uuid", "_guid", "_key", "_ref",
-    "_ids", "_number", "_name", "_slug", "_flow",
+    "_ids", "_uuids", "_guids",
+    "_number", "_name", "_slug", "_flow",
+)
+
+# OWASP-derived credential parameter regex (#1).
+# Matches credential-like field names that should NOT be treated as FKs.
+_CREDENTIAL_PARAMS: re.Pattern = re.compile(
+    r"^(client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token"
+    r"|token|password|passwd|secret|api[_-]?key|apikey|authorization)$",
+    re.IGNORECASE,
 )
 
 # Low-priority aliases for resources that use non-obvious names.
@@ -77,6 +88,12 @@ def infer_target(
         container: Parent property name (for nested body fields).
         json_path: Full JSON path to this field in the body schema.
     """
+    # Credential exclusion (#1): skip credential-like params unless they
+    # have an FK suffix (e.g. token_id, secret_id are legitimate FKs).
+    fn_lower = field_name.lower()
+    if not _has_fk_suffix(fn_lower) and _CREDENTIAL_PARAMS.match(fn_lower):
+        return None, 0.0
+
     # Compute type-based confidence factor.
     type_factor = _type_factor(field_name, field_info)
     if type_factor <= 0.0:
@@ -194,6 +211,17 @@ def _build_candidates(
         stripped = fn_lower.removesuffix(suffix)
         if stripped != fn_lower and stripped:
             candidates.append((normalize(stripped), 0.5))
+
+    # --- ID synonym normalization (#8) ---
+    # Normalize _uuid/_guid/_uid to _id for cross-convention matching.
+    normalized = normalize_id_suffix(field_name)
+    if normalized != field_name:
+        # Re-run suffix stripping on the normalized form (e.g. user_uuid → user_id → user)
+        norm_lower = normalized.lower()
+        for suffix in _COMMON_FK_SUFFIXES:
+            stripped = norm_lower.removesuffix(suffix)
+            if stripped != norm_lower and stripped:
+                candidates.append((normalize(stripped), 0.48))  # Slight penalty for synonym
 
     # --- RestTestGen name qualification ---
     # If the field name is a bare qualifiable token (id, name, key, etc.),

@@ -102,3 +102,23 @@ def stem(name: str) -> str:
 def stem_token(word: str) -> str:
     """Porter-stem a single token."""
     return _stemmer.stem(word.lower())
+
+
+# ---------------------------------------------------------------------------
+# ID synonym normalization (#8)
+# ---------------------------------------------------------------------------
+
+_ID_SYNONYMS: tuple[str, ...] = ("_uuid", "_guid", "_uid")
+
+
+def normalize_id_suffix(name: str) -> str:
+    """Canonicalize ID-like suffixes to _id for producer-consumer matching.
+
+    Converts _uuid, _guid, _uid suffixes to _id.
+    Leaves non-ID-like names unchanged.
+    """
+    lower = name.lower()
+    for synonym in _ID_SYNONYMS:
+        if lower.endswith(synonym):
+            return name[: len(name) - len(synonym)] + "_id"
+    return name
