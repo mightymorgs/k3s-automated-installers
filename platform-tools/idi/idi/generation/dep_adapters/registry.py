@@ -12,7 +12,7 @@ from idi.generation.dep_adapters.base import (
     OperationInfo,
     Output,
 )
-from idi.generation.dep_adapters.merge import filter_self_refs, merge_deps, merge_outputs
+from idi.generation.dep_adapters.merge import filter_by_confidence, filter_self_refs, merge_deps, merge_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,7 @@ class DepAdapterRegistry:
             except Exception:
                 logger.warning("Adapter %s raised in detect_outputs", adapter.name)
         deps = merge_deps(all_deps)
-        deps = filter_self_refs(deps, operation.resource)
+        deps = filter_self_refs(deps, operation.resource, operation.method)
+        deps = filter_by_confidence(deps)
         outputs = merge_outputs(all_outputs)
         return deps, outputs
