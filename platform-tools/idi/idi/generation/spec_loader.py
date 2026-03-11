@@ -161,10 +161,44 @@ def load_spec(
         return raw
 
     resolved = copy.deepcopy(raw)
+    memo: Dict[str, Any] = {}  # Shared cache across all sections
     for section in ("paths", "components", "definitions"):
         if section in resolved:
-            resolved[section] = _resolve_refs(resolved[section], raw)
+            resolved[section] = _resolve_refs(resolved[section], raw, memo=memo)
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Schema name normalization
+# ---------------------------------------------------------------------------
+
+_SCHEMA_SUFFIXES = ("Response", "Output", "Input", "Request", "DTO", "Dto", "Model", "Schema", "Resource")
+_SCHEMA_PREFIXES = ("Create", "Update", "Patch")
+
+
+def normalize_schema_name(name: str) -> str:
+    """Strip common suffixes/prefixes from a schema name for resource matching.
+
+    Attempts suffix stripping first, then prefix stripping if no suffix matched.
+    Guards against producing empty or very short names (<=2 chars).
+    """
+    # Try suffix stripping first
+    for suffix in _SCHEMA_SUFFIXES:
+        if name.endswith(suffix):
+            candidate = name[: -len(suffix)]
+            if len(candidate) > 2:
+                return candidate
+            return name
+
+    # Try prefix stripping
+    for prefix in _SCHEMA_PREFIXES:
+        if name.startswith(prefix):
+            candidate = name[len(prefix) :]
+            if len(candidate) > 2:
+                return candidate
+            return name
+
+    return name
 
 
 # ---------------------------------------------------------------------------

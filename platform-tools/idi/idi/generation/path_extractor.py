@@ -19,6 +19,52 @@ from idi.generation.context import GeneratorContext
 from idi.generation.resource_namer import build_resource_name
 from idi.generation.utils import clean_description
 
+# ---------------------------------------------------------------------------
+# RFC 6570 template parsing
+# ---------------------------------------------------------------------------
+
+# Operator -> (location, required)
+_RFC6570_OPERATORS: Dict[str, tuple] = {
+    "":  ("path", True),    # Simple string
+    "+": ("path", True),    # Reserved
+    "#": ("path", False),   # Fragment
+    ".": ("path", False),   # Label
+    "/": ("path", True),    # Path segment
+    ";": ("path", False),   # Semicolon
+    "?": ("query", False),  # Query
+    "&": ("query", False),  # Query continuation
+}
+
+_RFC6570_RE = re.compile(r"\{([+#./;?&]?)([^}]+)\}")
+
+
+def parse_rfc6570_template(template: str) -> List[Dict[str, Any]]:
+    """Parse an RFC 6570 URI template into parameter descriptors.
+
+    Returns list of dicts with 'name', 'location' ('path'/'query'),
+    and 'required' (bool) keys.
+    """
+    results: List[Dict[str, Any]] = []
+    for match in _RFC6570_RE.finditer(template):
+        operator = match.group(1)
+        varlist = match.group(2)
+        location, required = _RFC6570_OPERATORS.get(operator, ("path", True))
+
+        for var in varlist.split(","):
+            # Strip explode modifier (*) and maxlen (:N)
+            name = var.strip()
+            if name.endswith("*"):
+                name = name[:-1]
+            if ":" in name:
+                name = name.split(":")[0]
+            if name:
+                results.append({
+                    "name": name,
+                    "location": location,
+                    "required": required,
+                })
+    return results
+
 
 # ---------------------------------------------------------------------------
 # REST extraction
@@ -407,6 +453,7 @@ def extract_parameters(
     ctx: GeneratorContext,
     operation: Dict[str, Any],
     path_params: Optional[List[Dict[str, Any]]] = None,
+    path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extract parameters from an OpenAPI operation.
 
@@ -415,6 +462,9 @@ def extract_parameters(
     Swagger 2.0 ``in: body`` parameters, and Swagger 2.0 ``in: formData``
     parameters (synthesised into a body schema).
 
+    When *path* is provided, RFC 6570 template expressions are also
+    parsed to discover additional query parameters.
+
     Args:
         ctx: Generator context (used for ``$ref`` resolution against
             ``ctx.schema``).
@@ -422,6 +472,7 @@ def extract_parameters(
             and/or ``requestBody``.
         path_params: Optional list of path-level parameter dicts to
             merge with the operation's own parameters.
+        path: Optional API path template for RFC 6570 parsing.
 
     Returns:
         Dict with keys ``path`` (list), ``query`` (list), and ``body``
@@ -430,6 +481,12 @@ def extract_parameters(
     params: Dict[str, Any] = {"path": [], "query": [], "body": None}
 
     all_params = (path_params or []) + operation.get("parameters", [])
+
+    # Build set of explicitly declared param names for RFC 6570 promotion.
+    explicit_required: set = {
+        p.get("name", "") for p in all_params
+        if p.get("required", False)
+    }
 
     for param in all_params:
         param_info = {
@@ -446,6 +503,19 @@ def extract_parameters(
             params["path"].append(param_info)
         elif param.get("in") == "query":
             params["query"].append(param_info)
+
+    # RFC 6570: discover query params from path template expressions.
+    if path:
+        seen_names = {p["name"] for p in params["path"]} | {p["name"] for p in params["query"]}
+        for tp in parse_rfc6570_template(path):
+            if tp["location"] == "query" and tp["name"] not in seen_names:
+                params["query"].append({
+                    "name": tp["name"],
+                    "type": "string",
+                    "required": tp["name"] in explicit_required,
+                    "description": "",
+                })
+                seen_names.add(tp["name"])
 
     # Request body -- OpenAPI 3.0 style.
     request_body = operation.get("requestBody", {})

@@ -23,6 +23,63 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Schema preprocessing
+# ---------------------------------------------------------------------------
+
+_METADATA_KEYS = ("description", "title", "nullable", "deprecated", "readOnly", "writeOnly")
+
+
+def unwrap_single_item_combinator(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Collapse single-item allOf/oneOf/anyOf to the inner schema.
+
+    Recursively unwraps trivial combinator wrappers. Parent metadata
+    (description, title) is preserved if the child lacks those keys.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    for key in ("allOf", "oneOf", "anyOf"):
+        items = schema.get(key)
+        if isinstance(items, list) and len(items) == 1:
+            child = dict(items[0])  # shallow copy of child
+            # Merge parent metadata into child (child takes precedence)
+            for mk in _METADATA_KEYS:
+                if mk in schema and mk not in child:
+                    child[mk] = schema[mk]
+            # Recurse to handle nested trivial wrappers
+            return unwrap_single_item_combinator(child)
+
+    return schema
+
+
+def infer_schema_type(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Infer missing 'type' from sibling schema keys.
+
+    Returns a new dict with 'type' filled in if inference succeeded,
+    or the original unchanged if type was already present.
+    """
+    if not isinstance(schema, dict) or "type" in schema:
+        return schema
+
+    if "properties" in schema:
+        return {**schema, "type": "object"}
+    if "items" in schema:
+        return {**schema, "type": "array"}
+    if "enum" in schema and schema["enum"]:
+        val = schema["enum"][0]
+        if isinstance(val, bool):
+            return {**schema, "type": "boolean"}
+        if isinstance(val, int):
+            return {**schema, "type": "integer"}
+        if isinstance(val, float):
+            return {**schema, "type": "number"}
+        if isinstance(val, str):
+            return {**schema, "type": "string"}
+
+    return schema
+
+
+# ---------------------------------------------------------------------------
 # Schema field extraction
 # ---------------------------------------------------------------------------
 
@@ -54,6 +111,10 @@ def extract_schema_fields(
     if not schema or max_depth <= 0:
         return {"type": "object", "properties": {}, "required": []}
 
+    # Preprocessing: unwrap trivial combinators and infer missing types.
+    schema = unwrap_single_item_combinator(schema)
+    schema = infer_schema_type(schema)
+
     result: Dict[str, Any] = {
         "type": schema.get("type", "object"),
         "description": schema.get("description", ""),
@@ -70,6 +131,7 @@ def extract_schema_fields(
 
     # Extract properties.
     for prop_name, prop_schema in schema.get("properties", {}).items():
+        prop_schema = infer_schema_type(prop_schema)
         prop_info: Dict[str, Any] = {
             "type": prop_schema.get("type", "object"),
             "description": prop_schema.get("description", "")[:100],
