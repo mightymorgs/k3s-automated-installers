@@ -10,6 +10,7 @@ C7: array handling (PushSecret secretStoreRefs[], IngressRoute routes[])
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -114,34 +115,30 @@ class WalkedField:
     sibling_names: frozenset[str] = frozenset()  # Parent object's property names
 
 
-def _compute_schema_fingerprint(
-    properties: dict[str, dict],
+def _compute_deep_fingerprint(
+    properties: dict[str, Any],
     required: list[str] | None = None,
 ) -> str:
-    """Compute a structural fingerprint from schema properties.
+    """Compute a deep structural fingerprint from schema properties.
 
-    Returns sorted name:type pairs with ? suffix for optional properties.
-    Example: "key:string?,name:string,namespace:string?"
-
-    Local copy of ref_detector.compute_schema_fingerprint to avoid
-    circular imports (ref_detector imports from schema_walker).
+    Uses json.dumps with sort_keys to produce a canonical string that
+    captures the full nested structure, not just top-level names/types.
+    Returns "" for empty properties (signals: do not cache).
     """
     if not properties:
         return ""
-    required_set = set(required) if required else set()
-    parts: list[str] = []
-    for prop_name in sorted(properties.keys()):
-        prop_schema = properties[prop_name]
-        prop_type = prop_schema.get("type", "string") if isinstance(prop_schema, dict) else "string"
-        suffix = "" if prop_name in required_set else "?"
-        parts.append(f"{prop_name}:{prop_type}{suffix}")
-    return ",".join(parts)
+    # Include required list in the key so different requiredness = different cache entry
+    key_obj = {"p": properties}
+    if required:
+        key_obj["r"] = sorted(required)
+    return json.dumps(key_obj, sort_keys=True)
 
 
 # Type alias for the memoization cache.
-# Key: fingerprint string
+# Key: (fingerprint_string, is_array_item) tuple
 # Value: list of (relative_path, depth_offset, field_schema, is_array_item, required, sibling_names) tuples
 _CacheEntry = list[tuple[str, int, dict, bool, bool, frozenset]]
+_CacheKey = tuple[str, bool]
 
 
 def walk_crd_schema(
@@ -168,7 +165,7 @@ def walk_crd_schema(
     Yields:
         WalkedField for each property at every level.
     """
-    cache: dict[str, _CacheEntry] = {}
+    cache: dict[_CacheKey, _CacheEntry] = {}
     yield from _walk_recursive(
         properties=properties,
         required=required or [],
@@ -203,7 +200,7 @@ def walk_crd_status(
     Yields:
         WalkedField for each status property.
     """
-    cache: dict[str, _CacheEntry] = {}
+    cache: dict[_CacheKey, _CacheEntry] = {}
     yield from _walk_recursive(
         properties=status_properties,
         required=[],
@@ -263,7 +260,7 @@ def _walk_recursive(
     skip_status_in_excluded: bool,
     full_confidence_depth: int = 8,
     depth_decay: float = 0.9,
-    cache: dict[str, _CacheEntry] | None = None,
+    cache: dict[_CacheKey, _CacheEntry] | None = None,
 ) -> Iterator[WalkedField]:
     """Internal recursive walker.
 
@@ -373,7 +370,7 @@ def _walk_recursive(
 
 
 def _walk_subtree_cached(
-    cache: dict[str, _CacheEntry] | None,
+    cache: dict[_CacheKey, _CacheEntry] | None,
     child_props: dict[str, Any],
     child_required: list[str],
     prefix: str,
@@ -391,7 +388,6 @@ def _walk_subtree_cached(
     adjusted paths and recomputed depth_confidence.
     """
     if cache is None:
-        # No cache provided — fall through to normal recursion.
         yield from _walk_recursive(
             properties=child_props,
             required=child_required,
@@ -407,7 +403,7 @@ def _walk_subtree_cached(
         )
         return
 
-    fingerprint = _compute_schema_fingerprint(child_props, child_required)
+    fingerprint = _compute_deep_fingerprint(child_props, child_required)
 
     # Don't cache empty fingerprints (no benefit, could cause spurious hits).
     if not fingerprint:
@@ -426,10 +422,12 @@ def _walk_subtree_cached(
         )
         return
 
-    if fingerprint in cache:
-        # Replay from cache with adjusted paths and recomputed depth_confidence.
+    # Cache key includes is_array_item so object vs array contexts don't collide.
+    cache_key: _CacheKey = (fingerprint, is_array_item)
+
+    if cache_key in cache:
         yield from _replay_cached(
-            cached=cache[fingerprint],
+            cached=cache[cache_key],
             prefix=prefix,
             base_depth=current_depth,
             max_depth=max_depth,
@@ -468,4 +466,4 @@ def _walk_subtree_cached(
             field.required,
             field.sibling_names,
         ))
-    cache[fingerprint] = results
+    cache[cache_key] = results
