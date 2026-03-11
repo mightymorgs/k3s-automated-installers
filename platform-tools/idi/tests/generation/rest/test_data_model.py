@@ -36,9 +36,9 @@ class TestDetectionSourceEnum:
         result = json.dumps({"source": DetectionSource.OPENAPI_LINK})
         assert '"rest:openapi_link"' in result
 
-    def test_enum_has_15_members(self):
-        """The enum has exactly 15 members."""
-        assert len(DetectionSource) == 15
+    def test_enum_has_16_members(self):
+        """The enum has exactly 16 members."""
+        assert len(DetectionSource) == 16
 
 
 class TestDependencyDataclass:

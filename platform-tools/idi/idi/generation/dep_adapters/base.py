@@ -24,6 +24,7 @@ class DetectionSource(str, Enum):
     READONLY_DIFF = "rest:readonly_diff"
     NESTED_FK = "rest:nested_fk"
     ANNOTATION = "rest:annotation"
+    OPERATIONID = "rest:operationid"
 
 
 @dataclass

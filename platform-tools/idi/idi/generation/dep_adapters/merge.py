@@ -31,6 +31,7 @@ _SOURCE_THRESHOLDS: dict[str, float] = {
     "generic_odg:query": 0.25,
     "generic_odg:link": 0.0,
     "generic_odg:annotation": 0.0,
+    "generic_odg:operationid": 0.50,
 }
 _DEFAULT_THRESHOLD = 0.25
 
