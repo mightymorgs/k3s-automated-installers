@@ -191,8 +191,9 @@ def _break_cycles_by_confidence(
     """
     deps = {k: set(v) for k, v in dependencies.items()}
     removed: list[tuple[str, str, float]] = []
+    max_iterations = len(dependencies) + sum(len(v) for v in dependencies.values())
 
-    while True:
+    for _ in range(max_iterations):
         sccs = tarjan_scc(deps)
         # Find cyclic SCCs: multi-node or single-node with self-loop
         cyclic = [
@@ -240,6 +241,7 @@ def _break_cycles_by_confidence(
 def topological_layers(
     dependencies: dict[str, set[str]],
     edge_confidences: dict[tuple[str, str], float] | None = None,
+    broken_edges: list[tuple[str, str, float]] | None = None,
 ) -> list[list[str]]:
     """Return operations grouped into execution layers.
 
@@ -255,6 +257,9 @@ def topological_layers(
         edge_confidences: Optional mapping of (source, target) -> confidence.
             When provided, cycles are broken by iteratively removing the
             lowest-confidence edge from each SCC.
+        broken_edges: Optional list that, when provided, is populated with
+            (source, target, confidence) tuples for each edge removed during
+            cycle breaking. Pass an empty list to collect results.
 
     Returns:
         List of layers, where each layer is a sorted list of operation names.
@@ -272,8 +277,10 @@ def topological_layers(
         )
 
     # Step 2: Confidence-based cycle breaking (when scores available)
-    if edge_confidences:
-        full_deps, _removed = _break_cycles_by_confidence(full_deps, edge_confidences)
+    if edge_confidences is not None:
+        full_deps, removed = _break_cycles_by_confidence(full_deps, edge_confidences)
+        if broken_edges is not None:
+            broken_edges.extend(removed)
 
     # Step 3: Tarjan's SCC detection
     sccs = tarjan_scc(full_deps)

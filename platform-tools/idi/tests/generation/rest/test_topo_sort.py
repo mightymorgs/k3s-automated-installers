@@ -276,6 +276,33 @@ class TestConfidenceCycleBreaking:
         assert result == [["A"]]
         # Self-loop should be removed, A placed normally
 
+    def test_broken_edges_collector(self):
+        """Caller can collect removed edges via broken_edges parameter."""
+        deps = {"A": {"B"}, "B": {"A"}}
+        confs = {("A", "B"): 0.9, ("B", "A"): 0.3}
+        collector: list[tuple[str, str, float]] = []
+        topological_layers(deps, edge_confidences=confs, broken_edges=collector)
+        assert len(collector) == 1
+        assert collector[0] == ("B", "A", 0.3)
+
+    def test_broken_edges_none_by_default(self):
+        """Without broken_edges param, no error and no collection."""
+        deps = {"A": {"B"}, "B": {"A"}}
+        confs = {("A", "B"): 0.9, ("B", "A"): 0.3}
+        # Should work fine without collector
+        result = topological_layers(deps, edge_confidences=confs)
+        assert len(result) == 2
+
+    def test_missing_confidence_defaults_high(self):
+        """Edges not in edge_confidences default to 1.0 — preserved preferentially."""
+        # A↔B cycle, only one edge has confidence
+        deps = {"A": {"B"}, "B": {"A"}}
+        # Only B→A has a score; A→B is missing → defaults to 1.0
+        confs = {("B", "A"): 0.2}
+        result = topological_layers(deps, edge_confidences=confs)
+        # B→A (0.2) removed, A→B (default 1.0) kept → [B], [A]
+        assert result == [["B"], ["A"]]
+
     def test_large_scc_iterative_removal(self):
         """Large SCC (10+ nodes) — iteratively removes edges until acyclic."""
         # 12-node ring: n0 depends on n11, n1 depends on n0, etc.
