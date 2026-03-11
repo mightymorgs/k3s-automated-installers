@@ -98,5 +98,18 @@ class OlmDepAdapter:
         operation: OperationInfo,
         spec: dict[str, Any],
     ) -> list[Output]:
-        """OLM does not produce Output edges — side-effects handled by RBAC adapter."""
-        return []
+        """Emit one Output per owned GVK declared in the OLM CSV."""
+        _, owned = self._extract_cached(operation.service)
+        for gvk in owned:
+            logger.debug(
+                "olm_deps:owned_output %s/%s", gvk.group, gvk.kind,
+            )
+        return [
+            Output(
+                field=f"olm:owned:{gvk.group}/{gvk.kind}",
+                fact_ref=f"crdfacts://{gvk.group}/{gvk.kind}#name",
+                source="olm_deps:owned",
+                priority=3,
+            )
+            for gvk in owned
+        ]

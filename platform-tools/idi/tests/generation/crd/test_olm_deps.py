@@ -7,7 +7,7 @@ import pytest
 
 from idi.generation.crd.kind_registry import KindRegistry
 from idi.generation.crd.olm_loader import GVKRef
-from idi.generation.dep_adapters.base import OperationInfo
+from idi.generation.dep_adapters.base import OperationInfo, Output
 from idi.generation.dep_adapters.olm_deps import OlmDepAdapter
 
 
@@ -299,18 +299,78 @@ class TestOwnedGvks:
 
 
 class TestDetectOutputs:
-    def test_always_returns_empty(self):
-        """detect_outputs always returns empty list."""
-        reg = _make_registry()
+    def test_output_attributes_for_owned_gvk(self):
+        """detect_outputs returns Output with correct field, fact_ref, source, priority."""
+        reg = KindRegistry()
         adapter = OlmDepAdapter(registry=reg)
-        csv = _make_csv_with_required([
-            {"name": "certificates.cert-manager.io", "kind": "Certificate", "version": "v1"},
+        csv = _make_csv_with_owned([
+            {"name": "externalsecrets.external-secrets.io", "kind": "ExternalSecret", "version": "v1beta1"},
         ])
 
         with patch("idi.generation.dep_adapters.olm_deps.fetch_olm_csv", return_value=csv):
             outputs = adapter.detect_outputs(_make_operation(), {})
 
+        assert len(outputs) == 1
+        out = outputs[0]
+        assert isinstance(out, Output)
+        assert out.field == "olm:owned:external-secrets.io/ExternalSecret"
+        assert out.fact_ref == "crdfacts://external-secrets.io/ExternalSecret#name"
+        assert out.source == "olm_deps:owned"
+        assert out.priority == 3
+
+    def test_no_csv_returns_empty(self):
+        """No CSV available returns empty output list."""
+        adapter = OlmDepAdapter(registry=KindRegistry())
+
+        with patch("idi.generation.dep_adapters.olm_deps.fetch_olm_csv", return_value=None):
+            outputs = adapter.detect_outputs(_make_operation(), {})
+
         assert outputs == []
+
+    def test_owned_registered_via_detect_outputs(self):
+        """Calling detect_outputs triggers caching that also registers owned GVKs."""
+        reg = KindRegistry()
+        adapter = OlmDepAdapter(registry=reg)
+        csv = _make_csv_with_owned([
+            {"name": "externalsecrets.external-secrets.io", "kind": "ExternalSecret", "version": "v1beta1"},
+        ])
+
+        with patch("idi.generation.dep_adapters.olm_deps.fetch_olm_csv", return_value=csv):
+            adapter.detect_outputs(_make_operation(), {})
+
+        assert reg.kind_to_plural("ExternalSecret") == "externalsecrets"
+
+    def test_cross_method_caching(self):
+        """detect_dependencies then detect_outputs shares cache — no re-fetch."""
+        reg = KindRegistry()
+        adapter = OlmDepAdapter(registry=reg)
+        csv = _make_csv_with_owned([
+            {"name": "externalsecrets.external-secrets.io", "kind": "ExternalSecret", "version": "v1beta1"},
+        ])
+
+        with patch("idi.generation.dep_adapters.olm_deps.fetch_olm_csv", return_value=csv) as mock_fetch:
+            adapter.detect_dependencies(_make_operation(), {}, set())
+            outputs = adapter.detect_outputs(_make_operation(), {})
+
+        mock_fetch.assert_called_once()
+        assert len(outputs) == 1
+
+    def test_multiple_owned_gvks(self):
+        """Multiple owned GVKs produce multiple Outputs with distinct fields."""
+        reg = KindRegistry()
+        adapter = OlmDepAdapter(registry=reg)
+        csv = _make_csv_with_owned([
+            {"name": "externalsecrets.external-secrets.io", "kind": "ExternalSecret", "version": "v1beta1"},
+            {"name": "secretstores.external-secrets.io", "kind": "SecretStore", "version": "v1beta1"},
+            {"name": "clustersecretstores.external-secrets.io", "kind": "ClusterSecretStore", "version": "v1beta1"},
+        ])
+
+        with patch("idi.generation.dep_adapters.olm_deps.fetch_olm_csv", return_value=csv):
+            outputs = adapter.detect_outputs(_make_operation(), {})
+
+        assert len(outputs) == 3
+        fields = {o.field for o in outputs}
+        assert len(fields) == 3  # All distinct
 
 
 # ---------------------------------------------------------------------------
