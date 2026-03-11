@@ -1,13 +1,11 @@
 """Schema family adapters for FK detection and response schema extraction.
 
 Provides adapters for different API schema types:
-- OpenAPI REST: Standard REST APIs
-- Cloudflare: APIs with {result, success, errors, messages} wrapper
+- OpenAPI REST: Standard REST APIs (also handles Swagger 2.0 natively)
+- Cloudflare: APIs with deeply nested paths (resource name normalization)
 - Vault: HashiCorp Vault with backend-specific response envelopes
-- Kubernetes CRD: Custom Resource Definitions
 - AWS Query: AWS-style action-based APIs
-- GitHub: GitHub's pseudo-OpenAPI spec
-- Swagger 2.0: Legacy Swagger specs
+- GitHub: GitHub's pseudo-OpenAPI spec (alias resolution)
 
 Usage:
     from idi.generation.adapters import get_adapter
@@ -17,7 +15,6 @@ Usage:
 
     # Cloudflare auto-detected or explicit:
     adapter = get_adapter(service="cloudflare", style="cloudflare")
-    schema = adapter.extract_response_schema(operation, method, path)
 
     # Vault auto-detected or explicit:
     adapter = get_adapter(service="vault", style="vault")
@@ -30,7 +27,6 @@ from idi.generation.adapters.openapi_rest import OpenApiRestAdapter
 from idi.generation.adapters.cloudflare import CloudflareAdapter
 from idi.generation.adapters.vault import VaultAdapter
 from idi.generation.adapters.aws_query import AwsQueryAdapter
-from idi.generation.adapters.swagger2 import Swagger2Adapter
 from idi.generation.adapters.github_openapi import GitHubOpenApiAdapter
 
 __all__ = [
@@ -38,7 +34,6 @@ __all__ = [
     "CloudflareAdapter",
     "VaultAdapter",
     "AwsQueryAdapter",
-    "Swagger2Adapter",
     "GitHubOpenApiAdapter",
     "AdapterRegistry",
     "get_adapter",
@@ -56,9 +51,10 @@ class AdapterRegistry:
             "vault": VaultAdapter,
             "aws": AwsQueryAdapter,
             "query": AwsQueryAdapter,
-            "swagger": Swagger2Adapter,
-            "swagger2": Swagger2Adapter,
             "github": GitHubOpenApiAdapter,
+            # Swagger 2.0 handled natively by generic pipeline
+            "swagger": OpenApiRestAdapter,
+            "swagger2": OpenApiRestAdapter,
         }
 
     def register(self, style: str, adapter_class: Type) -> None:
@@ -73,13 +69,13 @@ class AdapterRegistry:
             style: Adapter style key
             service: Service name
             known_resources: Known resource names for FK resolution
-            spec: Full OpenAPI spec (passed to adapters that need $ref resolution)
+            spec: Full OpenAPI spec (passed to adapters that need it)
         """
         adapter_class = self._adapters.get(style.lower())
         if not adapter_class:
             raise ValueError(f"Unknown adapter style: {style}")
 
-        # CloudflareAdapter accepts an extra 'spec' kwarg for $ref resolution
+        # CloudflareAdapter accepts an extra 'spec' kwarg
         if adapter_class is CloudflareAdapter:
             return adapter_class(service=service, known_resources=known_resources, spec=spec)
 
@@ -91,11 +87,6 @@ class AdapterRegistry:
                      spec: Optional[Dict[str, Any]] = None) -> str:
         """Auto-detect style from sample API path and/or spec structure.
 
-        Detection order:
-        1. Service name matches (highest priority - explicit naming)
-        2. Spec structure detection (medium priority - API characteristics)
-        3. Path pattern matching (fallback - URL conventions)
-
         Args:
             sample_path: Sample API path for pattern matching
             service: Service name (for name-based detection)
@@ -106,42 +97,29 @@ class AdapterRegistry:
             return "vault"
         if service.lower() == "cloudflare":
             return "cloudflare"
-        # PHASE 2 FIX (A2-002): Add GitHub adapter detection
         if service.lower() == "github":
             return "github"
 
         # Priority 2: Spec structure detection
-        # Check Vault first (more specific paths)
         if spec and _is_vault_spec(spec):
             return "vault"
-        # Check Cloudflare (response wrapper pattern)
         if spec and _is_cloudflare_spec(spec):
             return "cloudflare"
 
         # Priority 3: Path pattern matching
-        # K8s API paths use the generic REST adapter; CRD detection goes
-        # through crd_dep.py, not the schema-family adapter path.
         if re.match(r"^/apis/[a-z0-9.-]+/v\d+", sample_path, re.IGNORECASE):
             return "rest"
         if re.match(r"^/api/v\d+/", sample_path, re.IGNORECASE):
             return "rest"
         if "Action=" in sample_path or "#Action=" in sample_path:
             return "aws"
+
+        # Swagger 2.0 specs route to rest (generic pipeline handles them)
         return "rest"
 
 
 def _is_vault_spec(spec: Dict[str, Any]) -> bool:
-    """Detect HashiCorp Vault API by path structure.
-
-    Vault specs have characteristic paths like ``/sys/``, ``/auth/``,
-    ``/secret/data/``, etc.
-
-    Args:
-        spec: Full OpenAPI spec dict
-
-    Returns:
-        True if this looks like a Vault API spec
-    """
+    """Detect HashiCorp Vault API by path structure."""
     paths = spec.get("paths", {})
     vault_indicators = ("/sys/", "/auth/", "/secret/", "/database/", "/pki/", "/transit/")
     indicator_count = 0
@@ -149,7 +127,6 @@ def _is_vault_spec(spec: Dict[str, Any]) -> bool:
     for path in paths:
         if any(ind in path for ind in vault_indicators):
             indicator_count += 1
-            # If we see 3+ Vault-like paths, it's very likely Vault
             if indicator_count >= 3:
                 return True
 
@@ -157,17 +134,7 @@ def _is_vault_spec(spec: Dict[str, Any]) -> bool:
 
 
 def _is_cloudflare_spec(spec: Dict[str, Any]) -> bool:
-    """Detect Cloudflare API by response schema structure.
-
-    Samples up to 5 paths looking for the characteristic
-    {result, success, errors, messages} wrapper pattern.
-
-    Args:
-        spec: Full OpenAPI spec dict
-
-    Returns:
-        True if this looks like a Cloudflare API spec
-    """
+    """Detect Cloudflare API by response schema structure."""
     paths = spec.get("paths", {})
     checked = 0
 
@@ -196,11 +163,9 @@ def _is_cloudflare_spec(spec: Dict[str, Any]) -> bool:
             if not isinstance(schema, dict):
                 continue
 
-            # Check direct properties
             if _has_cloudflare_wrapper(schema):
                 return True
 
-            # Check allOf composition (common Cloudflare pattern)
             if "allOf" in schema:
                 merged_props = {}
                 for sub in schema["allOf"]:
@@ -210,7 +175,7 @@ def _is_cloudflare_spec(spec: Dict[str, Any]) -> bool:
                     return True
 
             checked += 1
-            break  # Only check one method per path
+            break
 
     return False
 
@@ -220,7 +185,6 @@ def _has_cloudflare_wrapper(schema: Dict[str, Any]) -> bool:
     props = schema.get("properties", {})
     if not isinstance(props, dict):
         return False
-    # Must have at least result + success + errors (messages is optional)
     return all(k in props for k in ("result", "success", "errors"))
 
 
@@ -238,20 +202,14 @@ def get_adapter(
 
     Args:
         service: Service name (e.g., 'authentik', 'ec2', 'cloudflare')
-        style: Adapter style (rest, cloudflare, kubernetes, aws, github, swagger2).
-               If None, auto-detects from service name, spec structure, or
-               sample_path. Defaults to 'rest'.
+        style: Adapter style (rest, cloudflare, kubernetes, aws, github,
+               swagger2). If None, auto-detects.
         sample_path: Sample API path for auto-detection
         known_resources: Set of known resource names for FK resolution
-        spec: Full OpenAPI spec dict (enables Cloudflare auto-detection and
-              $ref resolution in adapters that need it)
-
-    Returns:
-        Adapter instance for the given style
+        spec: Full OpenAPI spec dict
     """
     if style is None and sample_path:
         style = _registry.detect_style(sample_path, service=service, spec=spec)
     elif style is None:
-        # Try service-name or spec-based detection before defaulting to rest
         style = _registry.detect_style("", service=service, spec=spec)
     return _registry.get(style, service, known_resources, spec=spec)
