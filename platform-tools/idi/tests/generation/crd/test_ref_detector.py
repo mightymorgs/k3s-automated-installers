@@ -483,6 +483,27 @@ class TestDetectEnumKind:
         results = detect_enum_kind(field, registry)
         assert len(results) == 4
 
+    # -- section-04: kindness ratio audit --
+
+    def test_k8s_api_constants_contains_policy_values(self, registry):
+        """_K8S_API_CONSTANTS includes all policy-style PascalCase constants."""
+        from idi.generation.crd.ref_detector import _K8S_API_CONSTANTS
+        expected = {
+            "Foreground", "Always", "Never", "OnFailure",
+            "IfNotPresent", "ClusterFirst", "Default",
+        }
+        for val in expected:
+            assert val in _K8S_API_CONSTANTS, f"Missing: {val}"
+
+    def test_deletion_propagation_enum_with_kind_field(self, registry):
+        """enum ["Orphan", "Background", "Foreground"] on field 'kind' → empty after filtering."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Orphan", "Background", "Foreground"],
+        }, path="spec.deletionPropagation")
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
     # -- section-03: discriminator enum suppression --
 
     def test_type_field_rejected(self, registry):

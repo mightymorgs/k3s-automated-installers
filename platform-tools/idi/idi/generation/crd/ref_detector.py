@@ -1274,10 +1274,27 @@ def detect_passthrough_manifest(
     return results
 
 
+# K8s API constants that are PascalCase but NOT Kind names.
+# Filtered from enum values BEFORE computing kindness ratio to prevent
+# false matches (e.g., "Foreground" is a deletion propagation policy,
+# not a reference to a "Foreground" Kind).
 _K8S_API_CONSTANTS: frozenset[str] = frozenset({
+    # Deletion propagation
     "Orphan", "Background", "Foreground",
+    # Scope
     "Cluster", "Namespaced",
+    # Policy actions
     "Allow", "Deny", "Ignore",
+    # Restart / image pull policies
+    "Always", "Never", "OnFailure", "IfNotPresent",
+    # DNS policies
+    "ClusterFirst", "ClusterFirstWithHostNet", "Default",
+    # Service types
+    "ClusterIP", "NodePort", "LoadBalancer", "ExternalName",
+    # Reclaim policies
+    "Retain", "Recycle",
+    # Misc
+    "None",
 })
 
 _KIND_LIKE_FIELD_NAMES: frozenset[str] = frozenset({
