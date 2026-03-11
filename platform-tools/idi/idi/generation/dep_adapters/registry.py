@@ -96,5 +96,13 @@ class DepAdapterRegistry:
         deps = merge_deps(all_deps)
         deps = filter_self_refs(deps, operation.resource, operation.method)
         deps = filter_by_confidence(deps)
+        # Suppress body deps whose target is already covered by a path dep.
+        # Path skeleton is authoritative; body FK is fenced to avoid duplicates.
+        path_targets = {d.target_resource for d in deps if d.source == "generic_odg:path"}
+        if path_targets:
+            deps = [
+                d for d in deps
+                if d.source != "generic_odg:body" or d.target_resource not in path_targets
+            ]
         outputs = merge_outputs(all_outputs)
         return deps, outputs
