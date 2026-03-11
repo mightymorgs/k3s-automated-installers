@@ -870,6 +870,117 @@ class TestDetectParentKindName:
 
 
 # ---------------------------------------------------------------------------
+# is_inline_object_name / list-map key suppression
+# ---------------------------------------------------------------------------
+
+
+class TestIsInlineObjectName:
+    """Tests for inline K8s object name detection (Section 02)."""
+
+    def test_container_spec_siblings_in_array(self, registry):
+        """Array item with container-spec siblings → inline object."""
+        from idi.generation.crd.ref_detector import is_inline_object_name
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.template.spec.containers.name",
+            parent_path="spec.template.spec.containers",
+            is_array_item=True,
+            sibling_names=frozenset({"name", "image", "command", "env"}),
+        )
+        assert is_inline_object_name(field) is True
+
+    def test_volume_mount_siblings_in_array(self, registry):
+        """Array item with volumeMount siblings → inline object."""
+        from idi.generation.crd.ref_detector import is_inline_object_name
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.template.spec.containers.volumeMounts.name",
+            parent_path="spec.template.spec.containers.volumeMounts",
+            is_array_item=True,
+            sibling_names=frozenset({"name", "mountPath", "readOnly", "subPath"}),
+        )
+        assert is_inline_object_name(field) is True
+
+    def test_ref_shape_siblings_not_inline(self, registry):
+        """Ref-shape siblings (name, key, namespace) → NOT inline."""
+        from idi.generation.crd.ref_detector import is_inline_object_name
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.secretRef.name",
+            parent_path="spec.secretRef",
+            is_array_item=False,
+            sibling_names=frozenset({"name", "key", "namespace"}),
+        )
+        assert is_inline_object_name(field) is False
+
+    def test_non_array_not_inline(self, registry):
+        """Non-array context → NOT inline even with container siblings."""
+        from idi.generation.crd.ref_detector import is_inline_object_name
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.containers.name",
+            parent_path="spec.containers",
+            is_array_item=False,
+            sibling_names=frozenset({"name", "image", "command", "env"}),
+        )
+        assert is_inline_object_name(field) is False
+
+    def test_insufficient_overlap_not_inline(self, registry):
+        """Only 2 matches (< 3 threshold) → NOT inline."""
+        from idi.generation.crd.ref_detector import is_inline_object_name
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.containers.name",
+            parent_path="spec.containers",
+            is_array_item=True,
+            sibling_names=frozenset({"name", "image"}),
+        )
+        assert is_inline_object_name(field) is False
+
+
+class TestParentKindNameListMapSuppression:
+    """Tests for detect_parent_kind_name with list-map key suppression."""
+
+    def test_volumes_name_suppressed(self, registry):
+        """volumes[].name with container-spec siblings → None (suppressed)."""
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.template.spec.volumes.name",
+            parent_path="spec.template.spec.volumes",
+            is_array_item=True,
+            sibling_names=frozenset({"name", "mountPath", "readOnly", "subPath"}),
+        )
+        result = detect_parent_kind_name(field, registry)
+        assert result is None
+
+    def test_secret_name_not_suppressed(self, registry):
+        """secret.name without inline siblings → still detected."""
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.templateFrom.secret.name",
+            parent_path="spec.templateFrom.secret",
+            is_array_item=False,
+            sibling_names=frozenset({"name", "key"}),
+        )
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "Secret"
+
+    def test_issuer_name_non_array(self, registry):
+        """issuer.name in non-array context → still detected."""
+        field = _make_field(
+            "name", schema={"type": "string"},
+            path="spec.issuer.name",
+            parent_path="spec.issuer",
+            is_array_item=False,
+            sibling_names=frozenset({"name"}),
+        )
+        result = detect_parent_kind_name(field, registry)
+        assert result is not None
+        assert result.target_kind == "Issuer"
+
+
+# ---------------------------------------------------------------------------
 # readOnly → output_declaration
 # ---------------------------------------------------------------------------
 

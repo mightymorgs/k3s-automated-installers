@@ -117,6 +117,27 @@ K8S_FORMAT_ALLOWLIST: frozenset[str] = frozenset({
     "qualified-name",
 })
 
+# Field names that appear in K8s inline objects (containers, volumes, etc.).
+# Co-occurrence of >= 3 with a 'name' field inside an array signals a
+# list-map merge key, not a cross-resource reference.
+_INLINE_OBJECT_SIBLINGS: frozenset[str] = frozenset({
+    "image", "command", "args", "env", "ports",
+    "volumeMounts", "resources", "mountPath",
+    "containerPort", "protocol", "readOnly", "subPath",
+})
+
+
+def is_inline_object_name(field: WalkedField) -> bool:
+    """Check if a 'name' field is a list-map key in an inline K8s object.
+
+    Returns True when the field is inside an array (is_array_item) and
+    has >= 3 siblings matching well-known container/volume spec fields.
+    """
+    if not field.is_array_item:
+        return False
+    overlap = field.sibling_names & _INLINE_OBJECT_SIBLINGS
+    return len(overlap) >= 3
+
 
 @dataclass(frozen=True)
 class CatalogEntry:
@@ -804,6 +825,10 @@ def detect_parent_kind_name(
     """
     # Only triggers on string fields named "name".
     if field.name != "name" or field.schema.get("type") != "string":
+        return None
+
+    # Suppress list-map merge keys in inline K8s objects (volumes, containers).
+    if field.name == "name" and is_inline_object_name(field):
         return None
 
     # Extract the immediate parent field name from the parent_path.
