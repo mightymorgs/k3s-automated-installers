@@ -17,6 +17,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Set
 
+from idi.generation.adapters.envelope_detector import detect_envelope, navigate_unwrap_path
 from idi.generation.context import GeneratorContext
 
 logger = logging.getLogger(__name__)
@@ -433,9 +434,31 @@ def extract_response_fields(
         if adapter_schema and "properties" in adapter_schema:
             return fields_from_schema(ctx, adapter_schema)
 
+    # --- Generic envelope detection fallback ---
+    responses = operation.get("responses", {})
+    for _sc in ("200", "201", "202"):
+        if _sc not in responses:
+            continue
+        _resp = responses[_sc]
+        _content = _resp.get("content", {})
+        _json_ct = _content.get("application/json", {}) if _content else {}
+        _resp_schema = _json_ct.get("schema", {})
+        if not _resp_schema and "schema" in _resp:
+            _resp_schema = _resp["schema"]
+        if _resp_schema and "properties" in _resp_schema:
+            envelope = detect_envelope(_resp_schema, path)
+            if envelope and envelope.confidence >= 0.8:
+                inner = navigate_unwrap_path(_resp_schema, envelope.unwrap_path)
+                if inner and "properties" in inner:
+                    logger.debug(
+                        "Envelope detected (%s, %.2f): unwrapping via '%s'",
+                        envelope.pattern, envelope.confidence, envelope.unwrap_path,
+                    )
+                    return fields_from_schema(ctx, inner)
+        break  # Only check the first success response found
+
     # --- Default extraction (no adapter or adapter returned None) ---
     fields: List[Dict[str, Any]] = []
-    responses = operation.get("responses", {})
 
     # Look for success responses (200, 201, 202, 204).
     for status_code in ("200", "201", "202", "204"):
