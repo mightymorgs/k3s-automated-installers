@@ -193,6 +193,14 @@ def _generate_json_v2(
 
             api_path = op_info.get("path", "")
             endpoint = op_info.get("endpoint") or api_path
+
+            # Extract path param schemas (OAS3: param.schema, Swagger2: inline)
+            path_param_schemas: dict[str, dict] = {}
+            all_params = (op_data.get("path_params") or []) + operation_obj.get("parameters", [])
+            for p in all_params:
+                if p.get("in") == "path" and "name" in p:
+                    path_param_schemas[p["name"]] = p.get("schema", p)
+
             dep_op = DepOpInfo(
                 service=ctx.api_name,
                 resource=resource,
@@ -203,6 +211,7 @@ def _generate_json_v2(
                 response_schema=_get_response_schema(operation_obj),
                 path_params=_PATH_PARAM_RE.findall(endpoint),
                 query_params=params_raw.get("query", []),
+                path_param_schemas=path_param_schemas,
             )
 
             deps_detected, outputs_detected = dep_registry.detect(

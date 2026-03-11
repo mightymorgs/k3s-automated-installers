@@ -39,6 +39,7 @@ class OperationInfo:
     response_schema: dict
     path_params: list[str] = field(default_factory=list)
     query_params: list[dict] = field(default_factory=list)
+    path_param_schemas: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass

@@ -113,6 +113,11 @@ def detect_path_deps(
         if param.lower() in _EXCLUDED:
             continue
 
+        # Skip params with enum constraints — routing selectors, not FKs
+        param_schema = operation.path_param_schemas.get(param, {})
+        if param_schema.get("enum"):
+            continue
+
         # Walk backwards to find nearest matching ancestor segment.
         nearest_resource = None
         for j in range(i - 1, -1, -1):
