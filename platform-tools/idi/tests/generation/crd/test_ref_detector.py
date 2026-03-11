@@ -362,22 +362,21 @@ class TestDetectEnumKind:
 
     def test_no_kind_matches_empty_list(self, registry):
         """Enum ["active", "inactive"] — no Kind matches, empty list."""
-        field = _make_field("state", schema={
+        field = _make_field("kind", schema={
             "type": "string",
             "enum": ["active", "inactive"],
-        })
+        }, path="spec.ref.kind")
         results = detect_enum_kind(field, registry)
         assert results == []
 
-    def test_partial_matches(self, registry):
-        """Enum ["Issuer", "unknown"] — only Issuer returned."""
+    def test_partial_matches_below_ratio(self, registry):
+        """Enum ["Issuer", "unknown"] — ratio 0.5 < 0.6 → no match."""
         field = _make_field("kind", schema={
             "type": "string",
             "enum": ["Issuer", "unknown"],
         }, path="spec.issuerRef.kind")
         results = detect_enum_kind(field, registry)
-        assert len(results) == 1
-        assert results[0].target_kind == "Issuer"
+        assert results == []
 
     def test_case_insensitive_match(self, registry):
         """Case-insensitive: enum ["secret", "configmap"] — matches."""
@@ -402,6 +401,87 @@ class TestDetectEnumKind:
         field = _make_field("kind", schema={"type": "string", "enum": []})
         results = detect_enum_kind(field, registry)
         assert results == []
+
+    # -- section-08: enum kindness ratio tests --
+
+    def test_api_constants_denylist_filters_all(self, registry):
+        """Enum with only K8s API constants — all filtered by denylist, no matches."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Orphan", "Background", "Foreground"],
+        }, path="spec.deletionPropagationPolicy")
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
+    def test_valid_kind_enum_on_kind_field(self, registry):
+        """Enum of known Kinds on field named 'kind' — ratio 1.0, kind-like field → match."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Issuer", "ClusterIssuer"],
+        }, path="spec.issuerRef.kind", parent_path="spec.issuerRef")
+        sibling = {"name": {"type": "string"}, "kind": {"type": "string"}}
+        results = detect_enum_kind(field, registry, sibling_fields=sibling)
+        assert len(results) == 2
+        kinds = {r.target_kind for r in results}
+        assert kinds == {"Issuer", "ClusterIssuer"}
+
+    def test_low_kindness_ratio_rejected(self, registry):
+        """Enum with ratio 0.5 (1/2 match) on kind-like field — below 0.6 threshold."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Issuer", "SomeRandomThing"],
+        }, path="spec.ref.kind")
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
+    def test_non_kind_like_field_name_rejected(self, registry):
+        """Enum of known Kinds on field 'deletionPolicy' — not kind-like, no match."""
+        field = _make_field("deletionPolicy", schema={
+            "type": "string",
+            "enum": ["Issuer", "ClusterIssuer"],
+        }, path="spec.deletionPolicy")
+        results = detect_enum_kind(field, registry)
+        assert results == []
+
+    def test_target_kind_field_name_accepted(self, registry):
+        """Enum on field 'targetKind' — kind-like field name + ratio 1.0 → match."""
+        field = _make_field("targetKind", schema={
+            "type": "string",
+            "enum": ["Issuer", "ClusterIssuer"],
+        }, path="spec.targetKind")
+        results = detect_enum_kind(field, registry)
+        assert len(results) == 2
+        kinds = {r.target_kind for r in results}
+        assert kinds == {"Issuer", "ClusterIssuer"}
+
+    def test_denylist_adjusts_ratio_denominator(self, registry):
+        """Enum with mix of denylist and real Kinds — ratio computed after filtering."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Cluster", "Issuer"],
+        }, path="spec.ref.kind", parent_path="spec.ref")
+        sibling = {"name": {"type": "string"}}
+        results = detect_enum_kind(field, registry, sibling_fields=sibling)
+        assert len(results) == 1
+        assert results[0].target_kind == "Issuer"
+
+    def test_resource_kind_field_name_accepted(self, registry):
+        """Enum on field 'resourceKind' — kind-like name."""
+        field = _make_field("resourceKind", schema={
+            "type": "string",
+            "enum": ["Certificate", "Issuer"],
+        }, path="spec.resourceKind")
+        results = detect_enum_kind(field, registry)
+        assert len(results) == 2
+
+    def test_exact_ratio_boundary_accepted(self, registry):
+        """Enum with ratio exactly 0.6 (3/5) — at threshold, accepted."""
+        field = _make_field("kind", schema={
+            "type": "string",
+            "enum": ["Issuer", "ClusterIssuer", "Certificate", "foo", "bar"],
+        }, path="spec.ref.kind")
+        results = detect_enum_kind(field, registry)
+        assert len(results) == 3
 
 
 # ---------------------------------------------------------------------------

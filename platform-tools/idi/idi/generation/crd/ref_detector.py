@@ -1249,6 +1249,17 @@ def detect_passthrough_manifest(
     return results
 
 
+_K8S_API_CONSTANTS: frozenset[str] = frozenset({
+    "Orphan", "Background", "Foreground",
+    "Cluster", "Namespaced",
+    "Allow", "Deny", "Ignore",
+})
+
+_KIND_LIKE_FIELD_NAMES: frozenset[str] = frozenset({
+    "kind", "targetKind", "resourceKind", "type",
+})
+
+
 def detect_enum_kind(
     field: WalkedField,
     registry: KindRegistry,
@@ -1258,6 +1269,11 @@ def detect_enum_kind(
 
     The enum field is a discriminator, not a ref. When a sibling 'name'
     field exists, the ref points to the sibling, not the enum.
+
+    Guards (section-08):
+    - Field name must be kind-like (kind, targetKind, resourceKind, type)
+    - K8s API constants (Orphan, Background, etc.) are filtered before matching
+    - Kindness ratio (matched/total after filtering) must be >= 0.6
 
     Args:
         field: The walked field (expected to have an 'enum' in schema).
@@ -1271,19 +1287,31 @@ def detect_enum_kind(
     if not enum_values or not isinstance(enum_values, list):
         return []
 
+    # Guard: field name must be kind-like.
+    if field.name not in _KIND_LIKE_FIELD_NAMES:
+        return []
+
+    # Filter out K8s API constants before matching.
+    filtered_values = [v for v in enum_values if isinstance(v, str) and v not in _K8S_API_CONSTANTS]
+    if not filtered_values:
+        return []
+
     # Build case-insensitive lookup from registry.
     all_kinds = registry.all_kinds()
     kind_lower_map: dict[str, str] = {k.lower(): k for k in all_kinds}
 
     matched_kinds: list[str] = []
-    for val in enum_values:
-        if not isinstance(val, str):
-            continue
+    for val in filtered_values:
         canonical = kind_lower_map.get(val.lower())
         if canonical:
             matched_kinds.append(canonical)
 
     if not matched_kinds:
+        return []
+
+    # Kindness ratio guard: matched / total filtered must be >= 0.6.
+    match_ratio = len(matched_kinds) / len(filtered_values)
+    if match_ratio < 0.6:
         return []
 
     results: list[ClassifiedField] = []
