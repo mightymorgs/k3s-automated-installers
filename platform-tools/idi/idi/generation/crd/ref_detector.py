@@ -1550,12 +1550,43 @@ def _rule_nested_metadata_self_reference(
     return False
 
 
+_CREDENTIAL_VALUE_RE: re.Pattern = re.compile(
+    r"(?i)^("
+    r"password|passwd|"
+    r"client[_-]?secret|"
+    r"access[_-]?token|refresh[_-]?token|bearer[_-]?token|id[_-]?token|"
+    r"token|"
+    r"api[_-]?key|apikey|"
+    r"secret[_-]?key|"
+    r"access[_-]?key[_-]?id|secret[_-]?access[_-]?key|"
+    r"authorization"
+    r")$"
+)
+
+
+def _rule_credential_value_field(
+    field: WalkedField,
+    classification: ClassifiedField,
+) -> bool:
+    """Rule 4: Suppress string credential value fields.
+
+    String fields whose name matches credential patterns (password, token,
+    apiKey, clientSecret, bearerToken, etc.) hold opaque values, not
+    resource names. Object-typed fields are exempt -- those are typically
+    SecretKeySelector-shaped refs (e.g., tokenSecretRef).
+    """
+    if field.schema.get("type") != "string":
+        return False
+    return bool(_CREDENTIAL_VALUE_RE.match(field.name))
+
+
 # Suppression rules: list of (predicate_function, rule_name) tuples.
 # Extensible design -- new FP patterns are added as new tuples.
 _SUPPRESSION_RULE_LIST: list[tuple[Any, str]] = [
     (_rule_target_kind_not_at_word_boundary, "target_kind_not_at_word_boundary"),
     (_rule_kind_collision_no_structural_context, "kind_collision_no_structural_context"),
     (_rule_nested_metadata_self_reference, "nested_metadata_self_reference"),
+    (_rule_credential_value_field, "credential_value_field"),
 ]
 
 

@@ -343,3 +343,116 @@ class TestSuppressFPGeneral:
         results = suppress_false_positives(field, [cf1, cf2])
         assert len(results) == 2
         assert all(r.role == "input_ref" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Rule 4: credential_value_field
+# ---------------------------------------------------------------------------
+
+
+class TestRule4CredentialExclusion:
+    """Rule 4: credential value fields on string-typed leaves are suppressed."""
+
+    def test_password_string_field_suppressed(self):
+        """'password' string field -> suppressed."""
+        field = _make_field("password", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.password", target_kind="Password")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+        assert results[0].confidence == 0.1
+        assert "credential_value_field" in results[0].detection_source
+
+    def test_client_secret_string_field_suppressed(self):
+        """'clientSecret' string field -> suppressed."""
+        field = _make_field("clientSecret", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.clientSecret", target_kind="Secret")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+        assert "credential_value_field" in results[0].detection_source
+
+    def test_bearer_token_string_field_suppressed(self):
+        """'bearerToken' string field -> suppressed."""
+        field = _make_field("bearerToken", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.bearerToken", target_kind="Token")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+
+    def test_access_key_id_string_field_suppressed(self):
+        """'accessKeyId' string field -> suppressed by Rule 4."""
+        field = _make_field("accessKeyId", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.accessKeyId", target_kind="Access")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+        assert "credential_value_field" in results[0].detection_source
+
+    def test_api_key_string_field_suppressed(self):
+        """'apiKey' string field -> suppressed by Rule 4."""
+        field = _make_field("apiKey", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.apiKey", target_kind="Key")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+        assert "credential_value_field" in results[0].detection_source
+
+    def test_client_secret_ref_object_not_suppressed(self):
+        """'clientSecretRef' object field -> NOT suppressed (object type references a resource)."""
+        field = _make_field("clientSecretRef", schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "namespace": {"type": "string"},
+            },
+        })
+        cf = _make_cf(
+            field_path="spec.clientSecretRef",
+            target_kind="Secret",
+            field_type="object",
+        )
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "input_ref"
+
+    def test_token_secret_ref_object_not_suppressed(self):
+        """'tokenSecretRef' object field -> NOT suppressed (object type)."""
+        field = _make_field("tokenSecretRef", schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "key": {"type": "string"},
+            },
+        })
+        cf = _make_cf(
+            field_path="spec.tokenSecretRef",
+            target_kind="Secret",
+            field_type="object",
+        )
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "input_ref"
+
+    def test_secret_name_not_suppressed(self):
+        """'secretName' string field -> NOT suppressed (references a Secret by name)."""
+        field = _make_field("secretName", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.secretName", target_kind="Secret")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "input_ref"
+
+    def test_refresh_token_string_field_suppressed(self):
+        """'refreshToken' string field -> suppressed by Rule 4."""
+        field = _make_field("refreshToken", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.refreshToken", target_kind="Token")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+        assert "credential_value_field" in results[0].detection_source
+
+    def test_secret_access_key_string_field_suppressed(self):
+        """'secretAccessKey' string field -> suppressed by Rule 4."""
+        field = _make_field("secretAccessKey", schema={"type": "string"})
+        cf = _make_cf(field_path="spec.secretAccessKey", target_kind="Access")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "config_field"
+        assert "credential_value_field" in results[0].detection_source
+
+    def test_credential_field_without_type_not_suppressed(self):
+        """'password' field without explicit type -> NOT suppressed."""
+        field = _make_field("password", schema={})
+        cf = _make_cf(field_path="spec.password", target_kind="Password")
+        results = suppress_false_positives(field, [cf])
+        assert results[0].role == "input_ref"
