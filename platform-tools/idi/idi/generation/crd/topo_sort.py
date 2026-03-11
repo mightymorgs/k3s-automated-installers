@@ -6,6 +6,7 @@ with Tarjan's SCC cycle resolution.
 """
 from __future__ import annotations
 
+import heapq
 import logging
 import re
 from dataclasses import dataclass, field
@@ -317,3 +318,98 @@ def build_dependency_graph(
         production_edges=production_edges,
         external_kinds=external_kinds,
     )
+
+
+def topological_sort(graph: DependencyGraph) -> list[SortTier]:
+    """Sort Kinds into deployment tiers using Kahn's algorithm on hard edges.
+
+    Only hard DependencyEdges participate in the in-degree calculation.
+    Soft and optional edges affect only within-tier ordering (fewer soft
+    deps first, then lexicographic by gk string).
+
+    External nodes are excluded from the output entirely.
+
+    Args:
+        graph: A fully constructed DependencyGraph from build_dependency_graph().
+
+    Returns:
+        A list of SortTier objects ordered by tier number. Each SortTier
+        contains a deterministically-ordered list of gk strings.
+        Returns [] if graph has no internal nodes.
+    """
+    # Step 1: Filter to internal nodes only.
+    internal_gks: set[str] = {
+        gk for gk, node in graph.nodes.items()
+        if not node.is_external and gk not in graph.external_kinds
+    }
+    if not internal_gks:
+        return []
+
+    # Step 2: Build hard-edge adjacency and in-degree.
+    # Deduplicate and skip self-loops to avoid inflated in-degree counts.
+    in_degree: dict[str, int] = {gk: 0 for gk in internal_gks}
+    # forward_map: target -> [sources unblocked when target is placed]
+    forward_map: dict[str, list[str]] = {gk: [] for gk in internal_gks}
+    seen_hard: set[tuple[str, str]] = set()
+
+    for edge in graph.dependency_edges:
+        if edge.edge_type != "hard":
+            continue
+        if edge.source_gk == edge.target_gk:
+            continue  # skip self-loops
+        if edge.source_gk not in internal_gks or edge.target_gk not in internal_gks:
+            continue
+        pair = (edge.source_gk, edge.target_gk)
+        if pair in seen_hard:
+            continue
+        seen_hard.add(pair)
+        in_degree[edge.source_gk] += 1
+        forward_map[edge.target_gk].append(edge.source_gk)
+
+    # Step 3: Count soft + optional dependencies per node (for within-tier ordering).
+    soft_count: dict[str, int] = {gk: 0 for gk in internal_gks}
+    for edge in graph.dependency_edges:
+        if edge.edge_type in ("soft", "optional") and edge.source_gk in internal_gks:
+            soft_count[edge.source_gk] += 1
+
+    # Step 4: Initialize heap with zero-degree nodes.
+    heap: list[tuple[int, str]] = []
+    for gk in internal_gks:
+        if in_degree[gk] == 0:
+            heapq.heappush(heap, (soft_count[gk], gk))
+
+    # Step 5: Process tiers iteratively.
+    tiers: list[SortTier] = []
+    tier_num = 0
+
+    while heap:
+        # Drain current heap — all items form this tier.
+        current_tier_nodes: list[str] = []
+        while heap:
+            _sc, gk = heapq.heappop(heap)
+            current_tier_nodes.append(gk)
+
+        tiers.append(SortTier(tier=tier_num, kinds=current_tier_nodes))
+
+        # Collect next tier's zero-degree nodes.
+        next_heap: list[tuple[int, str]] = []
+        for placed_gk in current_tier_nodes:
+            for dependent_gk in forward_map[placed_gk]:
+                in_degree[dependent_gk] -= 1
+                if in_degree[dependent_gk] == 0:
+                    heapq.heappush(next_heap, (soft_count[dependent_gk], dependent_gk))
+
+        heap = next_heap
+        tier_num += 1
+
+    # Step 6: Remaining nodes with in_degree > 0 are in cycles.
+    # Return partial result; caller (Section 04) handles cycle resolution.
+    placed = {gk for tier in tiers for gk in tier.kinds}
+    unplaced = internal_gks - placed
+    if unplaced:
+        logger.warning(
+            "Cycle detected: %d nodes not placed in any tier: %s",
+            len(unplaced), sorted(unplaced),
+        )
+
+    return tiers

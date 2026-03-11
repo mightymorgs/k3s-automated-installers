@@ -14,6 +14,7 @@ from idi.generation.crd.topo_sort import (
     ProductionEdge,
     SortTier,
     build_dependency_graph,
+    topological_sort,
 )
 from idi.generation.dep_adapters.base import Output
 
@@ -447,3 +448,294 @@ class TestBuildDependencyGraph:
             ],
         })
         assert len(g.dependency_edges) == 0
+
+
+# ---------------------------------------------------------------------------
+# Section 03: Kahn's Topological Sort
+# ---------------------------------------------------------------------------
+
+def _make_graph(
+    nodes: list[tuple[str, str, str]],  # (group, kind, service)
+    hard_edges: list[tuple[str, str]] | None = None,  # (source_gk, target_gk)
+    soft_edges: list[tuple[str, str]] | None = None,
+    optional_edges: list[tuple[str, str]] | None = None,
+    external_gks: set[str] | None = None,
+) -> DependencyGraph:
+    """Build a minimal DependencyGraph for sort testing."""
+    node_map: dict[str, KindNode] = {}
+    ext = external_gks or set()
+    for group, kind, service in nodes:
+        gk = f"{group}/{kind}"
+        node_map[gk] = KindNode(
+            kind=kind, group=group, service=service,
+            is_external=gk in ext,
+        )
+
+    dep_edges: list[DependencyEdge] = []
+    for src, tgt in (hard_edges or []):
+        dep_edges.append(DependencyEdge(
+            source_gk=src, target_gk=tgt, edge_type="hard",
+            source_field="spec.ref", detection_source="test",
+            confidence=0.9,
+        ))
+    for src, tgt in (soft_edges or []):
+        dep_edges.append(DependencyEdge(
+            source_gk=src, target_gk=tgt, edge_type="soft",
+            source_field="spec.ref", detection_source="test",
+            confidence=0.7,
+        ))
+    for src, tgt in (optional_edges or []):
+        dep_edges.append(DependencyEdge(
+            source_gk=src, target_gk=tgt, edge_type="optional",
+            source_field="spec.ref", detection_source="test",
+            confidence=0.6,
+        ))
+
+    return DependencyGraph(
+        nodes=node_map,
+        dependency_edges=dep_edges,
+        production_edges=[],
+        external_kinds=ext,
+    )
+
+
+class TestTopologicalSort:
+    """Tests for topological_sort() — Kahn's algorithm."""
+
+    def test_empty_graph(self):
+        """topological_sort on a graph with no nodes returns an empty list of tiers."""
+
+        g = DependencyGraph(
+            nodes={}, dependency_edges=[], production_edges=[], external_kinds=set(),
+        )
+        assert topological_sort(g) == []
+
+    def test_single_kind_no_deps(self):
+        """A lone Kind with no dependency edges lands in Tier 0."""
+
+        g = _make_graph(
+            nodes=[("cert-manager.io", "Issuer", "cert-manager")],
+        )
+        result = topological_sort(g)
+        assert len(result) == 1
+        assert result[0].tier == 0
+        assert "cert-manager.io/Issuer" in result[0].kinds
+
+    def test_linear_chain(self):
+        """A→B→C (A depends on B, B depends on C) → Tier 0: C, Tier 1: B, Tier 2: A."""
+
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"), ("x.io", "C", "x"),
+            ],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/C")],
+        )
+        result = topological_sort(g)
+        assert len(result) == 3
+        assert result[0].kinds == ["x.io/C"]
+        assert result[1].kinds == ["x.io/B"]
+        assert result[2].kinds == ["x.io/A"]
+
+    def test_edge_direction(self):
+        """If A depends on B, B appears in a lower-numbered tier than A."""
+
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B")],
+        )
+        result = topological_sort(g)
+        # Find tiers for A and B
+        tier_of = {}
+        for t in result:
+            for gk in t.kinds:
+                tier_of[gk] = t.tier
+        assert tier_of["x.io/B"] < tier_of["x.io/A"]
+
+    def test_cert_manager_ordering(self):
+        """Issuer/ClusterIssuer at Tier 0, Certificate at Tier 1 (depends on Issuer)."""
+
+        g = _make_graph(
+            nodes=[
+                ("cert-manager.io", "Issuer", "cert-manager"),
+                ("cert-manager.io", "ClusterIssuer", "cert-manager"),
+                ("cert-manager.io", "Certificate", "cert-manager"),
+            ],
+            hard_edges=[("cert-manager.io/Certificate", "cert-manager.io/Issuer")],
+        )
+        result = topological_sort(g)
+        assert result[0].tier == 0
+        assert "cert-manager.io/Issuer" in result[0].kinds
+        assert "cert-manager.io/ClusterIssuer" in result[0].kinds
+        assert result[1].tier == 1
+        assert result[1].kinds == ["cert-manager.io/Certificate"]
+
+    def test_external_secrets_ordering(self):
+        """SecretStore at Tier 0, ExternalSecret at Tier 1 (depends on SecretStore)."""
+
+        g = _make_graph(
+            nodes=[
+                ("external-secrets.io", "SecretStore", "external-secrets"),
+                ("external-secrets.io", "ExternalSecret", "external-secrets"),
+            ],
+            hard_edges=[
+                ("external-secrets.io/ExternalSecret", "external-secrets.io/SecretStore"),
+            ],
+        )
+        result = topological_sort(g)
+        assert result[0].kinds == ["external-secrets.io/SecretStore"]
+        assert result[1].kinds == ["external-secrets.io/ExternalSecret"]
+
+    def test_traefik_self_loops_at_tier_zero(self):
+        """After self-loops are removed, Middleware and TraefikService go to Tier 0.
+        IngressRoute depends on both, so it goes to Tier 1."""
+
+        g = _make_graph(
+            nodes=[
+                ("traefik.io", "Middleware", "traefik"),
+                ("traefik.io", "TraefikService", "traefik"),
+                ("traefik.io", "IngressRoute", "traefik"),
+            ],
+            hard_edges=[
+                ("traefik.io/IngressRoute", "traefik.io/Middleware"),
+                ("traefik.io/IngressRoute", "traefik.io/TraefikService"),
+            ],
+        )
+        result = topological_sort(g)
+        assert result[0].tier == 0
+        assert "traefik.io/Middleware" in result[0].kinds
+        assert "traefik.io/TraefikService" in result[0].kinds
+        assert result[1].tier == 1
+        assert result[1].kinds == ["traefik.io/IngressRoute"]
+
+    def test_determinism(self):
+        """Run topological_sort 10 times on the same graph. Assert identical results."""
+
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"), ("x.io", "C", "x"),
+                ("x.io", "D", "x"), ("x.io", "E", "x"),
+            ],
+            hard_edges=[
+                ("x.io/A", "x.io/B"), ("x.io/B", "x.io/C"),
+                ("x.io/D", "x.io/E"),
+            ],
+            soft_edges=[("x.io/A", "x.io/D")],
+        )
+        first = topological_sort(g)
+        for _ in range(9):
+            assert topological_sort(g) == first
+
+    def test_tier_internal_ordering(self):
+        """Within a tier, kinds with fewer soft deps come first. Ties broken by gk."""
+
+        # All three at Tier 0 (no hard deps). B has 2 soft, C has 1, A has 0.
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"), ("x.io", "C", "x"),
+                ("y.io", "T1", "y"), ("y.io", "T2", "y"),  # soft targets
+            ],
+            soft_edges=[
+                ("x.io/B", "y.io/T1"), ("x.io/B", "y.io/T2"),
+                ("x.io/C", "y.io/T1"),
+            ],
+        )
+        result = topological_sort(g)
+        # Tier 0 should contain all 5 nodes (no hard edges)
+        tier0 = result[0]
+        # Within tier 0, order by (soft_count, gk):
+        # A=0, T1=0, T2=0, C=1, B=2
+        # Ties broken lexicographically: x.io/A, y.io/T1, y.io/T2, x.io/C, x.io/B
+        assert tier0.kinds.index("x.io/A") < tier0.kinds.index("x.io/C")
+        assert tier0.kinds.index("x.io/C") < tier0.kinds.index("x.io/B")
+
+    def test_external_nodes_excluded(self):
+        """External nodes never appear in any SortTier."""
+
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"),
+                ("", "Secret", "core"),
+            ],
+            hard_edges=[("x.io/A", "x.io/B")],
+            external_gks={"/Secret"},
+        )
+        result = topological_sort(g)
+        all_kinds = [gk for tier in result for gk in tier.kinds]
+        assert "/Secret" not in all_kinds
+
+    def test_soft_edges_ignored_for_tier_placement(self):
+        """A node with only soft edges still lands at Tier 0."""
+
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            soft_edges=[("x.io/A", "x.io/B")],
+        )
+        result = topological_sort(g)
+        # Both should be at Tier 0 since soft edges don't affect in-degree
+        assert len(result) == 1
+        assert result[0].tier == 0
+        assert "x.io/A" in result[0].kinds
+        assert "x.io/B" in result[0].kinds
+
+    def test_optional_edges_ignored_for_tier_placement(self):
+        """A node with only optional edges still lands at Tier 0."""
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            optional_edges=[("x.io/A", "x.io/B")],
+        )
+        result = topological_sort(g)
+        assert len(result) == 1
+        assert result[0].tier == 0
+        assert "x.io/A" in result[0].kinds
+        assert "x.io/B" in result[0].kinds
+
+    def test_duplicate_hard_edges_handled(self):
+        """Duplicate hard edges between same pair don't corrupt tier placement."""
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/A", "x.io/B")],
+        )
+        result = topological_sort(g)
+        all_kinds = [gk for tier in result for gk in tier.kinds]
+        assert all_kinds.count("x.io/A") == 1
+        assert all_kinds.count("x.io/B") == 1
+        assert result[0].kinds == ["x.io/B"]
+        assert result[1].kinds == ["x.io/A"]
+
+    def test_cycle_returns_partial_result(self):
+        """A 2-node cycle returns empty tiers (no zero-degree nodes)."""
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/A")],
+        )
+        result = topological_sort(g)
+        assert result == []
+
+    def test_cycle_with_sortable_nodes_returns_partial(self):
+        """Sortable nodes are placed; cyclic nodes are left unplaced."""
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"),
+                ("x.io", "C", "x"), ("x.io", "D", "x"),
+            ],
+            hard_edges=[
+                ("x.io/C", "x.io/D"), ("x.io/D", "x.io/C"),
+                ("x.io/A", "x.io/B"),
+            ],
+        )
+        result = topological_sort(g)
+        placed = {gk for tier in result for gk in tier.kinds}
+        assert "x.io/B" in placed
+        assert "x.io/A" in placed
+        assert "x.io/C" not in placed
+        assert "x.io/D" not in placed
+
+    def test_self_loop_hard_edge_skipped(self):
+        """A self-loop hard edge is stripped; the node lands at Tier 0."""
+        g = _make_graph(
+            nodes=[("x.io", "A", "x")],
+            hard_edges=[("x.io/A", "x.io/A")],
+        )
+        result = topological_sort(g)
+        assert len(result) == 1
+        assert result[0].kinds == ["x.io/A"]
