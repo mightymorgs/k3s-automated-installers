@@ -581,6 +581,89 @@ class TestHardEdgeSourceGate:
 
 
 # ---------------------------------------------------------------------------
+# Cross-Ecosystem Filter Tests (Section 07)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossEcosystemFilter:
+    """Tests for cross-ecosystem suspicion filter."""
+
+    def test_single_weak_cross_group_demoted(self):
+        """Single weak cross-group edge → demoted to optional."""
+        g = _build(classified_fields={
+            ("argoproj.io", "Workflow"): [
+                _cf(target_kind="Volume", target_group="longhorn.io",
+                    required=True, detection_source="ref_detector:parent_kind_name"),
+            ],
+            ("longhorn.io", "Volume"): [],
+        })
+        edges = g.dependency_edges
+        assert len(edges) == 1
+        assert edges[0].edge_type == "optional"
+
+    def test_strong_cross_group_not_demoted(self):
+        """Strong cross-group edge → NOT demoted."""
+        g = _build(classified_fields={
+            ("argoproj.io", "Workflow"): [
+                _cf(target_kind="Volume", target_group="longhorn.io",
+                    required=True, detection_source="ref_detector:ref_tuple"),
+            ],
+            ("longhorn.io", "Volume"): [],
+        })
+        edges = g.dependency_edges
+        assert len(edges) == 1
+        assert edges[0].edge_type == "hard"
+
+    def test_weak_cross_group_with_other_edges_not_demoted(self):
+        """Weak cross-group edge with other edges in same pair → NOT demoted."""
+        g = _build(classified_fields={
+            ("argoproj.io", "Workflow"): [
+                _cf(field="spec.vol", target_kind="Volume", target_group="longhorn.io",
+                    required=True, detection_source="ref_detector:parent_kind_name"),
+                _cf(field="spec.rep", target_kind="Replica", target_group="longhorn.io",
+                    required=True, detection_source="ref_detector:parent_kind_name"),
+            ],
+            ("longhorn.io", "Volume"): [],
+            ("longhorn.io", "Replica"): [],
+        })
+        edges = g.dependency_edges
+        # Two cross-group edges between the same group pair → NOT demoted
+        assert len(edges) == 2
+        # Neither should be demoted since there are 2 edges between the pair
+        for e in edges:
+            assert e.edge_type == "soft"  # soft from weak detector, not optional
+
+    def test_intra_group_weak_not_affected(self):
+        """Intra-group weak edge → NOT affected by cross-ecosystem filter."""
+        g = _build(classified_fields={
+            ("cert-manager.io", "Certificate"): [
+                _cf(target_kind="Issuer", target_group="cert-manager.io",
+                    required=True, detection_source="ref_detector:parent_kind_name"),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        })
+        edges = g.dependency_edges
+        assert len(edges) == 1
+        assert edges[0].edge_type == "soft"  # soft from weak detector, not demoted further
+
+    def test_two_weak_cross_group_edges_same_pair_not_demoted(self):
+        """Two weak edges from different fields same pair → mutual support."""
+        g = _build(classified_fields={
+            ("argoproj.io", "Workflow"): [
+                _cf(field="spec.a", target_kind="Volume", target_group="longhorn.io",
+                    required=True, detection_source="ref_detector:parent_kind_name"),
+                _cf(field="spec.b", target_kind="Volume", target_group="longhorn.io",
+                    required=False, detection_source="ref_detector:enum_kind"),
+            ],
+            ("longhorn.io", "Volume"): [],
+        })
+        # These deduplicate to 1 edge (same source_gk/target_gk pair)
+        # Since only 1 edge between the pair, it gets demoted if weak
+        edges = g.dependency_edges
+        assert len(edges) == 1
+
+
+# ---------------------------------------------------------------------------
 # Section 03: Kahn's Topological Sort
 # ---------------------------------------------------------------------------
 

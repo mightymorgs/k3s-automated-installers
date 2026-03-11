@@ -175,7 +175,72 @@ def _kahns_sort(scc_deps: dict[int, set[int]], num_sccs: int) -> list[list[int]]
     return layers
 
 
-def topological_layers(dependencies: dict[str, set[str]]) -> list[list[str]]:
+def _break_cycles_by_confidence(
+    dependencies: dict[str, set[str]],
+    edge_confidences: dict[tuple[str, str], float],
+) -> tuple[dict[str, set[str]], list[tuple[str, str, float]]]:
+    """Remove lowest-confidence edges from SCCs until graph is acyclic.
+
+    Args:
+        dependencies: Adjacency list (deep-copied internally).
+        edge_confidences: Mapping (source, target) -> confidence score.
+
+    Returns:
+        - Modified dependencies with cycle-causing edges removed.
+        - List of removed edges as (source, target, confidence).
+    """
+    deps = {k: set(v) for k, v in dependencies.items()}
+    removed: list[tuple[str, str, float]] = []
+
+    while True:
+        sccs = tarjan_scc(deps)
+        # Find cyclic SCCs: multi-node or single-node with self-loop
+        cyclic = [
+            scc
+            for scc in sccs
+            if len(scc) > 1
+            or (len(scc) == 1 and scc[0] in deps.get(scc[0], set()))
+        ]
+        if not cyclic:
+            break
+
+        for scc in cyclic:
+            scc_set = set(scc)
+            # Collect edges within this SCC
+            scc_edges: list[tuple[str, str, float]] = []
+            for node in scc:
+                for dep in deps.get(node, set()):
+                    if dep in scc_set:
+                        conf = edge_confidences.get((node, dep), 1.0)
+                        scc_edges.append((node, dep, conf))
+
+            if not scc_edges:
+                continue
+
+            # Sort by confidence ascending, then alphabetically for determinism
+            scc_edges.sort(key=lambda e: (e[2], e[0], e[1]))
+
+            # Remove the lowest-confidence edge
+            src, tgt, conf = scc_edges[0]
+            deps[src].discard(tgt)
+            removed.append((src, tgt, conf))
+            logger.warning(
+                "Cycle break: removed edge %s → %s "
+                "(confidence=%.2f, reason=low_confidence_break) "
+                "from SCC of %d nodes",
+                src,
+                tgt,
+                conf,
+                len(scc),
+            )
+
+    return deps, removed
+
+
+def topological_layers(
+    dependencies: dict[str, set[str]],
+    edge_confidences: dict[tuple[str, str], float] | None = None,
+) -> list[list[str]]:
     """Return operations grouped into execution layers.
 
     Layer 0 has no dependencies. Layer N depends only on layers 0..N-1.
@@ -187,6 +252,9 @@ def topological_layers(dependencies: dict[str, set[str]]) -> list[list[str]]:
             operations it depends on. Nodes referenced only as dependencies
             (appearing in value sets but not as keys) are implicitly included
             as zero-dependency nodes.
+        edge_confidences: Optional mapping of (source, target) -> confidence.
+            When provided, cycles are broken by iteratively removing the
+            lowest-confidence edge from each SCC.
 
     Returns:
         List of layers, where each layer is a sorted list of operation names.
@@ -203,10 +271,14 @@ def topological_layers(dependencies: dict[str, set[str]]) -> list[list[str]]:
             "Large dependency graph (%d nodes) — sort may be slow", len(full_deps)
         )
 
-    # Step 2: Tarjan's SCC detection
+    # Step 2: Confidence-based cycle breaking (when scores available)
+    if edge_confidences:
+        full_deps, _removed = _break_cycles_by_confidence(full_deps, edge_confidences)
+
+    # Step 3: Tarjan's SCC detection
     sccs = tarjan_scc(full_deps)
 
-    # Log cycle warnings
+    # Log cycle warnings for any remaining SCCs
     for scc in sccs:
         if len(scc) > 1:
             logger.warning(
@@ -216,10 +288,10 @@ def topological_layers(dependencies: dict[str, set[str]]) -> list[list[str]]:
                 ", ".join(scc),
             )
 
-    # Step 3: Condense graph
+    # Step 4: Condense graph
     scc_deps, node_to_scc = _condense_graph(sccs, full_deps)
 
-    # Step 4: Kahn's sort on condensed DAG
+    # Step 5: Kahn's sort on condensed DAG
     scc_layers = _kahns_sort(scc_deps, len(sccs))
 
     # Expand SCC indices back to node names

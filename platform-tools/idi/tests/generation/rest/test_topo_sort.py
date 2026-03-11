@@ -182,3 +182,112 @@ class TestTarjanSCC:
         scc_sets = [frozenset(scc) for scc in sccs]
         assert frozenset({"1", "2", "3"}) in scc_sets
         assert frozenset({"4", "5"}) in scc_sets
+
+
+class TestConfidenceCycleBreaking:
+    """Tests for confidence-based cycle breaking in topological_layers."""
+
+    def test_lowest_confidence_edge_removed(self):
+        """SCC with edges at different confidence — lowest-confidence edge removed."""
+        # A depends on B (conf 0.9), B depends on A (conf 0.3)
+        deps = {"A": {"B"}, "B": {"A"}}
+        confs = {("A", "B"): 0.9, ("B", "A"): 0.3}
+        result = topological_layers(deps, edge_confidences=confs)
+        # B→A (0.3) removed → B has no deps, A depends on B
+        assert result == [["B"], ["A"]]
+
+    def test_scc_breaks_into_valid_ordering(self):
+        """After removing lowest edge, SCC breaks into valid ordering."""
+        # 3-node cycle: A depends on C, B depends on A, C depends on B
+        deps = {"A": {"C"}, "B": {"A"}, "C": {"B"}}
+        confs = {("A", "C"): 0.8, ("B", "A"): 0.7, ("C", "B"): 0.3}
+        result = topological_layers(deps, edge_confidences=confs)
+        # Remove C→B (0.3): C no longer depends on B
+        # Remaining: A→C, B→A → layers [C], [A], [B]
+        assert result == [["C"], ["A"], ["B"]]
+
+    def test_standard_breaking_takes_precedence(self):
+        """When no edge_confidences provided, cycles stay grouped (standard behavior)."""
+        deps = {"A": {"B"}, "B": {"A"}}
+        result = topological_layers(deps)
+        # Without confidences, SCC stays grouped in same layer
+        assert len(result) == 1
+        assert set(result[0]) == {"A", "B"}
+
+    def test_confidence_breaking_only_when_confidences_provided(self):
+        """Confidence-based breaking only activates when edge_confidences is provided."""
+        deps = {"A": {"B"}, "B": {"A"}}
+        # Without confidences — standard behavior (grouped)
+        result_no_conf = topological_layers(deps)
+        assert len(result_no_conf) == 1
+
+        # With confidences — cycle broken
+        confs = {("A", "B"): 0.9, ("B", "A"): 0.3}
+        result_with_conf = topological_layers(deps, edge_confidences=confs)
+        assert len(result_with_conf) == 2
+
+    def test_equal_confidence_deterministic(self):
+        """SCC with all equal confidence — deterministic edge removal (alphabetical)."""
+        deps = {"A": {"B"}, "B": {"A"}}
+        confs = {("A", "B"): 0.5, ("B", "A"): 0.5}
+        result = topological_layers(deps, edge_confidences=confs)
+        # Equal confidence: tiebreak by (source, target) alphabetically
+        # ("A", "B") < ("B", "A") → remove A→B first
+        # A no longer depends on B, B still depends on A → [A], [B]
+        assert result == [["A"], ["B"]]
+
+        # Verify determinism
+        for _ in range(10):
+            assert topological_layers(deps, edge_confidences=confs) == result
+
+    def test_multiple_sccs_broken_independently(self):
+        """Multiple SCCs — each broken independently."""
+        deps = {
+            "A": {"B"}, "B": {"A"},  # SCC 1
+            "C": {"D"}, "D": {"C"},  # SCC 2
+        }
+        confs = {
+            ("A", "B"): 0.9, ("B", "A"): 0.2,  # Remove B→A (lowest)
+            ("C", "D"): 0.3, ("D", "C"): 0.8,  # Remove C→D (lowest)
+        }
+        result = topological_layers(deps, edge_confidences=confs)
+        all_nodes = {n for layer in result for n in layer}
+        assert all_nodes == {"A", "B", "C", "D"}
+        # SCC1: A depends on B (kept) → [B, A]
+        # SCC2: D depends on C (kept) → [C, D]
+        # No cross-deps → [B, C] then [A, D]
+        assert result == [["B", "C"], ["A", "D"]]
+
+    def test_removed_edges_logged(self, caplog):
+        """Removed edges are reported/logged with reason low_confidence_break."""
+        deps = {"A": {"B"}, "B": {"A"}}
+        confs = {("A", "B"): 0.9, ("B", "A"): 0.30}
+        with caplog.at_level(logging.WARNING):
+            topological_layers(deps, edge_confidences=confs)
+        cycle_msgs = [r.message for r in caplog.records if "Cycle break" in r.message]
+        assert len(cycle_msgs) >= 1
+        assert "low_confidence_break" in cycle_msgs[0]
+
+    def test_self_loop_removed(self):
+        """Single-node SCC (self-loop) — edge removed."""
+        deps = {"A": {"A"}}
+        confs = {("A", "A"): 0.5}
+        result = topological_layers(deps, edge_confidences=confs)
+        assert result == [["A"]]
+        # Self-loop should be removed, A placed normally
+
+    def test_large_scc_iterative_removal(self):
+        """Large SCC (10+ nodes) — iteratively removes edges until acyclic."""
+        # 12-node ring: n0 depends on n11, n1 depends on n0, etc.
+        nodes = [f"n{i}" for i in range(12)]
+        deps = {nodes[i]: {nodes[(i - 1) % 12]} for i in range(12)}
+        # Each edge gets increasing confidence
+        confs = {
+            (nodes[i], nodes[(i - 1) % 12]): 0.1 + i * 0.05
+            for i in range(12)
+        }
+        result = topological_layers(deps, edge_confidences=confs)
+        all_nodes = {n for layer in result for n in layer}
+        assert all_nodes == set(nodes)
+        # Ring broken by removing lowest edge → linear chain → 12 layers
+        assert len(result) == 12

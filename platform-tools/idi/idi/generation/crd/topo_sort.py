@@ -153,6 +153,63 @@ def _is_hard_eligible(detection_source: str) -> bool:
     suffix = detection_source.rsplit(":", 1)[-1] if ":" in detection_source else detection_source
     return suffix in _HARD_EDGE_SOURCES
 
+
+_WEAK_DETECTION_SOURCES: frozenset[str] = frozenset({
+    "parent_kind_name",
+    "enum_kind",
+    "fuzzy_kind_name",
+})
+
+
+def _is_weak_source(detection_source: str) -> bool:
+    """Check if detection source is a weak (high-FP) detector."""
+    suffix = detection_source.rsplit(":", 1)[-1] if ":" in detection_source else detection_source
+    return suffix in _WEAK_DETECTION_SOURCES
+
+
+def _filter_cross_ecosystem_edges(
+    edges: list[DependencyEdge],
+) -> list[DependencyEdge]:
+    """Demote suspicious single-edge cross-ecosystem dependencies.
+
+    A single weak edge between two API groups with no other connecting
+    edges is demoted to optional (preserving the edge for visibility
+    but reducing its influence on ordering).
+    """
+    # Group cross-group edges by (source_group, target_group).
+    group_pair_edges: dict[tuple[str, str], list[int]] = {}
+    for i, e in enumerate(edges):
+        src_group = e.source_gk.split("/")[0]
+        tgt_group = e.target_gk.split("/")[0]
+        if src_group == tgt_group:
+            continue
+        pair = (src_group, tgt_group)
+        group_pair_edges.setdefault(pair, []).append(i)
+
+    # Demote single weak cross-group edges.
+    demoted: set[int] = set()
+    for _pair, indices in group_pair_edges.items():
+        if len(indices) != 1:
+            continue
+        idx = indices[0]
+        if _is_weak_source(edges[idx].detection_source):
+            demoted.add(idx)
+
+    if not demoted:
+        return edges
+
+    result: list[DependencyEdge] = []
+    for i, e in enumerate(edges):
+        if i in demoted:
+            result.append(DependencyEdge(
+                source_gk=e.source_gk, target_gk=e.target_gk,
+                edge_type="optional", source_field=e.source_field,
+                detection_source=e.detection_source, confidence=e.confidence,
+            ))
+        else:
+            result.append(e)
+    return result
+
 # Regex to strip TLD from API group for service derivation.
 _TLD_RE = re.compile(r"\.(io|dev|com|org|net|k8s\.io)$")
 
@@ -343,6 +400,9 @@ def build_dependency_graph(
                 detection_source=merged_source, confidence=winner.confidence,
             )
         deduped_edges.append(winner)
+
+    # Step 9: Cross-ecosystem suspicion filter.
+    deduped_edges = _filter_cross_ecosystem_edges(deduped_edges)
 
     return DependencyGraph(
         nodes=nodes,
