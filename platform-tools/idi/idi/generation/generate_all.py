@@ -305,6 +305,7 @@ def _generate_crd_service(
                 group,
                 kind,
                 registry=registry,
+                current_service=name,
             )
             all_kinds[kind] = fields
 

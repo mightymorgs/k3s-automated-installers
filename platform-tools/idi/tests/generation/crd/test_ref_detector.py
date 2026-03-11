@@ -7,6 +7,7 @@ from idi.generation.crd.kind_registry import KindRegistry
 from idi.generation.crd.ref_detector import (
     classify_walked_field,
     detect_enum_kind,
+    detect_fuzzy_kind_name,
     detect_namespace,
     detect_parent_kind_name,
     detect_ref,
@@ -43,12 +44,16 @@ def _make_field(
     is_array_item: bool = False,
     required: bool = False,
     parent_path: str = "spec",
+    depth_confidence: float = 1.0,
+    sibling_names: frozenset[str] | None = None,
 ) -> WalkedField:
     """Build a WalkedField with sensible defaults."""
     if schema is None:
         schema = {"type": "string"}
     if path is None:
         path = f"{parent_path}.{name}"
+    if sibling_names is None:
+        sibling_names = frozenset()
     return WalkedField(
         path=path,
         name=name,
@@ -57,6 +62,8 @@ def _make_field(
         is_array_item=is_array_item,
         required=required,
         parent_path=parent_path,
+        depth_confidence=depth_confidence,
+        sibling_names=sibling_names,
     )
 
 
@@ -646,6 +653,20 @@ class TestDetectSecretKeySelector:
         result = detect_secret_key_selector(field)
         assert result is None
 
+    def test_with_optional_boolean(self):
+        """K8s SecretKeySelector with optional boolean field still matches."""
+        field = _make_field("bearerTokenSecret", schema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "name": {"type": "string"},
+                "optional": {"type": "boolean"},
+            },
+        })
+        result = detect_secret_key_selector(field)
+        assert result is not None
+        assert result.target_kind == "Secret"
+
     def test_non_string_extra_property_excluded(self):
         """Object with a non-string extra property → not SecretKeySelector."""
         field = _make_field("ref", schema={
@@ -795,3 +816,141 @@ class TestReadOnlyOutputClassification:
         results = classify_walked_field(field, registry, "Cert", "cert-manager.io")
         assert len(results) == 1
         assert results[0].role == "config_field"
+
+
+# ---------------------------------------------------------------------------
+# detect_fuzzy_kind_name (section-06)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectFuzzyKindName:
+    """Tests for detect_fuzzy_kind_name detector step."""
+
+    @pytest.fixture
+    def istio_registry(self) -> KindRegistry:
+        reg = KindRegistry()
+        reg.register("Gateway", "gateways", "networking.istio.io", service="istio")
+        reg.register("VirtualService", "virtualservices", "networking.istio.io", service="istio")
+        reg.register("DestinationRule", "destinationrules", "networking.istio.io", service="istio")
+        return reg
+
+    @pytest.fixture
+    def cilium_registry(self) -> KindRegistry:
+        reg = KindRegistry()
+        reg.register("CiliumBGPPeerConfig", "ciliumbgppeerconfigs", "cilium.io", service="cilium")
+        reg.register("CiliumNetworkPolicy", "ciliumnetworkpolicies", "cilium.io", service="cilium")
+        return reg
+
+    def test_plural_match_string_array(self, istio_registry):
+        """'gateways' as array[string] resolves to Gateway via plural_exact."""
+        field = _make_field("gateways", schema={
+            "type": "array", "items": {"type": "string"},
+        })
+        result = detect_fuzzy_kind_name(field, istio_registry, "networking.istio.io", "istio")
+        assert result is not None
+        assert result.role == "input_ref"
+        assert result.target_kind == "Gateway"
+        assert "fuzzy_kind_name" in result.detection_source
+        assert "plural_exact" in result.detection_source
+
+    def test_suffix_match_string(self, cilium_registry):
+        """'peerConfigRef' as string resolves to CiliumBGPPeerConfig."""
+        field = _make_field("peerConfigRef", schema={"type": "string"})
+        result = detect_fuzzy_kind_name(field, cilium_registry, "cilium.io", "cilium")
+        assert result is not None
+        assert result.target_kind == "CiliumBGPPeerConfig"
+        assert "suffix_unique" in result.detection_source
+
+    def test_object_type_rejected(self, istio_registry):
+        """Object-type fields are rejected by type guard."""
+        field = _make_field("gateways", schema={
+            "type": "object", "properties": {"name": {"type": "string"}},
+        })
+        result = detect_fuzzy_kind_name(field, istio_registry, "networking.istio.io", "istio")
+        assert result is None
+
+    def test_integer_type_rejected(self, istio_registry):
+        """Integer-type fields rejected."""
+        field = _make_field("gateways", schema={"type": "integer"})
+        result = detect_fuzzy_kind_name(field, istio_registry, "networking.istio.io", "istio")
+        assert result is None
+
+    def test_below_threshold_returns_none(self, istio_registry):
+        """Score * depth_confidence < 0.7 returns None."""
+        # Gateway plural match = 0.80, depth_confidence=0.81 → 0.648 < 0.7
+        field = _make_field("gateways", schema={
+            "type": "array", "items": {"type": "string"},
+        }, depth_confidence=0.81)
+        result = detect_fuzzy_kind_name(field, istio_registry, "networking.istio.io", "istio")
+        assert result is None
+
+    def test_above_threshold_returns_result(self, istio_registry):
+        """Score * depth_confidence >= 0.7 returns ClassifiedField."""
+        # Gateway plural match = 0.80, depth_confidence=0.9 → 0.72 >= 0.7
+        field = _make_field("gateways", schema={
+            "type": "array", "items": {"type": "string"},
+        }, depth_confidence=0.9)
+        result = detect_fuzzy_kind_name(field, istio_registry, "networking.istio.io", "istio")
+        assert result is not None
+        assert result.confidence == pytest.approx(0.72)
+
+    def test_detection_source_format(self, istio_registry):
+        """detection_source has format ref_detector:fuzzy_kind_name:{match_type}."""
+        field = _make_field("gateways", schema={
+            "type": "array", "items": {"type": "string"},
+        })
+        result = detect_fuzzy_kind_name(field, istio_registry, "networking.istio.io", "istio")
+        assert result is not None
+        assert result.detection_source == "ref_detector:fuzzy_kind_name:plural_exact"
+
+    def test_no_match_returns_none(self):
+        """Completely unrelated field returns None."""
+        reg = KindRegistry()
+        field = _make_field("somethingUnrelated", schema={"type": "string"})
+        result = detect_fuzzy_kind_name(field, reg, "example.io", "test")
+        assert result is None
+
+
+class TestFuzzyDetectorInCascade:
+    """Tests that detect_fuzzy_kind_name is wired into classify_walked_field."""
+
+    @pytest.fixture
+    def istio_registry(self) -> KindRegistry:
+        reg = KindRegistry()
+        reg.register("Gateway", "gateways", "networking.istio.io", service="istio")
+        reg.register("VirtualService", "virtualservices", "networking.istio.io", service="istio")
+        return reg
+
+    def test_higher_priority_detector_wins(self, registry):
+        """'secretName' matched by detect_ref, not fuzzy detector."""
+        field = _make_field("secretName", schema={"type": "string"})
+        results = classify_walked_field(field, registry, "Cert", "cert-manager.io")
+        assert len(results) == 1
+        assert results[0].role == "input_ref"
+        assert "fuzzy_kind_name" not in results[0].detection_source
+
+    def test_fuzzy_fires_when_no_prior_match(self, istio_registry):
+        """'gateways' has no suffix match — fuzzy detector fires."""
+        field = _make_field("gateways", schema={
+            "type": "array", "items": {"type": "string"},
+        })
+        results = classify_walked_field(
+            field, istio_registry, "VirtualService", "networking.istio.io",
+            current_service="istio",
+        )
+        assert len(results) >= 1
+        assert any("fuzzy_kind_name" in r.detection_source for r in results)
+        fuzzy = [r for r in results if "fuzzy_kind_name" in r.detection_source][0]
+        assert fuzzy.target_kind == "Gateway"
+
+    def test_cascade_integration_cilium(self):
+        """'peerConfigRef' resolves via fuzzy when no higher detector matches."""
+        reg = KindRegistry()
+        reg.register("CiliumBGPPeerConfig", "ciliumbgppeerconfigs", "cilium.io", service="cilium")
+        field = _make_field("peerConfigRef", schema={"type": "string"})
+        results = classify_walked_field(
+            field, reg, "CiliumBGPClusterConfig", "cilium.io",
+            current_service="cilium",
+        )
+        assert len(results) >= 1
+        assert any(r.target_kind == "CiliumBGPPeerConfig" for r in results)

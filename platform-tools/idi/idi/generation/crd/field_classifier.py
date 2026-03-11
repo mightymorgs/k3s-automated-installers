@@ -43,6 +43,7 @@ def classify_fields(
     kind: str,
     registry: KindRegistry | None = None,
     prefix: str = "spec",
+    current_service: str = "",
 ) -> list[ClassifiedField]:
     """Classify all spec properties into roles using the detection pipeline.
 
@@ -95,6 +96,7 @@ def classify_fields(
         classified_list = classify_walked_field(
             field, registry, kind, group,
             sibling_fields=sibling_fields,
+            current_service=current_service,
         )
 
         for classified in classified_list:

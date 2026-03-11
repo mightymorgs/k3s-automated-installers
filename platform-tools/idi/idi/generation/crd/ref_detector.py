@@ -755,10 +755,13 @@ def detect_secret_key_selector(
     if not name_prop or not isinstance(name_prop, dict) or name_prop.get("type") != "string":
         return None
 
-    # All other properties (if any) must also be strings to avoid
-    # matching generic objects that happen to have key+name.
+    # All other properties (if any) must be strings or known
+    # SecretKeySelector fields to avoid matching generic objects
+    # that happen to have key+name. The K8s SecretKeySelector type
+    # includes an `optional` boolean field.
+    _SKS_KNOWN_FIELDS = {"key", "name", "namespace", "optional"}
     for prop_name, prop_schema in properties.items():
-        if prop_name in ("key", "name", "namespace"):
+        if prop_name in _SKS_KNOWN_FIELDS:
             continue
         if isinstance(prop_schema, dict) and prop_schema.get("type") != "string":
             return None
@@ -1612,6 +1615,59 @@ def _merge_additive_results(
     return list(best.values())
 
 
+def detect_fuzzy_kind_name(
+    field: WalkedField,
+    registry: KindRegistry,
+    current_group: str,
+    current_service: str,
+) -> ClassifiedField | None:
+    """Detect refs via fuzzy Kind name matching (plural, suffix, camel, bare).
+
+    Called only when no prior detector produced an input_ref classification.
+    Uses KindRegistry.fuzzy_resolve() to find candidate Kind matches.
+
+    Type guards: only string or array[string] fields.
+    Confidence: candidate score * field.depth_confidence must reach 0.7.
+    """
+    field_type = field.schema.get("type")
+    if field_type == "string":
+        pass  # Proceed.
+    elif field_type == "array":
+        items_type = field.schema.get("items", {}).get("type")
+        if items_type != "string":
+            return None
+    else:
+        return None
+
+    candidates = registry.fuzzy_resolve(
+        field.name,
+        scope_service=current_service,
+        require_unique=True,
+        sibling_names=field.sibling_names,
+    )
+    if not candidates:
+        return None
+
+    best = candidates[0]
+    final_confidence = best.score * field.depth_confidence
+    if final_confidence < 0.7:
+        return None
+
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=final_confidence,
+        field_type=field.schema.get("type", "string"),
+        target_kind=best.kind,
+        target_group=best.api_group,
+        required=field.required,
+        description=field.schema.get("description", ""),
+        detection_source=f"ref_detector:fuzzy_kind_name:{best.match_type}",
+        fact_shape="identity",
+        target_field="name",
+    )
+
+
 def classify_walked_field(
     field: WalkedField,
     registry: KindRegistry,
@@ -1619,6 +1675,7 @@ def classify_walked_field(
     group: str,
     sibling_fields: dict[str, Any] | None = None,
     manifest_flags: ManifestFlags | None = None,
+    current_service: str = "",
 ) -> list[ClassifiedField]:
     """Top-level orchestrator for spec field classification.
 
@@ -1638,6 +1695,7 @@ def classify_walked_field(
     Step 10: detect_constraint_fk (0.75) — C29, additive
     Step 11: detect_embedded_workload (0.8) — C22, additive
     Step 12: detect_cataloged_shape (0.8-0.85) — C30, additive
+    Step 12.5: detect_fuzzy_kind_name — fuzzy Kind matching (section-06)
     Step 13: Side-effect NLP
     Step 14: readOnly → output_declaration (0.8)
     Step 15: Default config_field
@@ -1757,6 +1815,12 @@ def classify_walked_field(
         merged = _merge_additive_results(additive_results)
         merged = _deduplicate_classifications(merged)
         return suppress_false_positives(field, merged)
+
+    # Step 10.5: Fuzzy Kind name matching (between additive block and NLP fallback).
+    # Only fires when no prior detector produced an input_ref.
+    fuzzy_result = detect_fuzzy_kind_name(field, registry, group, current_service)
+    if fuzzy_result is not None:
+        return suppress_false_positives(field, [fuzzy_result])
 
     # Step 11: Side-effect NLP for *Name fields (non-dictionary).
     if lower_name.endswith("name") and field.schema.get("type") == "string":
