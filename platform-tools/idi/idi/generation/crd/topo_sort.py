@@ -320,7 +320,7 @@ def build_dependency_graph(
     )
 
 
-def topological_sort(graph: DependencyGraph) -> list[SortTier]:
+def topological_sort(graph: DependencyGraph, *, _depth: int = 0) -> list[SortTier]:
     """Sort Kinds into deployment tiers using Kahn's algorithm on hard edges.
 
     Only hard DependencyEdges participate in the in-degree calculation.
@@ -337,6 +337,9 @@ def topological_sort(graph: DependencyGraph) -> list[SortTier]:
         contains a deterministically-ordered list of gk strings.
         Returns [] if graph has no internal nodes.
     """
+    if _depth > 3:
+        logger.error("topological_sort recursion depth exceeded (>3); aborting cycle resolution")
+        return []
     # Step 1: Filter to internal nodes only.
     internal_gks: set[str] = {
         gk for gk, node in graph.nodes.items()
@@ -402,14 +405,262 @@ def topological_sort(graph: DependencyGraph) -> list[SortTier]:
         heap = next_heap
         tier_num += 1
 
-    # Step 6: Remaining nodes with in_degree > 0 are in cycles.
-    # Return partial result; caller (Section 04) handles cycle resolution.
+    # Step 6: Handle remaining nodes (cycle resolution).
     placed = {gk for tier in tiers for gk in tier.kinds}
     unplaced = internal_gks - placed
-    if unplaced:
+    if not unplaced:
+        return tiers
+
+    # Build a subgraph of unplaced nodes for cycle detection.
+    sub_nodes = {gk: graph.nodes[gk] for gk in unplaced if gk in graph.nodes}
+    sub_edges = [
+        e for e in graph.dependency_edges
+        if e.source_gk in unplaced and e.target_gk in unplaced
+    ]
+    subgraph = DependencyGraph(
+        nodes=sub_nodes, dependency_edges=sub_edges,
+        production_edges=graph.production_edges,
+        external_kinds=graph.external_kinds,
+    )
+    sccs = detect_cycles(subgraph)
+    if not sccs:
+        return tiers
+
+    # Separate trivial (self-loop) from non-trivial SCCs.
+    trivial_gks: set[str] = set()
+    nontrivial_sccs: list[list[str]] = []
+    self_loop_pairs = {
+        (e.source_gk, e.target_gk)
+        for e in graph.dependency_edges
+        if e.edge_type == "hard" and e.source_gk == e.target_gk
+    }
+    for scc in sccs:
+        if len(scc) == 1 and (scc[0], scc[0]) in self_loop_pairs:
+            trivial_gks.add(scc[0])
+        else:
+            nontrivial_sccs.append(scc)
+
+    # Log warnings for non-trivial SCCs.
+    for scc in nontrivial_sccs:
+        scc_set = set(scc)
+        cycle_edges = [
+            e for e in graph.dependency_edges
+            if e.edge_type == "hard" and e.source_gk in scc_set and e.target_gk in scc_set
+        ]
+        edge_strs = [f"{e.source_gk} -> {e.target_gk} ({e.source_field})" for e in cycle_edges]
         logger.warning(
-            "Cycle detected: %d nodes not placed in any tier: %s",
-            len(unplaced), sorted(unplaced),
+            "Circular dependency detected among: %s. Edges: %s",
+            ", ".join(sorted(scc)), "; ".join(edge_strs),
         )
 
+    # For trivial SCCs: just add them back to the sort as normal nodes.
+    # Strip self-edges and re-sort the remaining unplaced set.
+    # For non-trivial SCCs: condense and re-sort.
+    if nontrivial_sccs:
+        condensed, scc_map = condense_cycles(subgraph, nontrivial_sccs)
+        # Add trivial nodes back (they're already in subgraph, just strip self-edges)
+        for gk in trivial_gks:
+            if gk not in condensed.nodes:
+                condensed.nodes[gk] = sub_nodes[gk]
+        # Strip self-loop edges in condensed graph
+        condensed.dependency_edges = [
+            e for e in condensed.dependency_edges
+            if e.source_gk != e.target_gk
+        ]
+        sub_tiers = topological_sort(condensed, _depth=_depth + 1)
+        # Expand representative nodes back to full SCC membership.
+        for st in sub_tiers:
+            expanded_kinds: list[str] = []
+            scc_group_members: list[str] = []
+            for gk in st.kinds:
+                if gk in scc_map:
+                    members = sorted(scc_map[gk])
+                    expanded_kinds.extend(members)
+                    scc_group_members.extend(members)
+                else:
+                    expanded_kinds.append(gk)
+            st.kinds = expanded_kinds
+            if scc_group_members:
+                st.scc_group = sorted(scc_group_members)
+            st.tier += tier_num
+        tiers.extend(sub_tiers)
+    else:
+        # Only trivial SCCs — strip self-edges and re-sort unplaced nodes.
+        trivial_edges = [
+            e for e in sub_edges if e.source_gk != e.target_gk
+        ]
+        trivial_graph = DependencyGraph(
+            nodes=sub_nodes, dependency_edges=trivial_edges,
+            production_edges=graph.production_edges,
+            external_kinds=graph.external_kinds,
+        )
+        sub_tiers = topological_sort(trivial_graph, _depth=_depth + 1)
+        for st in sub_tiers:
+            st.tier += tier_num
+        tiers.extend(sub_tiers)
+
     return tiers
+
+
+def detect_cycles(graph: DependencyGraph) -> list[list[str]]:
+    """Find strongly connected components in the hard-edge subgraph.
+
+    Uses an iterative path-based algorithm to avoid Python recursion limits.
+
+    Returns a list of SCCs, where each SCC is a list of group/kind strings.
+    Trivial SCCs (single node with no self-edge) are excluded.
+    Only SCCs with actual cycles (self-loops or mutual deps) are returned.
+    """
+    # Build hard-edge adjacency for internal nodes only.
+    internal_gks = {
+        gk for gk, node in graph.nodes.items()
+        if not node.is_external and gk not in graph.external_kinds
+    }
+    adj: dict[str, list[str]] = {gk: [] for gk in internal_gks}
+    has_self_loop: set[str] = set()
+    for edge in graph.dependency_edges:
+        if edge.edge_type != "hard":
+            continue
+        if edge.source_gk not in internal_gks or edge.target_gk not in internal_gks:
+            continue
+        if edge.source_gk == edge.target_gk:
+            has_self_loop.add(edge.source_gk)
+            continue
+        adj[edge.source_gk].append(edge.target_gk)
+
+    # Iterative path-based SCC (Eppstein/ActiveState recipe adaptation).
+    VISIT, VISITEDGE, POSTVISIT = 0, 1, 2
+
+    index_counter = 0
+    index_map: dict[str, int] = {}
+    path: list[str] = []
+    path_set: set[str] = set()
+    boundaries: list[int] = []
+    sccs: list[list[str]] = []
+
+    for start in sorted(internal_gks):
+        if start in index_map:
+            continue
+
+        stack: list[tuple[int, str, int]] = [(VISIT, start, 0)]
+
+        while stack:
+            op, node, edge_idx = stack.pop()
+
+            if op == VISIT:
+                if node in index_map:
+                    continue
+                index_map[node] = index_counter
+                index_counter += 1
+                boundaries.append(index_map[node])
+                path.append(node)
+                path_set.add(node)
+                # Push POSTVISIT, then edges in reverse order.
+                stack.append((POSTVISIT, node, 0))
+                neighbors = adj[node]
+                for i in range(len(neighbors) - 1, -1, -1):
+                    stack.append((VISITEDGE, node, i))
+
+            elif op == VISITEDGE:
+                neighbor = adj[node][edge_idx]
+                if neighbor not in index_map:
+                    stack.append((VISIT, neighbor, 0))
+                elif neighbor in path_set:
+                    # Pop boundaries until we find one <= neighbor's index.
+                    while boundaries and boundaries[-1] > index_map[neighbor]:
+                        boundaries.pop()
+
+            elif op == POSTVISIT:
+                if boundaries and boundaries[-1] == index_map[node]:
+                    boundaries.pop()
+                    scc: list[str] = []
+                    while True:
+                        v = path.pop()
+                        path_set.discard(v)
+                        scc.append(v)
+                        if v == node:
+                            break
+                    scc.sort()
+                    sccs.append(scc)
+
+    # Filter: keep only SCCs that represent actual cycles.
+    # A single node is only an SCC if it has a self-loop.
+    result = []
+    for scc in sccs:
+        if len(scc) == 1:
+            if scc[0] in has_self_loop:
+                result.append(scc)
+        else:
+            result.append(scc)
+
+    return result
+
+
+def condense_cycles(
+    graph: DependencyGraph,
+    sccs: list[list[str]],
+) -> tuple[DependencyGraph, dict[str, list[str]]]:
+    """Collapse non-trivial SCCs into representative nodes.
+
+    For each SCC:
+    1. Choose representative = lexicographically smallest gk string
+    2. Remove all SCC member nodes from the graph
+    3. Add representative node back
+    4. Transfer all external edges to/from SCC members to the representative
+    5. Remove intra-SCC edges
+
+    Returns:
+        - Condensed DependencyGraph (modified copy)
+        - Mapping from representative gk → list of all member gks
+    """
+    # Build member → representative mapping.
+    member_to_rep: dict[str, str] = {}
+    scc_map: dict[str, list[str]] = {}
+    for scc in sccs:
+        rep = min(scc)
+        scc_map[rep] = sorted(scc)
+        for member in scc:
+            member_to_rep[member] = rep
+
+    # Build condensed nodes.
+    new_nodes: dict[str, KindNode] = {}
+    for gk, node in graph.nodes.items():
+        if gk in member_to_rep:
+            rep = member_to_rep[gk]
+            if rep not in new_nodes:
+                rep_node = graph.nodes[rep]
+                new_nodes[rep] = rep_node
+        else:
+            new_nodes[gk] = node
+
+    # Rewrite edges, removing intra-SCC edges. Prefer hard edge type on dedup.
+    best_edge: dict[tuple[str, str], DependencyEdge] = {}
+    for edge in graph.dependency_edges:
+        src = member_to_rep.get(edge.source_gk, edge.source_gk)
+        tgt = member_to_rep.get(edge.target_gk, edge.target_gk)
+        if src == tgt:
+            continue  # intra-SCC or self-loop
+        pair = (src, tgt)
+        if pair in best_edge:
+            existing = best_edge[pair]
+            if _EDGE_TYPE_PRIORITY.get(edge.edge_type, 0) > _EDGE_TYPE_PRIORITY.get(existing.edge_type, 0):
+                best_edge[pair] = DependencyEdge(
+                    source_gk=src, target_gk=tgt,
+                    edge_type=edge.edge_type, source_field=edge.source_field,
+                    detection_source=edge.detection_source, confidence=edge.confidence,
+                )
+        else:
+            best_edge[pair] = DependencyEdge(
+                source_gk=src, target_gk=tgt,
+                edge_type=edge.edge_type, source_field=edge.source_field,
+                detection_source=edge.detection_source, confidence=edge.confidence,
+            )
+    new_dep_edges = list(best_edge.values())
+
+    condensed = DependencyGraph(
+        nodes=new_nodes,
+        dependency_edges=new_dep_edges,
+        production_edges=graph.production_edges,
+        external_kinds=graph.external_kinds,
+    )
+    return condensed, scc_map

@@ -702,17 +702,19 @@ class TestTopologicalSort:
         assert result[0].kinds == ["x.io/B"]
         assert result[1].kinds == ["x.io/A"]
 
-    def test_cycle_returns_partial_result(self):
-        """A 2-node cycle returns empty tiers (no zero-degree nodes)."""
+    def test_cycle_resolved_both_placed(self):
+        """A 2-node cycle: both nodes placed in same tier via SCC resolution."""
         g = _make_graph(
             nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
             hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/A")],
         )
         result = topological_sort(g)
-        assert result == []
+        all_kinds = {gk for tier in result for gk in tier.kinds}
+        assert "x.io/A" in all_kinds
+        assert "x.io/B" in all_kinds
 
-    def test_cycle_with_sortable_nodes_returns_partial(self):
-        """Sortable nodes are placed; cyclic nodes are left unplaced."""
+    def test_cycle_with_sortable_nodes_all_placed(self):
+        """Sortable and cyclic nodes are all placed after SCC resolution."""
         g = _make_graph(
             nodes=[
                 ("x.io", "A", "x"), ("x.io", "B", "x"),
@@ -727,8 +729,8 @@ class TestTopologicalSort:
         placed = {gk for tier in result for gk in tier.kinds}
         assert "x.io/B" in placed
         assert "x.io/A" in placed
-        assert "x.io/C" not in placed
-        assert "x.io/D" not in placed
+        assert "x.io/C" in placed
+        assert "x.io/D" in placed
 
     def test_self_loop_hard_edge_skipped(self):
         """A self-loop hard edge is stripped; the node lands at Tier 0."""
@@ -739,3 +741,194 @@ class TestTopologicalSort:
         result = topological_sort(g)
         assert len(result) == 1
         assert result[0].kinds == ["x.io/A"]
+
+
+# ---------------------------------------------------------------------------
+# Section 04: Tarjan's SCC / Cycle Resolution
+# ---------------------------------------------------------------------------
+
+
+class TestDetectCycles:
+    """Tests for detect_cycles() — iterative path-based SCC algorithm."""
+
+    def test_no_cycles_returns_empty(self):
+        """A linear chain (A→B→C) has no cycles."""
+        from idi.generation.crd.topo_sort import detect_cycles
+
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x"), ("x.io", "C", "x")],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/C")],
+        )
+        assert detect_cycles(g) == []
+
+    def test_self_loop_detected_as_trivial_scc(self):
+        """A self-loop (Middleware→Middleware) is detected as a trivial SCC."""
+        from idi.generation.crd.topo_sort import detect_cycles
+
+        g = _make_graph(
+            nodes=[("traefik.io", "Middleware", "traefik")],
+            hard_edges=[("traefik.io/Middleware", "traefik.io/Middleware")],
+        )
+        sccs = detect_cycles(g)
+        assert len(sccs) == 1
+        assert sccs[0] == ["traefik.io/Middleware"]
+
+    def test_two_node_cycle(self):
+        """A→B→A is detected as a non-trivial SCC."""
+        from idi.generation.crd.topo_sort import detect_cycles
+
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/A")],
+        )
+        sccs = detect_cycles(g)
+        assert len(sccs) == 1
+        assert sorted(sccs[0]) == ["x.io/A", "x.io/B"]
+
+    def test_multiple_independent_sccs(self):
+        """Two separate cycles {A→B→A} and {C→D→C} detected independently."""
+        from idi.generation.crd.topo_sort import detect_cycles
+
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"),
+                ("y.io", "C", "y"), ("y.io", "D", "y"),
+            ],
+            hard_edges=[
+                ("x.io/A", "x.io/B"), ("x.io/B", "x.io/A"),
+                ("y.io/C", "y.io/D"), ("y.io/D", "y.io/C"),
+            ],
+        )
+        sccs = detect_cycles(g)
+        assert len(sccs) == 2
+        scc_sets = [set(scc) for scc in sccs]
+        assert {"x.io/A", "x.io/B"} in scc_sets
+        assert {"y.io/C", "y.io/D"} in scc_sets
+
+    def test_soft_edges_ignored_for_cycle_detection(self):
+        """Soft edges do not create cycles."""
+        from idi.generation.crd.topo_sort import detect_cycles
+
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B")],
+            soft_edges=[("x.io/B", "x.io/A")],
+        )
+        assert detect_cycles(g) == []
+
+
+class TestCycleResolution:
+    """Tests for cycle resolution integrated with topological_sort()."""
+
+    def test_trivial_scc_stripped_kind_in_normal_sort(self):
+        """Middleware self-loop is stripped; Middleware appears at correct tier.
+        Trivial SCCs should NOT have scc_group set."""
+        g = _make_graph(
+            nodes=[
+                ("traefik.io", "Middleware", "traefik"),
+                ("traefik.io", "IngressRoute", "traefik"),
+            ],
+            hard_edges=[
+                ("traefik.io/Middleware", "traefik.io/Middleware"),
+                ("traefik.io/IngressRoute", "traefik.io/Middleware"),
+            ],
+        )
+        result = topological_sort(g)
+        placed = {gk for tier in result for gk in tier.kinds}
+        assert "traefik.io/Middleware" in placed
+        assert "traefik.io/IngressRoute" in placed
+        # Middleware should be in a lower tier
+        tier_of = {}
+        for t in result:
+            for gk in t.kinds:
+                tier_of[gk] = t.tier
+        assert tier_of["traefik.io/Middleware"] < tier_of["traefik.io/IngressRoute"]
+        # Trivial SCC should NOT have scc_group
+        mw_tier = [t for t in result if "traefik.io/Middleware" in t.kinds][0]
+        assert mw_tier.scc_group is None
+
+    def test_nontrivial_scc_placed_in_same_tier_with_scc_group(self):
+        """A→B→A cycle: both placed in same tier with scc_group set."""
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/A")],
+        )
+        result = topological_sort(g)
+        assert len(result) == 1
+        assert "x.io/A" in result[0].kinds
+        assert "x.io/B" in result[0].kinds
+        assert result[0].scc_group is not None
+        assert sorted(result[0].scc_group) == ["x.io/A", "x.io/B"]
+
+    def test_scc_representative_is_lex_smallest(self):
+        """After condensation, representative is the lex-smallest gk."""
+        from idi.generation.crd.topo_sort import condense_cycles
+
+        g = _make_graph(
+            nodes=[("z.io", "Z", "z"), ("y.io", "Y", "y"), ("x.io", "X", "x")],
+            hard_edges=[
+                ("z.io/Z", "y.io/Y"), ("y.io/Y", "x.io/X"), ("x.io/X", "z.io/Z"),
+            ],
+        )
+        sccs = [["z.io/Z", "y.io/Y", "x.io/X"]]
+        condensed, scc_map = condense_cycles(g, sccs)
+        # Representative should be lex smallest: x.io/X
+        assert "x.io/X" in condensed.nodes
+        assert "y.io/Y" not in condensed.nodes
+        assert "z.io/Z" not in condensed.nodes
+        assert sorted(scc_map["x.io/X"]) == ["x.io/X", "y.io/Y", "z.io/Z"]
+
+    def test_scc_tier_propagation(self):
+        """C depends on SCC{A,B} → A and B same tier, C in higher tier."""
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"), ("x.io", "C", "x"),
+            ],
+            hard_edges=[
+                ("x.io/A", "x.io/B"), ("x.io/B", "x.io/A"),
+                ("x.io/C", "x.io/A"),
+            ],
+        )
+        result = topological_sort(g)
+        tier_of = {}
+        for t in result:
+            for gk in t.kinds:
+                tier_of[gk] = t.tier
+        assert tier_of["x.io/A"] == tier_of["x.io/B"]
+        assert tier_of["x.io/C"] > tier_of["x.io/A"]
+
+    def test_cycle_warning_logged(self, caplog):
+        """Non-trivial SCC emits a warning with member names and edge details."""
+        import logging
+        g = _make_graph(
+            nodes=[("x.io", "A", "x"), ("x.io", "B", "x")],
+            hard_edges=[("x.io/A", "x.io/B"), ("x.io/B", "x.io/A")],
+        )
+        with caplog.at_level(logging.WARNING, logger="idi.generation.crd.topo_sort"):
+            topological_sort(g)
+        assert any("x.io/A" in r.message and "x.io/B" in r.message for r in caplog.records)
+        # Should include edge details (source_field)
+        assert any("spec.ref" in r.message for r in caplog.records)
+
+    def test_multiple_sccs_in_sort(self):
+        """Two independent cycles both placed with separate scc_group values."""
+        g = _make_graph(
+            nodes=[
+                ("x.io", "A", "x"), ("x.io", "B", "x"),
+                ("y.io", "C", "y"), ("y.io", "D", "y"),
+            ],
+            hard_edges=[
+                ("x.io/A", "x.io/B"), ("x.io/B", "x.io/A"),
+                ("y.io/C", "y.io/D"), ("y.io/D", "y.io/C"),
+            ],
+        )
+        result = topological_sort(g)
+        all_kinds = {gk for tier in result for gk in tier.kinds}
+        assert {"x.io/A", "x.io/B", "y.io/C", "y.io/D"} == all_kinds
+        scc_tiers = [t for t in result if t.scc_group is not None]
+        assert len(scc_tiers) >= 1
+        # Verify each SCC has its own scc_group with correct members
+        all_scc_members = []
+        for t in scc_tiers:
+            all_scc_members.extend(t.scc_group)
+        assert sorted(all_scc_members) == ["x.io/A", "x.io/B", "y.io/C", "y.io/D"]
