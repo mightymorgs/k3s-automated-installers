@@ -68,6 +68,13 @@ _NEVER_FK_FIELDS: frozenset[str] = frozenset({
     "enabled", "disabled", "active", "is_active",
 })
 
+_NON_FK_FORMATS: frozenset[str] = frozenset({
+    "date-time", "date", "time", "duration",
+    "email", "idn-email", "uri", "uri-reference",
+    "iri", "iri-reference", "ipv4", "ipv6",
+    "hostname", "idn-hostname", "byte", "binary", "password",
+})
+
 
 def infer_target(
     field_name: str,
@@ -132,8 +139,25 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
     if fn_lower in _NEVER_FK_FIELDS:
         return 0.0
 
+    # --- Schema signal gates (section-03) ---
+    # Enum fields are categorical, never FKs.
+    if field_info.get("enum"):
+        return 0.0
+
+    # Server-generated fields can't be consumer inputs.
+    if field_info.get("readOnly"):
+        return 0.0
+
     ftype = field_info.get("type", "")
     fmt = field_info.get("format", "")
+
+    # Non-FK formats (date-time, email, uri, etc.) — reject early.
+    if fmt in _NON_FK_FORMATS:
+        return 0.0
+
+    # Pattern-constrained strings — heavily penalized but not excluded.
+    if field_info.get("pattern") and ftype == "string":
+        return 0.1
 
     # Strong FK signals.
     if ftype == "integer" or fmt == "uuid":
@@ -164,7 +188,7 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
             return 0.4
         return 0.2
 
-    # Boolean, enum, etc. — never FKs.
+    # Boolean, object, etc. — never FKs.
     return 0.0
 
 
