@@ -861,3 +861,174 @@ class TestWalkedFieldEnrichment:
         )
         assert wf.depth_confidence == 1.0
         assert wf.sibling_names == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Depth confidence decay (section-10)
+# ---------------------------------------------------------------------------
+
+
+def _make_deep_schema(target_depth: int) -> dict:
+    """Build a properties dict that nests to target_depth levels."""
+    schema = {"leaf": {"type": "string"}}
+    for d in range(target_depth - 1, 0, -1):
+        schema = {f"d{d}": {"type": "object", "properties": schema}}
+    return schema
+
+
+class TestDepthConfidenceDecay:
+    """Tests for depth_confidence decay on WalkedField (section-10)."""
+
+    def test_depth_7_full_confidence(self):
+        """Fields at depth 7 have depth_confidence == 1.0."""
+        props = _make_deep_schema(7)
+        fields = list(walk_crd_schema(props))
+        deepest = max(fields, key=lambda f: f.depth)
+        assert deepest.depth == 7
+        assert deepest.depth_confidence == 1.0
+
+    def test_depth_8_full_confidence(self):
+        """Fields at exactly depth 8 have depth_confidence == 1.0."""
+        props = _make_deep_schema(8)
+        fields = list(walk_crd_schema(props))
+        deepest = max(fields, key=lambda f: f.depth)
+        assert deepest.depth == 8
+        assert deepest.depth_confidence == 1.0
+
+    def test_depth_9_decayed(self):
+        """Fields at depth 9 have depth_confidence == 0.9."""
+        props = _make_deep_schema(12)
+        fields = list(walk_crd_schema(props))
+        f9 = next(f for f in fields if f.depth == 9)
+        assert f9.depth_confidence == pytest.approx(0.9)
+
+    def test_depth_10_decayed(self):
+        """Fields at depth 10 have depth_confidence == 0.81."""
+        props = _make_deep_schema(12)
+        fields = list(walk_crd_schema(props))
+        f10 = next(f for f in fields if f.depth == 10)
+        assert f10.depth_confidence == pytest.approx(0.81)
+
+    def test_depth_11_decayed(self):
+        """Fields at depth 11 have depth_confidence == 0.729."""
+        props = _make_deep_schema(12)
+        fields = list(walk_crd_schema(props))
+        f11 = next(f for f in fields if f.depth == 11)
+        assert f11.depth_confidence == pytest.approx(0.729)
+
+    def test_depth_12_decayed(self):
+        """Fields at depth 12 have depth_confidence == 0.6561."""
+        props = _make_deep_schema(12)
+        fields = list(walk_crd_schema(props))
+        f12 = next(f for f in fields if f.depth == 12)
+        assert f12.depth_confidence == pytest.approx(0.6561)
+
+    def test_custom_full_confidence_depth(self):
+        """Custom full_confidence_depth=5 makes depth 6 decay to 0.9."""
+        props = _make_deep_schema(7)
+        fields = list(walk_crd_schema(props, full_confidence_depth=5))
+        f5 = next(f for f in fields if f.depth == 5)
+        f6 = next(f for f in fields if f.depth == 6)
+        f7 = next(f for f in fields if f.depth == 7)
+        assert f5.depth_confidence == 1.0
+        assert f6.depth_confidence == pytest.approx(0.9)
+        assert f7.depth_confidence == pytest.approx(0.81)
+
+    def test_walker_yields_fields_up_to_depth_12(self):
+        """The walker yields fields up to max_depth=12."""
+        props = _make_deep_schema(12)
+        fields = list(walk_crd_schema(props))
+        depths = {f.depth for f in fields}
+        assert 12 in depths
+
+    def test_fields_beyond_max_depth_12_not_yielded(self):
+        """Fields beyond max_depth=12 are NOT yielded."""
+        props = _make_deep_schema(14)
+        fields = list(walk_crd_schema(props))
+        depths = {f.depth for f in fields}
+        assert 13 not in depths
+        assert 14 not in depths
+
+    def test_default_max_depth_is_12(self):
+        """walk_crd_schema with no explicit max_depth uses 12."""
+        props = _make_deep_schema(14)
+        fields = list(walk_crd_schema(props))
+        max_d = max(f.depth for f in fields)
+        assert max_d == 12
+
+    def test_walk_crd_status_unaffected(self):
+        """walk_crd_status retains max_depth=3 and depth_confidence=1.0."""
+        props = _make_deep_schema(3)
+        fields = list(walk_crd_status(props))
+        assert all(f.depth_confidence == 1.0 for f in fields)
+
+    def test_custom_depth_decay(self):
+        """Custom depth_decay=0.5 produces 0.5 at depth 9, 0.25 at depth 10."""
+        props = _make_deep_schema(10)
+        fields = list(walk_crd_schema(props, depth_decay=0.5))
+        f9 = next(f for f in fields if f.depth == 9)
+        f10 = next(f for f in fields if f.depth == 10)
+        assert f9.depth_confidence == pytest.approx(0.5)
+        assert f10.depth_confidence == pytest.approx(0.25)
+
+    def test_depth_decay_through_array_nesting(self):
+        """depth_confidence decays correctly through array items."""
+        # Build: d1 (object) -> d2 (array of objects) -> ... -> leaf at depth 10
+        props = {
+            "d1": {
+                "type": "object",
+                "properties": {
+                    "d2": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "d3": {
+                                    "type": "object",
+                                    "properties": {
+                                        "d4": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "d5": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "d6": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                    "d7": {
+                                                                        "type": "object",
+                                                                        "properties": {
+                                                                            "d8": {
+                                                                                "type": "object",
+                                                                                "properties": {
+                                                                                    "d9": {
+                                                                                        "type": "object",
+                                                                                        "properties": {
+                                                                                            "leaf": {"type": "string"},
+                                                                                        },
+                                                                                    },
+                                                                                },
+                                                                            },
+                                                                        },
+                                                                    },
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        f9 = next((f for f in fields if f.depth == 9), None)
+        assert f9 is not None
+        assert f9.depth_confidence == pytest.approx(0.9)

@@ -118,7 +118,9 @@ def walk_crd_schema(
     properties: dict[str, Any],
     required: list[str] | None = None,
     prefix: str = "spec",
-    max_depth: int = 8,
+    max_depth: int = 12,
+    full_confidence_depth: int = 8,
+    depth_decay: float = 0.9,
 ) -> Iterator[WalkedField]:
     """Recursively yield every field in a CRD spec schema.
 
@@ -126,9 +128,9 @@ def walk_crd_schema(
         properties: The properties dict from the spec schema.
         required: Required field names at this level.
         prefix: Dot-path prefix (default: "spec").
-        max_depth: Maximum traversal depth (default: 8).
-            Increased from 5 to 8 to cover deeply nested provider auth
-            chains (e.g., external-secrets SecretStore at depth 6-7).
+        max_depth: Maximum traversal depth (default: 12).
+        full_confidence_depth: Depth up to which depth_confidence stays 1.0 (default: 8).
+        depth_decay: Confidence multiplier per level beyond full_confidence_depth (default: 0.9).
 
     Yields:
         WalkedField for each property at every level.
@@ -142,6 +144,8 @@ def walk_crd_schema(
         is_array_item=False,
         skip_envelope=True,
         skip_status_in_excluded=True,
+        full_confidence_depth=full_confidence_depth,
+        depth_decay=depth_decay,
     )
 
 
@@ -152,7 +156,7 @@ def walk_crd_status(
 ) -> Iterator[WalkedField]:
     """Walk status subresource fields for output_declaration detection.
 
-    Uses a lower max_depth (3 vs 5) because operator status fields
+    Uses a lower max_depth (3 vs 12) because operator status fields
     are typically shallow. Does NOT apply _K8S_ENVELOPE filtering.
     Does NOT skip "status" from EXCLUDED_FIELDS (since we ARE walking status).
 
@@ -185,6 +189,8 @@ def _walk_recursive(
     is_array_item: bool,
     skip_envelope: bool,
     skip_status_in_excluded: bool,
+    full_confidence_depth: int = 8,
+    depth_decay: float = 0.9,
 ) -> Iterator[WalkedField]:
     """Internal recursive walker.
 
@@ -197,6 +203,8 @@ def _walk_recursive(
         is_array_item: Whether we are inside an array's items schema.
         skip_envelope: Whether to skip _K8S_ENVELOPE at root level.
         skip_status_in_excluded: Whether to skip "status" from EXCLUDED_FIELDS.
+        full_confidence_depth: Depth up to which depth_confidence stays 1.0.
+        depth_decay: Confidence multiplier per level beyond full_confidence_depth.
     """
     if current_depth > max_depth:
         return
@@ -229,6 +237,12 @@ def _walk_recursive(
         field_path = f"{prefix}.{prop_name}"
         field_required = prop_name in required
 
+        # Compute depth confidence decay.
+        if current_depth <= full_confidence_depth:
+            depth_confidence = 1.0
+        else:
+            depth_confidence = depth_decay ** (current_depth - full_confidence_depth)
+
         # Yield this field.
         yield WalkedField(
             path=field_path,
@@ -239,6 +253,7 @@ def _walk_recursive(
             required=field_required,
             parent_path=prefix,
             sibling_names=siblings,
+            depth_confidence=depth_confidence,
         )
 
         # Flatten composed schemas (allOf/oneOf/anyOf) before recursion.
@@ -255,6 +270,8 @@ def _walk_recursive(
                 is_array_item=is_array_item,
                 skip_envelope=False,
                 skip_status_in_excluded=skip_status_in_excluded,
+                full_confidence_depth=full_confidence_depth,
+                depth_decay=depth_decay,
             )
 
         # Recurse into array items.
@@ -272,4 +289,6 @@ def _walk_recursive(
                     is_array_item=True,
                     skip_envelope=False,
                     skip_status_in_excluded=skip_status_in_excluded,
+                    full_confidence_depth=full_confidence_depth,
+                    depth_decay=depth_decay,
                 )
