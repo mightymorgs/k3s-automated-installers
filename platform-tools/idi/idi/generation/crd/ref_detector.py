@@ -1615,6 +1615,47 @@ def _merge_additive_results(
     return list(best.values())
 
 
+_SEMANTIC_FIELD_MAP: dict[str, tuple[str, str, float]] = {
+    # field_name -> (target_kind, target_group, confidence)
+    "credentialName": ("Secret", "core", 0.90),
+    "tlsSecret": ("Secret", "core", 0.90),
+}
+
+
+def detect_semantic_field(
+    field: WalkedField,
+    registry: KindRegistry,
+) -> ClassifiedField | None:
+    """Detect refs via curated semantic field name map.
+
+    Lookup table for well-known field names that reference specific Kinds
+    without naming them via standard suffix patterns. Only fires on
+    type: string fields with exact name match.
+
+    Returns ClassifiedField or None if no match.
+    """
+    if field.schema.get("type") != "string":
+        return None
+
+    entry = _SEMANTIC_FIELD_MAP.get(field.name)
+    if entry is None:
+        return None
+
+    target_kind, target_group, confidence = entry
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=confidence,
+        field_type=field.schema.get("type", "string"),
+        target_kind=target_kind,
+        target_group=target_group,
+        required=field.required,
+        description=field.schema.get("description", ""),
+        detection_source="ref_detector:semantic_field",
+        fact_shape="identity",
+    )
+
+
 def detect_fuzzy_kind_name(
     field: WalkedField,
     registry: KindRegistry,
@@ -1696,6 +1737,7 @@ def classify_walked_field(
     Step 11: detect_embedded_workload (0.8) — C22, additive
     Step 12: detect_cataloged_shape (0.8-0.85) — C30, additive
     Step 12.5: detect_fuzzy_kind_name — fuzzy Kind matching (section-06)
+    Step 12.6: detect_semantic_field (0.90) — curated field name map (section-07)
     Step 13: Side-effect NLP
     Step 14: readOnly → output_declaration (0.8)
     Step 15: Default config_field
@@ -1821,6 +1863,12 @@ def classify_walked_field(
     fuzzy_result = detect_fuzzy_kind_name(field, registry, group, current_service)
     if fuzzy_result is not None:
         return suppress_false_positives(field, [fuzzy_result])
+
+    # Step 10.6: Semantic field map lookup.
+    # Curated field names that reference specific Kinds without standard suffixes.
+    semantic_result = detect_semantic_field(field, registry)
+    if semantic_result is not None:
+        return [semantic_result]
 
     # Step 11: Side-effect NLP for *Name fields (non-dictionary).
     if lower_name.endswith("name") and field.schema.get("type") == "string":

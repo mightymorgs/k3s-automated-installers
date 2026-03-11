@@ -12,6 +12,7 @@ from idi.generation.crd.ref_detector import (
     detect_parent_kind_name,
     detect_ref,
     detect_secret_key_selector,
+    detect_semantic_field,
     detect_status_output,
 )
 from idi.generation.crd.schema_walker import WalkedField
@@ -954,3 +955,106 @@ class TestFuzzyDetectorInCascade:
         )
         assert len(results) >= 1
         assert any(r.target_kind == "CiliumBGPPeerConfig" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# detect_semantic_field (section-07)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectSemanticField:
+    """Tests for detect_semantic_field detector step."""
+
+    def test_credential_name_maps_to_secret(self, registry):
+        """credentialName → Secret at confidence 0.90."""
+        field = _make_field("credentialName", schema={"type": "string"})
+        result = detect_semantic_field(field, registry)
+        assert result is not None
+        assert result.role == "input_ref"
+        assert result.target_kind == "Secret"
+        assert result.target_group == "core"
+        assert result.confidence == 0.90
+        assert result.detection_source == "ref_detector:semantic_field"
+
+    def test_tls_secret_maps_to_secret(self, registry):
+        """tlsSecret → Secret at confidence 0.90."""
+        field = _make_field("tlsSecret", schema={"type": "string"})
+        result = detect_semantic_field(field, registry)
+        assert result is not None
+        assert result.target_kind == "Secret"
+        assert result.target_group == "core"
+        assert result.confidence == 0.90
+
+    def test_unrecognized_field_returns_none(self, registry):
+        """randomFieldName → no match (not in map)."""
+        field = _make_field("randomFieldName", schema={"type": "string"})
+        result = detect_semantic_field(field, registry)
+        assert result is None
+
+    def test_object_type_rejected(self, registry):
+        """credentialName with type: object → no match (only string fields)."""
+        field = _make_field("credentialName", schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        })
+        result = detect_semantic_field(field, registry)
+        assert result is None
+
+    def test_array_type_rejected(self, registry):
+        """credentialName with type: array → no match."""
+        field = _make_field("credentialName", schema={
+            "type": "array", "items": {"type": "string"},
+        })
+        result = detect_semantic_field(field, registry)
+        assert result is None
+
+    def test_case_sensitive_exact_match(self, registry):
+        """credentialname (lowercase) → no match."""
+        field = _make_field("credentialname", schema={"type": "string"})
+        result = detect_semantic_field(field, registry)
+        assert result is None
+
+    def test_classified_field_metadata(self, registry):
+        """Verify all ClassifiedField metadata is correctly populated."""
+        field = _make_field("tlsSecret", schema={
+            "type": "string",
+            "description": "Name of TLS secret",
+        }, path="spec.tls.tlsSecret", required=True)
+        result = detect_semantic_field(field, registry)
+        assert result is not None
+        assert result.field == "spec.tls.tlsSecret"
+        assert result.field_type == "string"
+        assert result.required is True
+        assert result.description == "Name of TLS secret"
+        assert result.fact_shape == "identity"
+
+
+class TestSemanticFieldInCascade:
+    """Tests that detect_semantic_field is wired into classify_walked_field."""
+
+    def test_higher_priority_detector_wins(self, registry):
+        """secretName matched by detect_ref, not semantic field detector."""
+        field = _make_field("secretName", schema={"type": "string"})
+        results = classify_walked_field(field, registry, "Cert", "cert-manager.io")
+        assert len(results) == 1
+        assert "semantic_field" not in results[0].detection_source
+
+    def test_semantic_fires_for_credential_name(self, registry):
+        """credentialName has no suffix match — semantic detector fires."""
+        field = _make_field("credentialName", schema={"type": "string"})
+        results = classify_walked_field(
+            field, registry, "KafkaUser", "strimzi.io",
+        )
+        assert len(results) == 1
+        assert results[0].detection_source == "ref_detector:semantic_field"
+        assert results[0].target_kind == "Secret"
+
+    def test_semantic_fires_for_tls_secret(self, registry):
+        """tlsSecret in cascade resolves to Secret via semantic field detector."""
+        field = _make_field("tlsSecret", schema={"type": "string"})
+        results = classify_walked_field(
+            field, registry, "Gateway", "networking.istio.io",
+        )
+        assert len(results) == 1
+        assert results[0].detection_source == "ref_detector:semantic_field"
+        assert results[0].target_kind == "Secret"
