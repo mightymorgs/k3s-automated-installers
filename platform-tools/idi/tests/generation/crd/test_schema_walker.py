@@ -742,3 +742,122 @@ class TestComposedSchemaTraversal:
         names = {f.name for f in fields}
         assert "dns01" in names
         assert "http01" in names
+
+
+# ---------------------------------------------------------------------------
+# WalkedField enrichment: depth_confidence + sibling_names
+# ---------------------------------------------------------------------------
+
+
+class TestWalkedFieldEnrichment:
+    """Tests for depth_confidence and sibling_names fields on WalkedField."""
+
+    def test_sibling_names_populated_for_nested_object_fields(self):
+        """sibling_names contains sibling property names from the parent object."""
+        props = {
+            "auth": {
+                "type": "object",
+                "properties": {
+                    "vault": {"type": "string"},
+                    "kubernetes": {"type": "string"},
+                    "jwt": {"type": "string"},
+                },
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        vault = next(f for f in fields if f.name == "vault")
+        assert vault.sibling_names == frozenset({"vault", "kubernetes", "jwt"})
+
+    def test_sibling_names_is_frozenset(self):
+        """sibling_names must be a frozenset (immutable, hashable)."""
+        props = {
+            "foo": {"type": "string"},
+            "bar": {"type": "string"},
+        }
+        fields = list(walk_crd_schema(props))
+        for field in fields:
+            assert isinstance(field.sibling_names, frozenset)
+
+    def test_depth_confidence_defaults_to_1_0(self):
+        """All WalkedField from standard walk have depth_confidence == 1.0."""
+        props = {
+            "level1": {
+                "type": "object",
+                "properties": {
+                    "level2": {
+                        "type": "object",
+                        "properties": {
+                            "level3": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        for field in fields:
+            assert field.depth_confidence == 1.0
+
+    def test_sibling_names_at_root_spec_level(self):
+        """Fields directly under spec have sibling_names from spec properties."""
+        props = {
+            "foo": {"type": "string"},
+            "bar": {"type": "string"},
+            "baz": {"type": "string"},
+        }
+        fields = list(walk_crd_schema(props))
+        foo = next(f for f in fields if f.name == "foo")
+        assert foo.sibling_names == frozenset({"foo", "bar", "baz"})
+
+    def test_sibling_names_inside_array_items(self):
+        """Fields inside array items have sibling_names from the items object."""
+        props = {
+            "routes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "match": {"type": "string"},
+                        "services": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        match = next(f for f in fields if f.name == "match")
+        assert "services" in match.sibling_names
+        assert "match" in match.sibling_names
+
+    def test_sibling_names_deeply_nested(self):
+        """sibling_names works at arbitrary depth, reflecting the immediate parent."""
+        props = {
+            "provider": {
+                "type": "object",
+                "properties": {
+                    "vault": {
+                        "type": "object",
+                        "properties": {
+                            "auth": {
+                                "type": "object",
+                                "properties": {
+                                    "tokenSecretRef": {"type": "string"},
+                                    "appRole": {"type": "string"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        fields = list(walk_crd_schema(props))
+        token_ref = next(f for f in fields if f.name == "tokenSecretRef")
+        assert "appRole" in token_ref.sibling_names
+        assert "tokenSecretRef" in token_ref.sibling_names
+
+    def test_existing_walkedfield_construction_backward_compatible(self):
+        """WalkedField can still be constructed without the new fields."""
+        wf = WalkedField(
+            path="spec.foo", name="foo", schema={"type": "string"},
+            depth=1, is_array_item=False, required=False, parent_path="spec",
+        )
+        assert wf.depth_confidence == 1.0
+        assert wf.sibling_names == frozenset()

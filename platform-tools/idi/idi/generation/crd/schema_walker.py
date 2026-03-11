@@ -110,6 +110,8 @@ class WalkedField:
     is_array_item: bool  # True if inside an array's items schema
     required: bool      # True if field name is in parent's 'required' list
     parent_path: str    # "spec.provider.vault.auth"
+    depth_confidence: float = 1.0           # Always 1.0 in Phase 0; populated in Phase 2
+    sibling_names: frozenset[str] = frozenset()  # Parent object's property names
 
 
 def walk_crd_schema(
@@ -200,6 +202,7 @@ def _walk_recursive(
         return
 
     is_root = (current_depth == 1)
+    siblings = frozenset(properties.keys())
 
     for prop_name, prop_schema in properties.items():
         if not isinstance(prop_schema, dict):
@@ -235,6 +238,7 @@ def _walk_recursive(
             is_array_item=is_array_item,
             required=field_required,
             parent_path=prefix,
+            sibling_names=siblings,
         )
 
         # Flatten composed schemas (allOf/oneOf/anyOf) before recursion.
