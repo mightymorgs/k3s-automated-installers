@@ -1779,6 +1779,40 @@ def classify_walked_field(
 ) -> list[ClassifiedField]:
     """Top-level orchestrator for spec field classification.
 
+    Runs the detector cascade via _classify_walked_field_inner, then applies
+    depth confidence multiplication as a centralized post-processing step.
+    """
+    results = _classify_walked_field_inner(
+        field, registry, kind, group,
+        sibling_fields=sibling_fields,
+        manifest_flags=manifest_flags,
+        current_service=current_service,
+    )
+
+    # Centralized depth confidence multiplication.
+    # Applied to ALL detector results uniformly so that:
+    # 1. Deep fields get reduced confidence without per-detector changes.
+    # 2. Future detectors automatically receive depth scaling.
+    # 3. The 0.7 emission floor (enforced downstream) naturally prunes
+    #    low-confidence deep matches.
+    if field.depth_confidence < 1.0:
+        for classified in results:
+            classified.confidence *= field.depth_confidence
+
+    return results
+
+
+def _classify_walked_field_inner(
+    field: WalkedField,
+    registry: KindRegistry,
+    kind: str,
+    group: str,
+    sibling_fields: dict[str, Any] | None = None,
+    manifest_flags: ManifestFlags | None = None,
+    current_service: str = "",
+) -> list[ClassifiedField]:
+    """Internal detector cascade (pre-depth-multiplication).
+
     Runs detectors in priority order (remediation-updated pipeline):
     Step  0: Side-effect dictionary (0.95) — *Name override
     Step  1: detect_ref (0.9) — exclusive

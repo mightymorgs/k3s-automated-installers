@@ -1138,3 +1138,75 @@ class TestSemanticFieldInCascade:
         assert len(results) == 1
         assert results[0].detection_source == "ref_detector:semantic_field"
         assert results[0].target_kind == "Secret"
+
+
+# ---------------------------------------------------------------------------
+# Depth confidence multiplication (section-12)
+# ---------------------------------------------------------------------------
+
+
+class TestConfidenceMultiplication:
+    """Tests for centralized depth confidence multiplication in classify_walked_field."""
+
+    def test_detector_confidence_multiplied_by_depth_confidence(self, registry):
+        """detect_ref at 0.9 with depth_confidence=0.9 produces 0.81."""
+        field = _make_field(
+            "issuerRef",
+            schema={"type": "object", "properties": {"name": {"type": "string"}, "kind": {"type": "string"}}},
+            depth=9,
+            depth_confidence=0.9,
+        )
+        results = classify_walked_field(field, registry, "Certificate", "cert-manager.io")
+        assert len(results) >= 1
+        ref_result = next(r for r in results if r.role == "input_ref")
+        assert ref_result.confidence == pytest.approx(0.9 * 0.9)
+
+    def test_depth_confidence_below_floor_still_returned(self, registry):
+        """Depth multiplication can push confidence below 0.7 — still returned
+        (floor enforcement is downstream, not in classify_walked_field)."""
+        field = _make_field(
+            "issuerRef",
+            schema={"type": "object", "properties": {"name": {"type": "string"}, "kind": {"type": "string"}}},
+            depth=10,
+            depth_confidence=0.81,
+        )
+        results = classify_walked_field(field, registry, "Certificate", "cert-manager.io")
+        ref_result = next(r for r in results if r.role == "input_ref")
+        assert ref_result.confidence == pytest.approx(0.9 * 0.81)
+
+    def test_default_config_field_multiplied(self, registry):
+        """Default config_field (0.5) with depth_confidence=0.9 -> 0.45."""
+        field = _make_field(
+            "someConfigValue",
+            schema={"type": "string"},
+            depth=9,
+            depth_confidence=0.9,
+        )
+        results = classify_walked_field(field, registry, "MyKind", "example.io")
+        assert len(results) == 1
+        assert results[0].role == "config_field"
+        assert results[0].confidence == pytest.approx(0.5 * 0.9)
+
+    def test_depth_confidence_1_0_is_noop(self, registry):
+        """When depth_confidence == 1.0, multiplication is a no-op."""
+        field = _make_field(
+            "issuerRef",
+            schema={"type": "object", "properties": {"name": {"type": "string"}, "kind": {"type": "string"}}},
+            depth_confidence=1.0,
+        )
+        results = classify_walked_field(field, registry, "Certificate", "cert-manager.io")
+        ref_result = next(r for r in results if r.role == "input_ref")
+        assert ref_result.confidence == pytest.approx(0.9)
+
+    def test_output_declaration_also_multiplied(self, registry):
+        """output_declaration (readOnly) at 0.8 with depth_confidence=0.9 -> 0.72."""
+        field = _make_field(
+            "observedGeneration",
+            schema={"type": "integer", "readOnly": True},
+            depth=9,
+            depth_confidence=0.9,
+        )
+        results = classify_walked_field(field, registry, "MyKind", "example.io")
+        output_results = [r for r in results if r.role == "output_declaration"]
+        assert len(output_results) >= 1
+        assert output_results[0].confidence == pytest.approx(0.8 * 0.9)
