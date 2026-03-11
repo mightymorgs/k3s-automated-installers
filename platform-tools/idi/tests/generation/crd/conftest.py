@@ -186,6 +186,66 @@ def tmp_output_dir(tmp_path: Path) -> Path:
     return tmp_path / "output"
 
 
+@pytest.fixture
+def enterprise_registry():
+    """KindRegistry with Istio, Flux, Cilium, Kyverno kinds + core.
+
+    Used for cross-service penalty and ambiguity tests across enterprise CRDs.
+    """
+    from idi.generation.crd.kind_registry import KindRegistry
+
+    reg = KindRegistry()
+
+    istio_kinds = [
+        ("Gateway", "gateways", "networking.istio.io"),
+        ("VirtualService", "virtualservices", "networking.istio.io"),
+        ("DestinationRule", "destinationrules", "networking.istio.io"),
+        ("ServiceEntry", "serviceentries", "networking.istio.io"),
+        ("Sidecar", "sidecars", "networking.istio.io"),
+        ("EnvoyFilter", "envoyfilters", "networking.istio.io"),
+        ("PeerAuthentication", "peerauthentications", "security.istio.io"),
+        ("AuthorizationPolicy", "authorizationpolicies", "security.istio.io"),
+        ("RequestAuthentication", "requestauthentications", "security.istio.io"),
+    ]
+    for kind, plural, group in istio_kinds:
+        reg.register(kind, plural, group, service="istio")
+
+    flux_kinds = [
+        ("HelmRepository", "helmrepositories", "source.toolkit.fluxcd.io"),
+        ("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io"),
+        ("GitRepository", "gitrepositories", "source.toolkit.fluxcd.io"),
+        ("Bucket", "buckets", "source.toolkit.fluxcd.io"),
+        ("Kustomization", "kustomizations", "kustomize.toolkit.fluxcd.io"),
+        ("HelmChart", "helmcharts", "source.toolkit.fluxcd.io"),
+        ("OCIRepository", "ocirepositories", "source.toolkit.fluxcd.io"),
+    ]
+    for kind, plural, group in flux_kinds:
+        reg.register(kind, plural, group, service="flux")
+
+    cilium_kinds = [
+        ("CiliumBGPPeerConfig", "ciliumbgppeerconfigs", "cilium.io"),
+        ("CiliumNetworkPolicy", "ciliumnetworkpolicies", "cilium.io"),
+        ("CiliumClusterwideNetworkPolicy", "ciliumclusterwidenetworkpolicies", "cilium.io"),
+        ("CiliumEndpoint", "ciliumendpoints", "cilium.io"),
+        ("CiliumIdentity", "ciliumidentities", "cilium.io"),
+        ("CiliumNode", "ciliumnodes", "cilium.io"),
+    ]
+    for kind, plural, group in cilium_kinds:
+        reg.register(kind, plural, group, service="cilium")
+
+    kyverno_kinds = [
+        ("ClusterPolicy", "clusterpolicies", "kyverno.io"),
+        ("Policy", "policies", "kyverno.io"),
+        ("ClusterCleanupPolicy", "clustercleanuppolicies", "kyverno.io"),
+        ("CleanupPolicy", "cleanuppolicies", "kyverno.io"),
+        ("PolicyException", "policyexceptions", "kyverno.io"),
+    ]
+    for kind, plural, group in kyverno_kinds:
+        reg.register(kind, plural, group, service="kyverno")
+
+    return reg
+
+
 # ---------------------------------------------------------------------------
 # KindRegistry fixtures (fully wired in section-02)
 # ---------------------------------------------------------------------------
