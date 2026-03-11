@@ -61,9 +61,9 @@ This is a monolithic script that handles:
 **Issues:**
 - God-object anti-pattern — too many responsibilities in one file
 - Many functions are 50-100+ lines with deep nesting
-- No clear separation between data extraction, transformation, and output
+- Moderate duplication between IDI and VM Builder code paths (e.g., `generate_entry_point_map_idi` vs `generate_entry_point_map_vm`, `generate_external_deps_idi` vs `generate_external_deps_vm`) — these could share common logic
 
-**Recommendation:** Split into modules: `index_generator/ast_analysis.py`, `index_generator/cgc_integration.py`, `index_generator/markdown_writer.py`, etc.
+**Recommendation:** Split into a package: `scripts/generate_indexes/` with sub-modules per section (ast_analysis, cgc_integration, markdown_writer, etc.).
 
 #### 3. Generated/Fixture Files Committed (Medium)
 
@@ -115,15 +115,49 @@ This deletion seems unrelated to the CRD pipeline feature. It should have its ow
 
 ### Adapters (`platform-tools/idi/idi/generation/adapters/`)
 
-**`envelope_detector.py`** (new) — 4-pattern generic response envelope detector with confidence scoring. Well-scoped.
+**`envelope_detector.py`** (new) — 4-pattern generic response envelope detector with confidence scoring. Excellent code quality with clean separation, frozen dataclass for results, clear docstrings. Minor concern: the externally-tagged detector might benefit from lower confidence (~0.85) given potential false-positive risk on paths like `/api/v1/users`.
 
 **`kubernetes_crd.py`** (deleted) — 287 LOC monolithic writer replaced by the pipeline. Good cleanup.
 
 **`swagger2.py`** (deleted) — Eliminated in Phase B adapter slimming. Verify no downstream consumers depend on Swagger 2.0 processing.
 
+**`adapters/__init__.py`** — Registry pattern is clean and extensible. One issue: `AdapterRegistry.get()` uses `adapter_class is CloudflareAdapter` identity check — this breaks if someone subclasses it. Use a class-level flag like `needs_spec = True` instead.
+
+### Supporting Files
+
+**`spec_loader.py`** — Loads OpenAPI specs with `$ref` resolution, cycle detection, and memoization. **Two bugs found:**
+1. **`$ref` memo cache poisoning**: If a ref is first encountered in a circular context (producing `{}`), that empty dict is cached and reused in non-circular contexts later, causing silent data loss. Fix: only cache non-cycle-break results, or invalidate memo entries that resolved to `{}`.
+2. **`urlopen` without timeout**: `urlopen(schema_path)` has no timeout — a malicious or unresponsive server could hang the process indefinitely. Add `timeout=30`.
+3. **Global SafeLoader mutation**: `yaml.SafeLoader.add_constructor` modifies the class globally. Use `type('Loader', (yaml.SafeLoader,), {})` to create a private subclass.
+
+**`field_extractor.py`** (897 lines) — Request/response field extraction with combinator unwrapping, type inference, envelope detection. Issues:
+- `build_heuristic_outputs` contains a dead code block with `pass` — either implement or remove the "wrapper object resolution" TODO.
+- `canonicalize_composed_schema` silently overwrites properties when merging `allOf` branches with conflicting keys — should log a warning.
+
+**`path_extractor.py`** — Operation metadata extraction with RFC 6570 parsing. Good quality overall. Minor: `resource_to_kind` depluralization is naive (`"statuses"` → `"Statuse"`). Consider a suffix table for irregular plurals or adding more entries to the built-in `kind_map`.
+
 ### CI/Workflow
 
-**`.github/workflows/check-indexes.yml`** — Simple and focused. Only installs `pyyaml` dependency and runs with `--no-cgc --check`. Appropriately scoped path triggers.
+**`.github/workflows/check-indexes.yml`** — Simple and focused. Only installs `pyyaml` dependency and runs with `--no-cgc --check`. Appropriately scoped path triggers. Consider pinning action versions to SHA digests for supply-chain security.
+
+### `dep_adapters/base.py`
+
+Clean protocol definitions. `Dependency.satisfaction` defaults to `""` — consider documenting the expected values or using an enum.
+
+---
+
+## Bugs Found
+
+| Severity | Location | Description |
+|----------|----------|-------------|
+| Medium | `spec_loader.py` — `_resolve_refs` | `$ref` memo cache can serve cycle-break `{}` placeholders in non-circular contexts, causing data loss |
+| Medium | `spec_loader.py` — `load_spec` | `urlopen()` has no timeout — can hang indefinitely |
+| Medium | `spec_loader.py` — `load_spec` | Global `yaml.SafeLoader` mutation via `add_constructor` |
+| Low | `scripts/generate_indexes.py` — `generate_templates_index` | Typo: `` f'`r`' `` should be `` f'`{r}`' `` — produces literal `r` instead of app name |
+| Low | `field_extractor.py` — `build_heuristic_outputs` | Dead code block with `pass` for wrapper object resolution |
+| Low | `field_extractor.py` — `canonicalize_composed_schema` | Silent property overwrite on `allOf` merge conflicts |
+| Low | `path_extractor.py` — `resource_to_kind` | Naive depluralization for irregular plurals |
+| Low | `scripts/generate_indexes.py` — `_vm_call_trees` | Missing "no existing check files" guard (present in `_idi_call_trees`) |
 
 ---
 
@@ -132,13 +166,21 @@ This deletion seems unrelated to the CRD pipeline feature. It should have its ow
 | Priority | Item | Action |
 |----------|------|--------|
 | **BLOCKER** | API keys in `.mcp.json` git history | Revoke keys, purge from history |
+| High | `spec_loader.py` memo cache bug | Fix cycle-break caching logic |
+| High | `spec_loader.py` no timeout on `urlopen` | Add `timeout=30` |
 | High | PR is 74K lines | Consider phased merging for future work |
 | High | `generate_indexes.py` at 3,502 LOC | Split into modules |
+| Medium | `spec_loader.py` global SafeLoader mutation | Create private loader subclass |
+| Medium | `generate_indexes.py` template index typo | Fix `f'`r`'` → `f'`{r}`'` |
 | Medium | Generated index JSONs in repo | Evaluate if CI-generated is sufficient |
+| Low | `field_extractor.py` dead code | Implement or remove wrapper TODO |
+| Low | `adapters/__init__.py` identity check | Use class-level flag instead |
 | Low | Unrelated `testbed-phase5.yaml` deletion | Separate commit/PR |
 
 ---
 
 ## Verdict
 
-**Do not merge** until the leaked API keys are addressed. The code architecture and test coverage are strong, but the secrets in git history make this a security blocker. After remediation, this is a well-executed feature implementation that would benefit from the structural improvements noted above.
+**Do not merge** until the leaked API keys are addressed. The `spec_loader.py` memo cache bug should also be fixed before merge as it can cause silent data loss.
+
+After remediation, this is a well-executed feature implementation with strong test coverage and good architectural decisions. The code quality across the CRD pipeline modules is consistently high. The main structural improvement needed is splitting `generate_indexes.py` into a proper package.
