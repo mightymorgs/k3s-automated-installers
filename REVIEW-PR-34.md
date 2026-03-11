@@ -86,32 +86,57 @@ This deletion seems unrelated to the CRD pipeline feature. It should have its ow
 
 ### Core Pipeline (`platform-tools/idi/idi/generation/crd/`)
 
-**`kind_registry.py`** — KindRegistry with 20 bootstrap entries and CamelCase-aware longest-match lookup. The two-pass design (populate globally, then query per-service) is sound. Watch for thread-safety if this is ever used concurrently.
+**`kind_registry.py`** — KindRegistry with 20 bootstrap entries and CamelCase-aware longest-match lookup. The two-pass design (populate globally, then query per-service) is sound.
+- `_rebuild_sorted()` is called on every `register()` call — during bulk bootstrap (20 entries) this rebuilds 20 times. Add a `register_batch()` method.
+- `is_ref_field` returns a 4-tuple `(bool, str|None, str|None, str|None)` — replace with a `NamedTuple` for readability.
 
-**`schema_walker.py`** — Depth-limited (8) schema traversal with array handling. The depth increase from 5→8 (commit `e9637ab`) suggests the original limit was too conservative. Consider making max_depth configurable rather than hardcoded, since different CRDs may have varying nesting depths.
+**`schema_walker.py`** — Depth-limited (8) schema traversal with array handling.
+- **Bug**: `_flatten_composed` merges `allOf` AND `oneOf`/`anyOf` indiscriminately, losing the semantic distinction. In practice CRD schemas rarely combine these, but it could produce incorrect property sets.
+- `_walk_recursive` has 8 parameters — consider bundling boolean flags into a `WalkerConfig` dataclass.
+- No guard if caller passes `None` for `properties`.
 
-**`ref_detector.py`** — 5 detection strategies is a reasonable count. The strategy pattern is well-applied here. Ensure strategies are ordered by specificity/cost to short-circuit when possible.
+**`ref_detector.py`** — At ~1,800 lines this is the largest and most complex file. **Multiple issues found:**
+- **Bug** (line ~547): `detect_embedded_workload` has `if not top_props and not isinstance(top_props, dict)` — should be `or` not `and`. With `and`, an empty dict `{}` passes the guard incorrectly.
+- **Bug** (line ~469): `detect_constraint_fk` has `if prop_name.lower() == "namespace" and prop_name.lower() == "namespace"` — redundant tautology (same condition twice).
+- **Bug**: Step numbering in `classify_walked_field` docstring is mismatched with inline comments (Steps 3+ are renumbered mid-function).
+- `detect_status_output` Tier 2 iterates all registered kinds with substring matching, no word-boundary check — short Kinds like "Pod" or "Job" could false-match field names like "jobStatus".
+- Module-level mutable global `_SHAPE_CATALOG` is not thread-safe and makes testing harder.
+- The `kind_lower_map = {k.lower(): k for k in all_kinds}` pattern is rebuilt in 5+ functions — should be a `KindRegistry` method.
+- **Recommendation:** Split into 3-4 sub-modules (detectors/structural.py, detectors/workload.py, detectors/suppression.py).
 
-**`topo_sort.py`** — Kahn's algorithm with Tarjan SCC cycle detection. This is the most complex module (the test file alone is 1,832 lines). The combination of two algorithms is appropriate for DAG sorting with cycle reporting.
+**`topo_sort.py`** — Kahn's algorithm with Tarjan SCC cycle detection. Well-structured with clear data model.
+- **Bug**: `CORE_EXTERNAL_KINDS` uses `("", "Endpoints")` but `KindRegistry` registers `("Endpoint", "endpoints", "core")` — Kind name mismatch (`Endpoints` vs `Endpoint`) breaks the external-boundary check.
+- **Security**: Path traversal guards use `assert` statements — stripped in `python -O`. Must use `if not ...: raise ValueError(...)` instead.
+- Recursion in `topological_sort` silently returns `[]` at `_depth > 3` — should log/raise an error instead.
 
-**`output_writer.py`** — Decomposed output with collision detection and SHA-256 hashing. The move from monolithic skill files to `{group}/{service}/{Kind}/manifest.json` is a good architectural decision.
+**`output_writer.py`** — Decomposed output with collision detection and SHA-256 hashing. Good architecture.
+- Dead code in `_resolve_filenames` — initial list comprehension (lines ~102-105) is immediately overwritten.
+- `_fact_ref_for_ref` and `_fact_ref_for_output` are identical functions — merge into one.
+- **Security**: Path traversal guard uses `assert` (line ~268) — same issue as topo_sort.py.
 
-**`field_classifier.py`** — Refactored for KindRegistry integration. The depth-aware 'kind' field exclusion (root only) is a subtle but important fix for nested enum discriminator detection.
+**`field_classifier.py`** — Thin orchestration delegating to schema_walker + ref_detector.
+- `_get_sibling_fields` is copied verbatim from `crd_dep.py` — extract to a shared utility.
+- Parent-child deduplication is O(n²) for deeply nested schemas with many refs.
 
-**`olm_loader.py`** — OLM CSV loader with caching. Fetches from OperatorHub.io with Go-template stripping. Consider:
-- Adding timeout configuration for HTTP requests
-- Cache invalidation strategy
-- Error handling for malformed OLM CSVs
+**`olm_loader.py`** — OLM CSV loader with caching and retry logic.
+- Cache writes YAML but source is JSON — format mismatch is confusing. Document the decision.
+- `_sanitize_name` could produce collisions (`foo_bar` and `foobar` both → `foobar`).
+- No `urlopen` timeout, no response size limits.
 
 ### Dependency Adapters (`platform-tools/idi/idi/generation/dep_adapters/`)
 
-**`crd_dep.py`** — Rewired to delegate to `schema_walker` + `ref_detector` instead of inline detection. Good separation of concerns.
+**`crd_dep.py`** — Rewired to delegate to `schema_walker` + `ref_detector`. Good separation.
+- `_derive_plural` bug: words ending in "ss" get triple-s (e.g., `"ingress"` → `"ingressses"`). Need special handling for "ss", "ch", "sh", "x", "z" suffixes.
+- `_get_sibling_fields` duplicated from `field_classifier.py`.
 
-**`rbac_deps.py`** (new) — RBAC adapter with verb inference and Helm parsing at priority 70. The Helm template parsing (Go-template stripping) is fragile by nature — ensure edge cases are tested.
+**`rbac_deps.py`** (new) — RBAC adapter with verb inference and Helm chart parsing at priority 70.
+- **Security**: `tarfile` extraction has no size limit — a malicious chart could cause OOM via zip bomb. Add extraction size limits.
+- `_extract_webhook_deps_from_content` and `extract_webhook_dependencies` duplicate ~70 lines — refactor to share core parsing logic.
+- `urlopen` without timeout (same pattern as other files).
 
-**`olm_deps.py`** (new) — OLM adapter at priority 95 for ground-truth dependency extraction. High priority is appropriate since OLM data is authoritative.
+**`olm_deps.py`** (new) — OLM adapter at priority 95 for ground-truth dependency extraction. Clean and focused (~100 LOC). Good model for what a dep adapter should look like.
 
-**`link_deps.py`** (new) — OpenAPI 3.0+ links parser at confidence 1.0. Confidence of 1.0 is correct since links are explicit declarations.
+**`link_deps.py`** (new) — OpenAPI 3.0+ links parser at confidence 1.0. One of the cleanest files in the PR. Has proper SSRF protection (rejects external `operationRef` URLs). Correct RFC 6901 tilde escaping.
 
 ### Adapters (`platform-tools/idi/idi/generation/adapters/`)
 
@@ -150,10 +175,19 @@ Clean protocol definitions. `Dependency.satisfaction` defaults to `""` — consi
 
 | Severity | Location | Description |
 |----------|----------|-------------|
-| Medium | `spec_loader.py` — `_resolve_refs` | `$ref` memo cache can serve cycle-break `{}` placeholders in non-circular contexts, causing data loss |
-| Medium | `spec_loader.py` — `load_spec` | `urlopen()` has no timeout — can hang indefinitely |
+| **Medium** | `ref_detector.py` ~L547 — `detect_embedded_workload` | `and`/`or` logic error: `if not top_props and not isinstance(top_props, dict)` should use `or` — empty dict passes guard incorrectly |
+| **Medium** | `topo_sort.py` — `CORE_EXTERNAL_KINDS` | Kind name mismatch: `"Endpoints"` vs registered `"Endpoint"` breaks external-boundary check |
+| **Medium** | `spec_loader.py` — `_resolve_refs` | `$ref` memo cache can serve cycle-break `{}` placeholders in non-circular contexts, causing data loss |
+| **Medium** | `spec_loader.py` — `load_spec` | `urlopen()` has no timeout — can hang indefinitely |
+| Medium | `crd_dep.py` — `_derive_plural` | Words ending in "ss" get triple-s plural (e.g., `"ingress"` → `"ingressses"`) |
+| Medium | `topo_sort.py`, `output_writer.py` | `assert` used for security guards — stripped in `python -O` mode |
 | Medium | `spec_loader.py` — `load_spec` | Global `yaml.SafeLoader` mutation via `add_constructor` |
+| Medium | `rbac_deps.py` — `_load_chart_rbac` | `tarfile` extraction with no size limit — zip bomb risk |
+| Low | `ref_detector.py` ~L469 — `detect_constraint_fk` | Redundant tautology: same condition checked twice |
+| Low | `ref_detector.py` — `classify_walked_field` | Step numbering mismatch between docstring and inline comments |
 | Low | `scripts/generate_indexes.py` — `generate_templates_index` | Typo: `` f'`r`' `` should be `` f'`{r}`' `` — produces literal `r` instead of app name |
+| Low | `output_writer.py` — `_resolve_filenames` | Dead code: initial list comprehension immediately overwritten |
+| Low | `output_writer.py` | `_fact_ref_for_ref` and `_fact_ref_for_output` are identical — merge |
 | Low | `field_extractor.py` — `build_heuristic_outputs` | Dead code block with `pass` for wrapper object resolution |
 | Low | `field_extractor.py` — `canonicalize_composed_schema` | Silent property overwrite on `allOf` merge conflicts |
 | Low | `path_extractor.py` — `resource_to_kind` | Naive depluralization for irregular plurals |
@@ -166,21 +200,48 @@ Clean protocol definitions. `Dependency.satisfaction` defaults to `""` — consi
 | Priority | Item | Action |
 |----------|------|--------|
 | **BLOCKER** | API keys in `.mcp.json` git history | Revoke keys, purge from history |
-| High | `spec_loader.py` memo cache bug | Fix cycle-break caching logic |
-| High | `spec_loader.py` no timeout on `urlopen` | Add `timeout=30` |
+| **High** | `ref_detector.py` `and`/`or` logic error | Fix to `or` in `detect_embedded_workload` |
+| **High** | `topo_sort.py` Kind name mismatch | Fix `"Endpoints"` → `"Endpoint"` in `CORE_EXTERNAL_KINDS` |
+| **High** | `spec_loader.py` memo cache bug | Fix cycle-break caching logic |
+| **High** | `spec_loader.py` no timeout on `urlopen` | Add `timeout=30` to all `urlopen` calls |
+| **High** | `assert` used for security guards | Replace with `raise ValueError` in `topo_sort.py`, `output_writer.py` |
+| High | `ref_detector.py` at ~1,800 LOC | Split into sub-modules |
+| High | `generate_indexes.py` at 3,502 LOC | Split into package |
 | High | PR is 74K lines | Consider phased merging for future work |
-| High | `generate_indexes.py` at 3,502 LOC | Split into modules |
+| Medium | `rbac_deps.py` tarfile size limit | Add extraction size limits to prevent zip bombs |
+| Medium | `crd_dep.py` plural derivation | Fix for "ss", "ch", "sh", "x", "z" suffixes |
 | Medium | `spec_loader.py` global SafeLoader mutation | Create private loader subclass |
-| Medium | `generate_indexes.py` template index typo | Fix `f'`r`'` → `f'`{r}`'` |
-| Medium | Generated index JSONs in repo | Evaluate if CI-generated is sufficient |
+| Medium | `generate_indexes.py` template index typo | Fix `` f'`r`' `` → `` f'`{r}`' `` |
+| Medium | Code duplication | Extract shared `_get_sibling_fields`, composition-flattening, `kind_lower_map` |
+| Low | `output_writer.py` dead code + duplicated functions | Clean up `_resolve_filenames`, merge `_fact_ref_for_*` |
 | Low | `field_extractor.py` dead code | Implement or remove wrapper TODO |
 | Low | `adapters/__init__.py` identity check | Use class-level flag instead |
-| Low | Unrelated `testbed-phase5.yaml` deletion | Separate commit/PR |
+| Low | `generate_all.py` type annotations | Modernize from `Dict`/`List`/`Optional` to `dict`/`list`/`X \| None` |
+
+---
+
+## Cross-Cutting Concerns
+
+1. **`assert` for security guards**: `topo_sort.py` and `output_writer.py` use `assert` for path-traversal prevention. These are stripped in `python -O`. Must use `if not ...: raise ValueError(...)`.
+
+2. **Code duplication**: `_get_sibling_fields` is copied verbatim between `field_classifier.py` and `crd_dep.py`. Composition-flattening logic appears in both `schema_walker.py` and `body_fk.py`. The `{k.lower(): k}` pattern is rebuilt in 5+ places in `ref_detector.py`.
+
+3. **Network security**: `olm_loader.py`, `rbac_deps.py`, and `spec_loader.py` all use `urlopen` without timeouts or response size limits. `link_deps.py` has proper SSRF guards — apply the same standard elsewhere.
+
+4. **File sizes**: `ref_detector.py` (~1,800 lines) and `generate_indexes.py` (3,502 lines) are the two files most in need of splitting.
+
+5. **Type annotation inconsistency**: `generate_all.py` uses legacy `typing.Dict`/`List`/`Optional` while all other files use modern `dict`/`list`/`X | None`.
 
 ---
 
 ## Verdict
 
-**Do not merge** until the leaked API keys are addressed. The `spec_loader.py` memo cache bug should also be fixed before merge as it can cause silent data loss.
+**Do not merge** until the leaked API keys are addressed. The `ref_detector.py` `and`/`or` logic error, `topo_sort.py` Kind name mismatch, and `spec_loader.py` memo cache bug should also be fixed before merge as they can cause incorrect detection results and silent data loss.
 
-After remediation, this is a well-executed feature implementation with strong test coverage and good architectural decisions. The code quality across the CRD pipeline modules is consistently high. The main structural improvement needed is splitting `generate_indexes.py` into a proper package.
+After remediation, this is a well-executed feature implementation with strong test coverage (781+ tests, 0 false positives) and good architectural decisions. The CRD pipeline modules show consistently high code quality. The main structural improvements needed are splitting `ref_detector.py` and `generate_indexes.py` into smaller modules, and standardizing network security patterns across all HTTP-fetching code.
+
+**Total issues found: 17 bugs + 1 security blocker**, categorized as:
+- 1 BLOCKER (leaked API keys)
+- 5 High priority (logic errors, missing security guards)
+- 5 Medium priority (edge-case bugs, security hardening)
+- 6 Low priority (dead code, style, minor logic)
