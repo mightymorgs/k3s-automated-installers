@@ -7,9 +7,11 @@ with Tarjan's SCC cycle resolution.
 from __future__ import annotations
 
 import heapq
+import json
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from idi.generation.crd.field_classifier import ClassifiedField
@@ -664,3 +666,249 @@ def condense_cycles(
         external_kinds=graph.external_kinds,
     )
     return condensed, scc_map
+
+
+# ---------------------------------------------------------------------------
+# Catalog Writer — output functions (section 06)
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_path_segment(segment: str) -> str:
+    """Replace unsafe characters in path segments. Allow [A-Za-z0-9._-]."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", segment)
+
+
+def _write_json(path: Path, data: dict) -> None:
+    """Write canonical JSON: sorted keys, 2-space indent, trailing newline."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def update_manifests_with_tiers(
+    tiers: list[SortTier],
+    catalog_root: Path,
+) -> int:
+    """Update manifest.json files with sort_tier field.
+
+    Walks the catalog directory to find each Kind's manifest.json.
+    For each Kind found in the tier list, reads the manifest, adds
+    sort_tier, and writes back with canonical JSON formatting.
+
+    Returns:
+        Number of manifests updated.
+    """
+    # Build gk -> tier number lookup.
+    gk_to_tier: dict[str, int] = {}
+    for st in tiers:
+        for gk in st.kinds:
+            gk_to_tier[gk] = st.tier
+
+    count = 0
+    resolved_root = catalog_root.resolve()
+    for manifest_path in catalog_root.rglob("manifest.json"):
+        resolved = manifest_path.resolve()
+        assert resolved.is_relative_to(resolved_root), (
+            f"Path traversal: {manifest_path} is outside {catalog_root}"
+        )
+        try:
+            data = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Cannot read manifest %s: %s", manifest_path, exc)
+            continue
+        kind = data.get("kind", "")
+        group = data.get("group", "")
+        gk = f"{group}/{kind}"
+        if gk not in gk_to_tier:
+            continue
+        data["sort_tier"] = gk_to_tier[gk]
+        _write_json(manifest_path, data)
+        count += 1
+
+    return count
+
+
+def write_service_ordering(
+    service: str,
+    tiers: list[SortTier],
+    graph: DependencyGraph,
+    catalog_root: Path,
+    cycle_warnings: list[str] | None = None,
+) -> Path:
+    """Write ordering.json for a single service.
+
+    Returns:
+        Path to written ordering.json.
+    """
+    sanitized = _sanitize_path_segment(service)
+    out_path = (catalog_root / sanitized / "ordering.json").resolve()
+    assert out_path.is_relative_to(catalog_root.resolve()), (
+        f"Path traversal: {out_path} is outside {catalog_root}"
+    )
+
+    sorted_tiers = sorted(tiers, key=lambda t: t.tier)
+    tiers_data = []
+    total_kinds = 0
+    for st in sorted_tiers:
+        entry: dict = {"tier": st.tier, "kinds": sorted(st.kinds)}
+        if st.scc_group is not None:
+            entry["scc_group"] = sorted(st.scc_group)
+        tiers_data.append(entry)
+        total_kinds += len(st.kinds)
+
+    # Partition external kinds into core vs unknown, scoped to this service.
+    # Only include externals that are targets of edges from this service's Kinds.
+    service_gks = {gk for st in tiers for gk in st.kinds}
+    referenced_externals: set[str] = set()
+    for edge in graph.dependency_edges:
+        if edge.source_gk in service_gks:
+            tgt = graph.nodes.get(edge.target_gk)
+            if tgt and (tgt.is_external or edge.target_gk in graph.external_kinds):
+                referenced_externals.add(edge.target_gk)
+
+    core_externals: list[str] = []
+    unknown_externals: list[str] = []
+    for gk in referenced_externals:
+        node = graph.nodes[gk]
+        if (node.group, node.kind) in CORE_EXTERNAL_KINDS:
+            core_externals.append(gk)
+        else:
+            unknown_externals.append(gk)
+
+    cycles_detected = sum(1 for st in sorted_tiers if st.scc_group is not None)
+    doc = {
+        "schema_version": "1.0",
+        "service": service,
+        "tiers": tiers_data,
+        "sort_metadata": {
+            "total_kinds": total_kinds,
+            "total_tiers": len(sorted_tiers),
+            "cycles_detected": cycles_detected,
+            "cycle_warnings": cycle_warnings if cycle_warnings is not None else [],
+            "external_kinds": sorted(core_externals),
+            "unknown_external_kinds": sorted(unknown_externals),
+        },
+    }
+    _write_json(out_path, doc)
+    return out_path
+
+
+def write_global_ordering(
+    tiers: list[SortTier],
+    graph: DependencyGraph,
+    catalog_root: Path,
+    cycle_warnings: list[str] | None = None,
+) -> Path:
+    """Write global-ordering.json for cross-service sort.
+
+    Returns:
+        Path to written global-ordering.json.
+    """
+    out_path = (catalog_root / "global-ordering.json").resolve()
+    assert out_path.is_relative_to(catalog_root.resolve()), (
+        f"Path traversal: {out_path} is outside {catalog_root}"
+    )
+
+    sorted_tiers = sorted(tiers, key=lambda t: t.tier)
+    tiers_data = []
+    total_kinds = 0
+    for st in sorted_tiers:
+        entry: dict = {"tier": st.tier, "kinds": sorted(st.kinds)}
+        if st.scc_group is not None:
+            entry["scc_group"] = sorted(st.scc_group)
+        tiers_data.append(entry)
+        total_kinds += len(st.kinds)
+
+    # Collect services from graph nodes.
+    services: set[str] = set()
+    for node in graph.nodes.values():
+        if not node.is_external:
+            services.add(node.service)
+
+    # Cross-service edges (sorted for deterministic output).
+    cross_edges = []
+    for edge in graph.dependency_edges:
+        src_node = graph.nodes.get(edge.source_gk)
+        tgt_node = graph.nodes.get(edge.target_gk)
+        if src_node and tgt_node and src_node.service != tgt_node.service:
+            cross_edges.append({
+                "source": edge.source_gk,
+                "target": edge.target_gk,
+                "edge_type": edge.edge_type,
+            })
+    cross_edges.sort(key=lambda e: (e["source"], e["target"]))
+
+    cycles_detected = sum(1 for st in sorted_tiers if st.scc_group is not None)
+    doc = {
+        "schema_version": "1.0",
+        "tiers": tiers_data,
+        "sort_metadata": {
+            "total_kinds": total_kinds,
+            "total_tiers": len(sorted_tiers),
+            "cycles_detected": cycles_detected,
+            "cycle_warnings": cycle_warnings if cycle_warnings is not None else [],
+            "services": sorted(services),
+            "cross_service_edges": cross_edges,
+        },
+    }
+    _write_json(out_path, doc)
+    return out_path
+
+
+def write_sort_results(
+    graph: DependencyGraph,
+    tiers: list[SortTier],
+    catalog_root: Path,
+    cycle_warnings: list[str] | None = None,
+    write_global: bool = True,
+) -> dict[str, Path]:
+    """Write all sort output files.
+
+    Orchestrates manifest updates, per-service ordering, and global ordering.
+
+    Returns:
+        Dict mapping output type to written path.
+    """
+    result: dict[str, Path] = {}
+
+    update_manifests_with_tiers(tiers, catalog_root)
+
+    # Build tier_num -> SortTier lookup for SCC info.
+    tier_lookup: dict[int, SortTier] = {st.tier: st for st in tiers}
+
+    # Group tiers by service for per-service ordering files.
+    # Per-service tiers use plain Kind names (not group-qualified).
+    service_tier_map: dict[str, dict[int, list[str]]] = {}
+    for st in tiers:
+        for gk in st.kinds:
+            node = graph.nodes.get(gk)
+            if node is None or node.is_external:
+                continue
+            svc = node.service
+            service_tier_map.setdefault(svc, {}).setdefault(st.tier, []).append(node.kind)
+
+    for svc, tier_dict in service_tier_map.items():
+        svc_tiers = []
+        for tier_num in sorted(tier_dict):
+            orig = tier_lookup.get(tier_num)
+            scc_group = None
+            if orig and orig.scc_group:
+                # Filter SCC members to this service, using plain Kind names.
+                svc_kind_set = set(tier_dict.get(tier_num, []))
+                svc_scc = [
+                    graph.nodes[gk].kind
+                    for gk in orig.scc_group
+                    if gk in graph.nodes and graph.nodes[gk].kind in svc_kind_set
+                ]
+                if svc_scc:
+                    scc_group = svc_scc
+            svc_tiers.append(SortTier(
+                tier=tier_num, kinds=sorted(tier_dict[tier_num]), scc_group=scc_group,
+            ))
+        path = write_service_ordering(svc, svc_tiers, graph, catalog_root, cycle_warnings)
+        result[svc] = path
+
+    if write_global:
+        path = write_global_ordering(tiers, graph, catalog_root, cycle_warnings)
+        result["global"] = path
+
+    return result

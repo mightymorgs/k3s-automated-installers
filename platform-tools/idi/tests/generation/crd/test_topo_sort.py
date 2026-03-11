@@ -1,6 +1,8 @@
 """Tests for CRD topological sort data types and constants."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from idi.generation.crd.field_classifier import ClassifiedField
@@ -13,8 +15,14 @@ from idi.generation.crd.topo_sort import (
     KindNode,
     ProductionEdge,
     SortTier,
+    _sanitize_path_segment,
+    _write_json,
     build_dependency_graph,
     topological_sort,
+    update_manifests_with_tiers,
+    write_global_ordering,
+    write_service_ordering,
+    write_sort_results,
 )
 from idi.generation.dep_adapters.base import Output
 
@@ -932,3 +940,294 @@ class TestCycleResolution:
         for t in scc_tiers:
             all_scc_members.extend(t.scc_group)
         assert sorted(all_scc_members) == ["x.io/A", "x.io/B", "y.io/C", "y.io/D"]
+
+
+# ---------------------------------------------------------------------------
+# Catalog Writer — Section 06
+# ---------------------------------------------------------------------------
+
+
+def _make_manifest(kind: str, group: str, service: str) -> dict:
+    """Build a minimal but realistic manifest.json for testing."""
+    return {
+        "schema_version": "2.0",
+        "kind": kind,
+        "group": group,
+        "version": "v1",
+        "plural": kind.lower() + "s",
+        "scope": "Namespaced",
+        "service": service,
+        "description": f"A {kind} resource",
+        "operations": [],
+        "refs": [],
+        "outputs": [],
+        "fields": [],
+        "status_conditions": [],
+        "content_hash": "abc123",
+    }
+
+
+def _setup_catalog(tmp_path, manifests: list[dict]) -> None:
+    """Write manifest.json files in expected catalog layout."""
+    for m in manifests:
+        svc = m["service"]
+        grp = m["group"]
+        kind = m["kind"]
+        d = tmp_path / svc / grp / svc / kind
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(
+            json.dumps(m, indent=2, sort_keys=True) + "\n"
+        )
+
+
+def _simple_graph(
+    kinds: list[tuple[str, str, str]],
+    hard_edges: list[tuple[str, str]] | None = None,
+    externals: list[tuple[str, str, str]] | None = None,
+) -> DependencyGraph:
+    """Build a simple graph for catalog writer tests.
+
+    kinds: list of (kind, group, service)
+    """
+    nodes = {}
+    for kind, group, service in kinds:
+        gk = f"{group}/{kind}"
+        nodes[gk] = KindNode(kind=kind, group=group, service=service)
+    for kind, group, service in (externals or []):
+        gk = f"{group}/{kind}"
+        nodes[gk] = KindNode(kind=kind, group=group, service=service, is_external=True)
+    dep_edges = []
+    for src, tgt in (hard_edges or []):
+        dep_edges.append(DependencyEdge(
+            source_gk=src, target_gk=tgt, edge_type="hard",
+            source_field="test", detection_source="test", confidence=0.9,
+        ))
+    ext_set = {f"{g}/{k}" for k, g, s in (externals or [])}
+    return DependencyGraph(
+        nodes=nodes, dependency_edges=dep_edges,
+        production_edges=[], external_kinds=ext_set,
+    )
+
+
+class TestCatalogWriterManifests:
+    def test_manifest_updated_with_sort_tier(self, tmp_path):
+        """Manifest gets integer sort_tier field added."""
+        m = _make_manifest("Certificate", "cert-manager.io", "cert-manager")
+        _setup_catalog(tmp_path, [m])
+        tiers = [SortTier(tier=0, kinds=["cert-manager.io/Certificate"])]
+        graph = _simple_graph([("Certificate", "cert-manager.io", "cert-manager")])
+        count = update_manifests_with_tiers(tiers, tmp_path)
+        assert count == 1
+        written = json.loads(
+            (tmp_path / "cert-manager" / "cert-manager.io" / "cert-manager" / "Certificate" / "manifest.json").read_text()
+        )
+        assert written["sort_tier"] == 0
+        assert isinstance(written["sort_tier"], int)
+
+    def test_manifest_preserves_existing_fields(self, tmp_path):
+        """Existing fields must not change when sort_tier is added."""
+        m = _make_manifest("Issuer", "cert-manager.io", "cert-manager")
+        original = dict(m)
+        _setup_catalog(tmp_path, [m])
+        tiers = [SortTier(tier=1, kinds=["cert-manager.io/Issuer"])]
+        update_manifests_with_tiers(tiers, tmp_path)
+        written = json.loads(
+            (tmp_path / "cert-manager" / "cert-manager.io" / "cert-manager" / "Issuer" / "manifest.json").read_text()
+        )
+        for key in original:
+            assert written[key] == original[key], f"Field {key!r} changed"
+
+    def test_missing_manifest_logged_not_crash(self, tmp_path):
+        """Kinds in tiers without manifest files are skipped with warning."""
+        tiers = [SortTier(tier=0, kinds=["cert-manager.io/Certificate"])]
+        graph = _simple_graph([("Certificate", "cert-manager.io", "cert-manager")])
+        count = update_manifests_with_tiers(tiers, tmp_path)
+        assert count == 0  # no manifests found
+
+
+class TestCatalogWriterCanonicalJson:
+    def test_json_canonical_serialization(self, tmp_path):
+        """Output files must use sorted keys, 2-space indent, trailing newline."""
+        data = {"z_key": 1, "a_key": 2}
+        path = tmp_path / "test.json"
+        _write_json(path, data)
+        raw = path.read_text()
+        expected = json.dumps(data, indent=2, sort_keys=True) + "\n"
+        assert raw == expected
+
+
+class TestServiceOrdering:
+    def test_ordering_json_schema(self, tmp_path):
+        """ordering.json must contain required keys."""
+        tiers = [
+            SortTier(tier=0, kinds=["cert-manager.io/ClusterIssuer", "cert-manager.io/Issuer"]),
+            SortTier(tier=1, kinds=["cert-manager.io/Certificate"]),
+        ]
+        graph = _simple_graph([
+            ("ClusterIssuer", "cert-manager.io", "cert-manager"),
+            ("Issuer", "cert-manager.io", "cert-manager"),
+            ("Certificate", "cert-manager.io", "cert-manager"),
+        ])
+        path = write_service_ordering("cert-manager", tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        assert data["schema_version"] == "1.0"
+        assert data["service"] == "cert-manager"
+        assert "tiers" in data
+        assert "sort_metadata" in data
+        assert data["sort_metadata"]["total_kinds"] == 3
+        assert data["sort_metadata"]["total_tiers"] == 2
+
+    def test_ordering_json_tiers_sorted(self, tmp_path):
+        """Tiers in ordering.json are sorted ascending by tier number."""
+        tiers = [
+            SortTier(tier=2, kinds=["x.io/C"]),
+            SortTier(tier=0, kinds=["x.io/A"]),
+            SortTier(tier=1, kinds=["x.io/B"]),
+        ]
+        graph = _simple_graph([
+            ("A", "x.io", "x"), ("B", "x.io", "x"), ("C", "x.io", "x"),
+        ])
+        path = write_service_ordering("x", tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        tier_nums = [t["tier"] for t in data["tiers"]]
+        assert tier_nums == [0, 1, 2]
+
+    def test_ordering_json_cycle_warnings(self, tmp_path):
+        """sort_metadata.cycle_warnings is a list."""
+        tiers = [SortTier(tier=0, kinds=["x.io/A"])]
+        graph = _simple_graph([("A", "x.io", "x")])
+        # No cycles
+        path = write_service_ordering("x", tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        assert data["sort_metadata"]["cycle_warnings"] == []
+        # With cycle warning
+        path2 = write_service_ordering(
+            "x", tiers, graph, tmp_path,
+            cycle_warnings=["Circular dep: A <-> B"],
+        )
+        data2 = json.loads(path2.read_text())
+        assert data2["sort_metadata"]["cycle_warnings"] == ["Circular dep: A <-> B"]
+
+    def test_ordering_json_unknown_external_kinds(self, tmp_path):
+        """unknown_external_kinds lists externals found by set-difference, scoped to service."""
+        tiers = [SortTier(tier=0, kinds=["x.io/A"])]
+        graph = _simple_graph(
+            kinds=[("A", "x.io", "x")],
+            hard_edges=[
+                ("x.io/A", "/Secret"),
+                ("x.io/A", "custom.io/Widget"),
+            ],
+            externals=[
+                ("Secret", "", "core"),
+                ("Widget", "custom.io", "custom"),
+            ],
+        )
+        path = write_service_ordering("x", tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        assert "/Secret" in data["sort_metadata"]["external_kinds"]
+        assert "custom.io/Widget" in data["sort_metadata"]["unknown_external_kinds"]
+        assert "/Secret" not in data["sort_metadata"]["unknown_external_kinds"]
+
+    def test_scc_group_in_ordering(self, tmp_path):
+        """Tiers with SCC groups include scc_group in output."""
+        tiers = [
+            SortTier(tier=0, kinds=["x.io/A", "x.io/B"], scc_group=["x.io/A", "x.io/B"]),
+        ]
+        graph = _simple_graph([("A", "x.io", "x"), ("B", "x.io", "x")])
+        path = write_service_ordering("x", tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        assert data["tiers"][0]["scc_group"] == ["x.io/A", "x.io/B"]
+
+
+class TestGlobalOrdering:
+    def test_global_ordering_group_qualified(self, tmp_path):
+        """Global ordering kinds use group/Kind format."""
+        tiers = [
+            SortTier(tier=0, kinds=["cert-manager.io/Issuer", "/Secret"]),
+        ]
+        graph = _simple_graph(
+            kinds=[("Issuer", "cert-manager.io", "cert-manager")],
+            externals=[("Secret", "", "core")],
+        )
+        path = write_global_ordering(tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        all_kinds = [k for t in data["tiers"] for k in t["kinds"]]
+        for k in all_kinds:
+            assert "/" in k, f"Kind {k!r} not group-qualified"
+
+    def test_global_ordering_cross_service_edges(self, tmp_path):
+        """Global ordering includes cross_service_edges."""
+        tiers = [
+            SortTier(tier=0, kinds=["cm.io/Issuer"]),
+            SortTier(tier=1, kinds=["es.io/ExtSecret"]),
+        ]
+        graph = _simple_graph(
+            kinds=[
+                ("Issuer", "cm.io", "cm"),
+                ("ExtSecret", "es.io", "es"),
+            ],
+            hard_edges=[("es.io/ExtSecret", "cm.io/Issuer")],
+        )
+        path = write_global_ordering(tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        assert "cross_service_edges" in data["sort_metadata"]
+        assert len(data["sort_metadata"]["cross_service_edges"]) == 1
+        edge = data["sort_metadata"]["cross_service_edges"][0]
+        assert edge["source"] == "es.io/ExtSecret"
+        assert edge["target"] == "cm.io/Issuer"
+
+    def test_global_ordering_services_list(self, tmp_path):
+        """Global ordering includes sorted services list."""
+        tiers = [
+            SortTier(tier=0, kinds=["cm.io/Issuer", "es.io/ExtSecret"]),
+        ]
+        graph = _simple_graph(
+            kinds=[
+                ("Issuer", "cm.io", "cm"),
+                ("ExtSecret", "es.io", "es"),
+            ],
+        )
+        path = write_global_ordering(tiers, graph, tmp_path)
+        data = json.loads(path.read_text())
+        assert data["sort_metadata"]["services"] == ["cm", "es"]
+
+
+class TestPathSanitization:
+    def test_safe_filename_dots_hyphens(self):
+        """Dots and hyphens are allowed in path segments."""
+        assert _sanitize_path_segment("cert-manager.io") == "cert-manager.io"
+
+    def test_slash_replaced(self):
+        """Slashes are replaced with underscore."""
+        assert _sanitize_path_segment("foo/bar") == "foo_bar"
+
+    def test_path_traversal_guard(self, tmp_path):
+        """Sanitization prevents traversal — ../evil becomes .._evil (still under root)."""
+        tiers = [SortTier(tier=0, kinds=["x.io/A"])]
+        graph = _simple_graph([("A", "x.io", "x")])
+        # After sanitization, "../evil" -> ".._evil" which is safe.
+        # Verify the file is written under catalog root.
+        path = write_service_ordering("../evil", tiers, graph, tmp_path)
+        assert path.resolve().is_relative_to(tmp_path.resolve())
+
+
+class TestWriteSortResults:
+    def test_orchestrates_all_outputs(self, tmp_path):
+        """write_sort_results writes manifests, service ordering, and global ordering."""
+        m = _make_manifest("Certificate", "cert-manager.io", "cert-manager")
+        _setup_catalog(tmp_path, [m])
+        tiers = [SortTier(tier=0, kinds=["cert-manager.io/Certificate"])]
+        graph = _simple_graph([("Certificate", "cert-manager.io", "cert-manager")])
+        paths = write_sort_results(graph, tiers, tmp_path)
+        assert "global" in paths
+        assert (tmp_path / "cert-manager" / "ordering.json").exists()
+        assert (tmp_path / "global-ordering.json").exists()
+        # Per-service ordering uses plain Kind names
+        svc_data = json.loads((tmp_path / "cert-manager" / "ordering.json").read_text())
+        assert svc_data["tiers"][0]["kinds"] == ["Certificate"]
+        # Global ordering uses group-qualified names
+        global_data = json.loads((tmp_path / "global-ordering.json").read_text())
+        assert "cert-manager.io/Certificate" in global_data["tiers"][0]["kinds"]
+        # Manifest gets sort_tier
+        m_path = tmp_path / "cert-manager" / "cert-manager.io" / "cert-manager" / "Certificate" / "manifest.json"
+        assert json.loads(m_path.read_text())["sort_tier"] == 0
