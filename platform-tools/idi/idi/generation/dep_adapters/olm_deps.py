@@ -14,7 +14,7 @@ from typing import Any
 
 from idi.generation.crd.kind_registry import KindRegistry
 from idi.generation.crd.olm_loader import GVKRef, extract_gvk_dependencies, fetch_olm_csv
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class OlmDepAdapter:
                 confidence=0.95,
                 source="olm_deps:required",
                 lineage_type="reference",
+                detection_source=DetectionSource.DEFAULT,
             ))
 
         result = (deps, owned)

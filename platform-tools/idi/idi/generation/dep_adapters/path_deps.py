@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo
 
 _EXCLUDED: frozenset[str] = frozenset({"namespace", "namespaces", "ns"})
 _SKIP_SEGMENTS: re.Pattern = re.compile(r"^(v\d+|api|apis)$", re.IGNORECASE)
@@ -53,6 +53,7 @@ def detect_path_deps(
                         fact_ref=f"facts://{operation.service}/{candidate}#id",
                         confidence=confidence,
                         source="generic_odg:path",
+                        detection_source=DetectionSource.DEFAULT,
                     ))
                     seen.add(key)
                 depth += 1

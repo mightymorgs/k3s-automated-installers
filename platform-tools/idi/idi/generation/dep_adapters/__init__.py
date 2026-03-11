@@ -10,6 +10,7 @@ Usage:
 from idi.generation.dep_adapters.base import (
     DepAdapter,
     Dependency,
+    DetectionSource,
     OperationInfo,
     Output,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "DepAdapter",
     "DepAdapterRegistry",
     "Dependency",
+    "DetectionSource",
     "OperationInfo",
     "Output",
 ]

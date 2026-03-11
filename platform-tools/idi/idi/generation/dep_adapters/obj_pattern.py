@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 _OBJ_ID_FIELDS = {"pk", "id", "uuid", "uid", "guid"}
 
@@ -50,6 +50,7 @@ class ObjPatternAdapter:
             results.append(Dependency(
                 field=fn[:-4], target_resource=fn[:-4],
                 confidence=0.9, source="obj_pattern",
+                detection_source=DetectionSource.DEFAULT,
             ))
         return results
 

@@ -18,7 +18,7 @@ from idi.generation.crd.ref_detector import (
     detect_status_output,
 )
 from idi.generation.crd.schema_walker import walk_crd_schema, walk_crd_status
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 
 class CrdDepAdapter:
@@ -133,6 +133,7 @@ class CrdDepAdapter:
                     lineage_type="reference",
                     target_service=dep_service if cross_service else None,
                     satisfaction=satisfaction,
+                    detection_source=DetectionSource.DEFAULT,
                 ))
 
         return results

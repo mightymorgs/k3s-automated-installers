@@ -54,11 +54,13 @@ def _resolve_refs(
     seen: Optional[Set[str]] = None,
     depth: int = 0,
     max_depth: int = 30,
+    memo: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Resolve all internal ``$ref`` pointers recursively.
 
     Handles circular references via a *seen* set and guards against
-    infinite recursion with a *max_depth* limit.
+    infinite recursion with a *max_depth* limit.  A *memo* cache avoids
+    redundant resolution of the same ``$ref`` path.
 
     Args:
         obj: The current object (dict, list, or scalar) to resolve.
@@ -66,6 +68,7 @@ def _resolve_refs(
         seen: Set of already-visited ``$ref`` strings (cycle detection).
         depth: Current recursion depth.
         max_depth: Maximum recursion depth before returning ``{}``.
+        memo: Cache of already-resolved ``$ref`` paths.
 
     Returns:
         A new object with all ``$ref`` pointers replaced by their targets.
@@ -74,23 +77,29 @@ def _resolve_refs(
         return {}
     if seen is None:
         seen = set()
+    if memo is None:
+        memo = {}
     if isinstance(obj, dict):
         if "$ref" in obj and len(obj) == 1:
             ref = obj["$ref"]
             if ref in seen:
                 return {}
+            if ref in memo:
+                return copy.deepcopy(memo[ref])
             seen = seen | {ref}
             target = _follow_ref(spec, ref)
-            return _resolve_refs(
-                copy.deepcopy(target), spec, seen, depth + 1, max_depth,
+            resolved = _resolve_refs(
+                copy.deepcopy(target), spec, seen, depth + 1, max_depth, memo,
             )
+            memo[ref] = resolved
+            return resolved
         return {
-            k: _resolve_refs(v, spec, seen, depth + 1, max_depth)
+            k: _resolve_refs(v, spec, seen, depth + 1, max_depth, memo)
             for k, v in obj.items()
         }
     if isinstance(obj, list):
         return [
-            _resolve_refs(v, spec, seen, depth + 1, max_depth)
+            _resolve_refs(v, spec, seen, depth + 1, max_depth, memo)
             for v in obj
         ]
     return obj

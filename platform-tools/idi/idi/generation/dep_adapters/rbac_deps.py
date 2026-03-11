@@ -19,7 +19,7 @@ from typing import Any
 import yaml
 
 from idi.generation.crd.kind_registry import KindRegistry
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +242,7 @@ def extract_rbac_edges(
                 confidence=0.7,
                 source="rbac_deps:read_only",
                 lineage_type="reference",
+                detection_source=DetectionSource.DEFAULT,
             ))
 
     return deps, outputs
@@ -391,6 +392,7 @@ def extract_webhook_dependencies(
                                 confidence=0.85,
                                 source=source,
                                 lineage_type="reference",
+                                detection_source=DetectionSource.DEFAULT,
                             ))
 
     return results
@@ -463,6 +465,7 @@ def _extract_webhook_deps_from_content(
                             confidence=0.85,
                             source=source,
                             lineage_type="reference",
+                            detection_source=DetectionSource.DEFAULT,
                         ))
 
     return results

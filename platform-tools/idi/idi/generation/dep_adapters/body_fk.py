@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo
 from idi.generation.dep_adapters.target_inference import infer_target
 
 _EXCLUDED_FIELDS: frozenset[str] = frozenset({
@@ -111,6 +111,7 @@ def _walk_body(
                 confidence=confidence,
                 source="generic_odg:body",
                 lineage_type="copy",
+                detection_source=DetectionSource.DEFAULT,
             ))
 
         # Recurse into nested objects and arrays.

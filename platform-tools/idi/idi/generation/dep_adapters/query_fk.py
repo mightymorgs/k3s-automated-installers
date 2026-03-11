@@ -9,7 +9,7 @@ Wired into generic_odg alongside body_fk and path_deps.
 """
 from __future__ import annotations
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo
 from idi.generation.dep_adapters.target_inference import infer_target
 
 # Pagination / sorting / search params — never FK references.
@@ -117,6 +117,7 @@ def detect_query_deps(
                 confidence=confidence,
                 source="generic_odg:query",
                 lineage_type="copy",
+                detection_source=DetectionSource.DEFAULT,
             ))
 
     return results
