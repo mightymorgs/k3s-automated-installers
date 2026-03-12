@@ -82,6 +82,11 @@ def generate_service(
     Returns:
         Dict with ``success``, ``message``, and optionally ``stats`` keys.
     """
+    source_type = config.get("source_type", "")
+    # Skip services without specs (no generation possible).
+    if source_type == "no_spec":
+        return {"success": True, "message": f"Skipped {name} (no_spec)"}
+
     schema_rel = config.get("schema", "")
     output_rel = config.get("output", "")
     style = config.get("style", "auto")
