@@ -378,3 +378,199 @@ class TestGoldenFixtures:
         assert len(required) == 1
         assert required[0].kind == "Certificate"
         assert required[0].group == "cert-manager.io"
+
+
+# ---------------------------------------------------------------------------
+# extract_alm_examples()
+# ---------------------------------------------------------------------------
+
+
+def _make_csv_with_alm_examples(examples: list) -> dict:
+    """Build an OLM CSV dict with alm-examples annotation."""
+    return {
+        "metadata": {
+            "annotations": {
+                "alm-examples": json.dumps(examples),
+            },
+        },
+        "spec": {
+            "customresourcedefinitions": {
+                "owned": [],
+                "required": [],
+            },
+        },
+    }
+
+
+STRIMZI_EXAMPLES = [
+    {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "Kafka",
+     "metadata": {"name": "my-cluster"}, "spec": {"kafka": {}}},
+    {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+     "metadata": {"name": "my-topic", "labels": {"strimzi.io/cluster": "my-cluster"}},
+     "spec": {"partitions": 3}},
+    {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaUser",
+     "metadata": {"name": "my-user", "labels": {"strimzi.io/cluster": "my-cluster"}},
+     "spec": {}},
+    {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaConnect",
+     "metadata": {"name": "my-connect"}, "spec": {}},
+    {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaConnector",
+     "metadata": {"name": "my-connector", "labels": {"strimzi.io/cluster": "my-connect"}},
+     "spec": {}},
+]
+
+
+class TestExtractAlmExamples:
+    """Tests for extract_alm_examples() — ALM label edge detector section 01."""
+
+    def test_valid_csv_returns_all_examples(self):
+        """Valid CSV with 5 example manifests returns 5 dicts."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = _make_csv_with_alm_examples(STRIMZI_EXAMPLES)
+        result = extract_alm_examples(csv)
+        assert len(result) == 5
+
+    def test_returned_dicts_have_kind_and_name(self):
+        """Each returned dict has 'kind' and metadata with 'name'."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = _make_csv_with_alm_examples(STRIMZI_EXAMPLES)
+        result = extract_alm_examples(csv)
+        for ex in result:
+            assert "kind" in ex
+            assert isinstance(ex["kind"], str)
+            assert "metadata" in ex
+            assert "name" in ex["metadata"]
+
+    def test_missing_metadata_key_returns_empty(self):
+        """Missing csv['metadata'] returns []."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        assert extract_alm_examples({"spec": {}}) == []
+
+    def test_missing_annotations_key_returns_empty(self):
+        """Missing csv['metadata']['annotations'] returns []."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        assert extract_alm_examples({"metadata": {}}) == []
+
+    def test_missing_alm_examples_key_returns_empty(self):
+        """Missing alm-examples annotation key returns []."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = {"metadata": {"annotations": {}}}
+        assert extract_alm_examples(csv) == []
+
+    def test_invalid_json_returns_empty(self):
+        """alm-examples value that is not valid JSON returns []."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = {"metadata": {"annotations": {"alm-examples": "not json{{{"}}}
+        assert extract_alm_examples(csv) == []
+
+    def test_json_not_list_returns_empty(self):
+        """alm-examples is valid JSON but not a list returns []."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = {"metadata": {"annotations": {"alm-examples": '{"key": "value"}'}}}
+        assert extract_alm_examples(csv) == []
+
+    def test_example_missing_kind_skipped(self):
+        """Individual example missing 'kind' is skipped."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            {"metadata": {"name": "no-kind"}},
+            {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "valid"}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert len(result) == 1
+        assert result[0]["kind"] == "Pod"
+
+    def test_example_missing_metadata_skipped(self):
+        """Individual example missing 'metadata' is skipped."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            {"apiVersion": "v1", "kind": "Pod"},
+            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "ok"}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert len(result) == 1
+        assert result[0]["kind"] == "Service"
+
+    def test_example_missing_metadata_name_skipped(self):
+        """Individual example missing metadata.name is skipped."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            {"apiVersion": "v1", "kind": "Pod", "metadata": {}},
+            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "ok"}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert len(result) == 1
+        assert result[0]["kind"] == "Service"
+
+    def test_non_string_kind_skipped(self):
+        """Example with non-string kind (None, int) is skipped."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            {"apiVersion": "v1", "kind": None, "metadata": {"name": "x"}},
+            {"apiVersion": "v1", "kind": 42, "metadata": {"name": "y"}},
+            {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "z"}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert len(result) == 1
+        assert result[0]["kind"] == "Pod"
+
+    def test_non_string_name_skipped(self):
+        """Example with non-string metadata.name is skipped."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": 123}},
+            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "ok"}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert len(result) == 1
+        assert result[0]["kind"] == "Service"
+
+    def test_mixed_valid_invalid_returns_only_valid(self):
+        """Mixed valid/invalid examples returns only valid ones."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            "not a dict",
+            {"kind": "Pod"},  # missing metadata
+            {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "good"}},
+            {"apiVersion": "v1", "kind": None, "metadata": {"name": "bad"}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert len(result) == 1
+        assert result[0]["kind"] == "Service"
+
+    def test_labels_preserved_in_output(self):
+        """Example with labels has labels preserved in output."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        examples = [
+            {"apiVersion": "v1", "kind": "Pod", "metadata": {
+                "name": "test", "labels": {"app": "web"}}},
+        ]
+        csv = _make_csv_with_alm_examples(examples)
+        result = extract_alm_examples(csv)
+        assert result[0]["metadata"]["labels"] == {"app": "web"}
+
+    def test_empty_alm_examples_list(self):
+        """Empty alm-examples list returns []."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = _make_csv_with_alm_examples([])
+        assert extract_alm_examples(csv) == []
