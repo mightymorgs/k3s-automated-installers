@@ -163,6 +163,10 @@ def _generate_json_v2(
     known_resources = get_all_resource_names(ctx, include_non_post=True)
     namespace_params = detect_namespace_params(ctx.schema)
 
+    # Pre-compute canonical resource map for consistent name resolution.
+    from idi.generation.dep_adapters.canonical_resources import build_canonical_resource_map
+    canonical_map = build_canonical_resource_map(ctx.schema)
+
     # Pre-compute identifier index for identifier reference validation.
     from idi.generation.dep_adapters.verify import build_identifier_index
     identifier_index = build_identifier_index(ctx.schema, ctx.generated_skill_paths)
@@ -226,6 +230,7 @@ def _generate_json_v2(
                 dep_op, ctx.schema, known_resources,
                 skill_paths=ctx.generated_skill_paths,
                 identifier_index=identifier_index,
+                canonical_map=canonical_map,
             )
 
             depends_on: List[Dict[str, Any]] = []

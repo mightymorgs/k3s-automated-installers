@@ -696,6 +696,7 @@ def apply_gates(
     spec: dict[str, Any],
     skill_paths: dict[str, dict] | None = None,
     identifier_index: dict[str, set[str]] | None = None,
+    canonical_map: object | None = None,
 ) -> list[Dependency]:
     """Apply all gates to a list of dependencies, returning survivors."""
     if not deps:
