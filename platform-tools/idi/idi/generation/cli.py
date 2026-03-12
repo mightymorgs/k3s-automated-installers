@@ -162,6 +162,9 @@ def _generate_json_v2(
     known_resources = get_all_resource_names(ctx, include_non_post=True)
     namespace_params = detect_namespace_params(ctx.schema)
 
+    from idi.generation.dep_adapters.gates import build_gate_context
+    gate_ctx = build_gate_context(ctx.schema, ctx.generated_skill_paths, known_resources)
+
     for resource, operations in resources.items():
         seen: set = set()
         v2_operations: List[Dict[str, Any]] = []
@@ -219,6 +222,7 @@ def _generate_json_v2(
 
             deps_detected, outputs_detected = dep_registry.detect(
                 dep_op, ctx.schema, known_resources,
+                gate_context=gate_ctx,
             )
 
             depends_on: List[Dict[str, Any]] = []
