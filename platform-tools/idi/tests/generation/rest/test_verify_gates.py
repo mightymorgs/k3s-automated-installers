@@ -8,6 +8,7 @@ from idi.generation.dep_adapters.verify import (
     apply_gates,
     gate_g1_non_id_format,
     gate_g2_enum,
+    gate_g3_bounded_value,
     gate_g4_non_scalar,
     gate_g6_query_filter,
 )
@@ -254,4 +255,58 @@ class TestGateG6QueryFilter:
         dep = _dep(field="user_id", source="generic_odg:query")
         op = _op(method="GET")
         r = gate_g6_query_filter(dep, None, {}, op, None)
+        assert r.keep is True
+
+
+# ── G3: Bounded Value Detector ─────────────────────────────────────
+
+class TestGateG3BoundedValue:
+    def test_kills_integer_with_tight_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 100}, {}, _op(), None)
+        assert r.keep is False
+
+    def test_kills_integer_with_default(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "default": 0}, {}, _op(), None)
+        assert r.keep is False
+
+    def test_kills_number_with_tight_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "number", "maximum": 99.9}, {}, _op(), None)
+        assert r.keep is False
+
+    def test_kills_integer_with_exclusive_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "exclusiveMaximum": 256}, {}, _op(), None)
+        assert r.keep is False
+
+    def test_kills_integer_with_both_max_and_default(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 100, "default": 0}, {}, _op(), None)
+        assert r.keep is False
+
+    def test_passes_integer_with_minimum_only(self):
+        """minimum: 1 alone is common FK validation, not a config signal."""
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "minimum": 1}, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_integer_no_bounds(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer"}, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_integer_with_high_max(self):
+        """maximum >= 10000 is just a type bound, not a config bound."""
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 10000}, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_integer_with_int32_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 2147483647}, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_string_type(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "string"}, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_no_schema(self):
+        r = gate_g3_bounded_value(_dep(), None, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_number_with_minimum_only(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "number", "minimum": 0}, {}, _op(), None)
         assert r.keep is True

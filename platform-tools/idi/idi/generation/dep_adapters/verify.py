@@ -173,6 +173,46 @@ def gate_g4_non_scalar(
     return GateResult("G4", True, f"type={field_type}")
 
 
+# ── Gate G3: Bounded Value Detector ──────────────────────────────────
+
+
+def gate_g3_bounded_value(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    operation: OperationInfo,
+    skill_paths: dict[str, dict] | None,
+) -> GateResult:
+    """G3: Bounded Value Detector — kill bounded integers/numbers (config values, not IDs)."""
+    if field_schema is None:
+        return GateResult("G3", True, "no schema")
+
+    field_type = field_schema.get("type", "")
+    if field_type not in ("integer", "number"):
+        return GateResult("G3", True, f"type={field_type}")
+
+    signals: list[str] = []
+
+    # Tight maximum (real DB IDs don't cap at 100 or 1000)
+    maximum = field_schema.get("maximum")
+    if maximum is not None and isinstance(maximum, (int, float)) and maximum < 10000:
+        signals.append(f"max={maximum}")
+
+    exclusive_max = field_schema.get("exclusiveMaximum")
+    if exclusive_max is not None and isinstance(exclusive_max, (int, float)) and exclusive_max < 10000:
+        signals.append(f"exclusiveMax={exclusive_max}")
+
+    # Default present (FK IDs rarely have defaults like 0 or 30)
+    if "default" in field_schema:
+        signals.append(f"default={field_schema['default']}")
+
+    # minimum alone is NOT a signal (common FK validation: minimum: 1)
+
+    if signals:
+        return GateResult("G3", False, f"bounded: {', '.join(signals)}")
+    return GateResult("G3", True, "numeric but unbounded")
+
+
 # ── Gate G6: Query Filter Quarantine ─────────────────────────────────
 
 
@@ -204,12 +244,13 @@ def gate_g6_query_filter(
 
 # ── Gate registry ────────────────────────────────────────────────────
 
-# Gates added in implementation order. G3, G5, G7 will be added
+# Gates added in implementation order. G5, G7 will be added
 # in subsequent sections.
 _GATES = [
     gate_g4_non_scalar,
     gate_g1_non_id_format,
     gate_g2_enum,
+    gate_g3_bounded_value,
     gate_g6_query_filter,
 ]
 
