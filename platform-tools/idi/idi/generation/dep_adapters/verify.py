@@ -601,6 +601,92 @@ def suppress_fan_out(deps: list[Dependency]) -> list[Dependency]:
     return result
 
 
+# ── Identifier reference validation ──────────────────────────────────
+
+_IDENTIFIER_VALIDATION_PENALTY = 0.1
+
+_GENERIC_IDENTIFIERS: frozenset[str] = frozenset({
+    "id", "ids", "uuid", "pk", "key", "slug", "name",
+})
+
+
+def _strip_fk_suffix(name: str) -> str:
+    """Strip common FK suffixes from a field name."""
+    from idi.generation.dep_adapters.target_inference import _COMMON_FK_SUFFIXES
+    lower = name.lower()
+    for suffix in _COMMON_FK_SUFFIXES:
+        stripped = lower.removesuffix(suffix)
+        if stripped != lower and stripped:
+            return stripped
+    return lower
+
+
+def apply_identifier_validation(
+    deps: list[Dependency],
+    identifier_index: dict[str, set[str]] | None,
+) -> list[Dependency]:
+    """Penalize body FK edges where field doesn't match target identifiers.
+
+    For each body FK edge, checks if the field name (or its normalized form)
+    matches any identifier the target resource produces. Conservative: passes
+    edges when no identifier data is available for the target.
+    """
+    from idi.generation.dep_adapters.naming import stem_token
+
+    if identifier_index is None:
+        return deps
+
+    result: list[Dependency] = []
+    for dep in deps:
+        if dep.source != "generic_odg:body":
+            result.append(dep)
+            continue
+
+        field_lower = dep.field.lower()
+
+        # Generic identifiers always pass.
+        if field_lower in _GENERIC_IDENTIFIERS:
+            result.append(dep)
+            continue
+
+        identifiers = identifier_index.get(dep.target_resource, set())
+
+        # Conservative: empty identifier set -> pass.
+        if not identifiers:
+            result.append(dep)
+            continue
+
+        # Check multiple permutations for a match.
+        matched = False
+
+        # 1. Exact match.
+        if field_lower in identifiers:
+            matched = True
+
+        # 2. Normalized match: strip FK suffixes and compare.
+        if not matched:
+            field_stripped = _strip_fk_suffix(field_lower)
+            id_stripped = {_strip_fk_suffix(i) for i in identifiers}
+            if field_stripped in id_stripped:
+                matched = True
+
+        # 3. Stemmed match: stem the stripped forms and compare.
+        if not matched:
+            field_stemmed = stem_token(field_stripped)
+            id_stemmed = {stem_token(s) for s in id_stripped}
+            if field_stemmed in id_stemmed:
+                matched = True
+
+        if matched:
+            result.append(dep)
+        else:
+            result.append(Dependency(
+                **{**dep.__dict__,
+                   "confidence": round(dep.confidence * _IDENTIFIER_VALIDATION_PENALTY, 3)},
+            ))
+    return result
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 
@@ -632,7 +718,8 @@ def apply_gates(
         if not killed:
             survivors.append(dep)
 
-    # Batch post-processing: fan-out suppression.
+    # Batch post-processing: fan-out suppression, then identifier validation.
     survivors = suppress_fan_out(survivors)
+    survivors = apply_identifier_validation(survivors, identifier_index)
 
     return survivors
