@@ -9,6 +9,7 @@ from idi.generation.dep_adapters.verify import (
     gate_g1_non_id_format,
     gate_g2_enum,
     gate_g4_non_scalar,
+    gate_g6_query_filter,
 )
 
 
@@ -194,4 +195,63 @@ class TestGateG2Enum:
 
     def test_passes_no_schema(self):
         r = gate_g2_enum(_dep(), None, {}, _op(), None)
+        assert r.keep is True
+
+
+# ── G6: Query Filter Quarantine ────────────────────────────────────
+
+class TestGateG6QueryFilter:
+    def test_kills_optional_query_param_on_get(self):
+        dep = _dep(field="user_id", source="generic_odg:query")
+        op = _op(method="GET", query_params=[
+            {"name": "user_id", "in": "query", "required": False,
+             "schema": {"type": "string"}},
+        ])
+        r = gate_g6_query_filter(dep, {"type": "string"}, {}, op, None)
+        assert r.keep is False
+
+    def test_passes_when_method_is_post(self):
+        dep = _dep(field="user_id", source="generic_odg:query")
+        op = _op(method="POST", query_params=[
+            {"name": "user_id", "in": "query", "required": False,
+             "schema": {"type": "string"}},
+        ])
+        r = gate_g6_query_filter(dep, {"type": "string"}, {}, op, None)
+        assert r.keep is True
+
+    def test_passes_required_query_param_on_get(self):
+        dep = _dep(field="user_id", source="generic_odg:query")
+        op = _op(method="GET", query_params=[
+            {"name": "user_id", "in": "query", "required": True,
+             "schema": {"type": "string"}},
+        ])
+        r = gate_g6_query_filter(dep, {"type": "string"}, {}, op, None)
+        assert r.keep is True
+
+    def test_passes_body_source(self):
+        dep = _dep(field="user_id", source="generic_odg:body")
+        op = _op(method="GET")
+        r = gate_g6_query_filter(dep, {"type": "string"}, {}, op, None)
+        assert r.keep is True
+
+    def test_passes_path_source(self):
+        dep = _dep(field="user_id", source="generic_odg:path")
+        op = _op(method="GET")
+        r = gate_g6_query_filter(dep, {"type": "string"}, {}, op, None)
+        assert r.keep is True
+
+    def test_kills_when_required_absent(self):
+        """When 'required' key is missing, defaults to False (optional)."""
+        dep = _dep(field="movie_id", source="generic_odg:query")
+        op = _op(method="GET", query_params=[
+            {"name": "movie_id", "in": "query",
+             "schema": {"type": "integer"}},
+        ])
+        r = gate_g6_query_filter(dep, {"type": "integer"}, {}, op, None)
+        assert r.keep is False
+
+    def test_passes_no_schema(self):
+        dep = _dep(field="user_id", source="generic_odg:query")
+        op = _op(method="GET")
+        r = gate_g6_query_filter(dep, None, {}, op, None)
         assert r.keep is True

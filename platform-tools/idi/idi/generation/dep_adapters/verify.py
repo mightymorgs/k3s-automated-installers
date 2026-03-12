@@ -173,14 +173,44 @@ def gate_g4_non_scalar(
     return GateResult("G4", True, f"type={field_type}")
 
 
+# ── Gate G6: Query Filter Quarantine ─────────────────────────────────
+
+
+def gate_g6_query_filter(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    operation: OperationInfo,
+    skill_paths: dict[str, dict] | None,
+) -> GateResult:
+    """G6: Query Filter Quarantine — kill optional query params on GET endpoints."""
+    # Only applies to query-sourced deps
+    if "query" not in dep.source:
+        return GateResult("G6", True, "not a query param")
+
+    # Only applies to GET endpoints
+    if operation.method.upper() != "GET":
+        return GateResult("G6", True, f"method={operation.method}")
+
+    # Look up the param in operation.query_params to check required
+    for param in operation.query_params:
+        if param.get("name") == dep.field:
+            if not param.get("required", False):
+                return GateResult("G6", False, "optional query param on GET")
+            return GateResult("G6", True, "required query param")
+
+    return GateResult("G6", True, "param not found in query_params")
+
+
 # ── Gate registry ────────────────────────────────────────────────────
 
-# Gates added in implementation order. G3, G5, G6, G7 will be added
+# Gates added in implementation order. G3, G5, G7 will be added
 # in subsequent sections.
 _GATES = [
     gate_g4_non_scalar,
     gate_g1_non_id_format,
     gate_g2_enum,
+    gate_g6_query_filter,
 ]
 
 
