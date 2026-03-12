@@ -1,8 +1,8 @@
-"""CRD bridge dep adapter -- delegates to KubernetesCrdAdapter.
+"""CRD dep adapter — orchestrates schema walker + ref detector.
 
-Bridges the schema-layer ``KubernetesCrdAdapter`` (which knows K8s FK
-patterns like secretRef, configMapRef, issuerRef) into the dep adapter
-protocol so these patterns are used during dependency detection.
+Thin orchestrator (~50 LOC) that wires walk_crd_schema/walk_crd_status
+into classify_walked_field/detect_status_output and emits Dependencies
+and Outputs using the dep adapter protocol.
 
 Priority: 80 (above generic_odg at 50, below discriminator at 90).
 """
@@ -10,34 +10,31 @@ from __future__ import annotations
 
 from typing import Any
 
-from idi.generation.adapters.kubernetes_crd import (
-    EXCLUDED_FIELDS,
-    K8S_REF_PATTERNS,
-    KubernetesCrdAdapter,
+from idi.generation.crd.kind_registry import KindRegistry
+from idi.generation.crd.ref_detector import (
+    ManifestFlags,
+    classify_walked_field,
+    detect_scale_subresource,
+    detect_status_output,
 )
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
-
-
-# Top-level K8s envelope fields to skip entirely.
-_K8S_ENVELOPE = frozenset({"apiVersion", "kind", "metadata", "status"})
-
-# Core K8s resources that are valid cross-service targets.
-# A CRD spec (e.g. cert-manager) can reference these even though they
-# aren't in the CRD spec's own resource set.
-_CROSS_SERVICE_RESOURCES = frozenset({
-    "secrets", "configmaps", "services", "serviceaccounts",
-    "namespaces", "nodes", "persistentvolumes", "persistentvolumeclaims",
-    "endpoints", "pods", "deployments", "statefulsets", "daemonsets",
-    "ingresses", "ingressclasses", "storageclasses",
-    "secretstores", "clustersecretstores",  # ESO
-})
+from idi.generation.crd.schema_walker import walk_crd_schema, walk_crd_status
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 
 class CrdDepAdapter:
-    """Detects K8s-specific FK patterns via KubernetesCrdAdapter bridge."""
+    """Detects K8s CRD FK patterns via schema_walker + ref_detector pipeline."""
 
     name = "crd_dep"
     priority = 80
+
+    def __init__(self, registry: KindRegistry | None = None):
+        """Initialize with an optional KindRegistry.
+
+        The registry is optional to support the no-arg discovery pattern
+        used by DepAdapterRegistry. When not provided, a default registry
+        with only core resources is used.
+        """
+        self.registry = registry or KindRegistry()
 
     def matches(self, spec: dict[str, Any], service_name: str) -> bool:
         """Match specs with K8s-style API paths."""
@@ -56,92 +53,161 @@ class CrdDepAdapter:
         if not body or "properties" not in body:
             return []
 
-        adapter = KubernetesCrdAdapter(
-            service=operation.service,
-            known_resources=known_resources,
-        )
-
-        # CRD bodies are {apiVersion, kind, metadata, spec, status}.
-        # Real FK fields live under spec.properties.
+        # Extract spec schema from CRD body envelope.
         spec_schema = body.get("properties", {}).get("spec", {})
         if not spec_schema or "properties" not in spec_schema:
-            # Fallback: try the body itself (non-standard CRD).
             spec_schema = body
 
+        spec_properties = spec_schema.get("properties", {})
+        spec_required = spec_schema.get("required", [])
+
+        # Extract kind and group from body schema for detection context.
+        kind = self._extract_kind(body)
+        group = self._extract_group(body)
+
         results: list[Dependency] = []
-        self._walk_and_detect(
-            adapter, spec_schema, operation.service,
-            known_resources, results, depth=0,
-        )
+        classified_ref_paths: set[str] = set()
+        flags = ManifestFlags()
+
+        for field in walk_crd_schema(spec_properties, spec_required):
+            # Parent-child deduplication: skip descendants of classified refs.
+            if any(field.path.startswith(ref_path + ".") for ref_path in classified_ref_paths):
+                continue
+
+            # Get sibling fields for enum_kind detection and constraint_fk (C29).
+            # Populate for: (a) string fields with enum values, or
+            # (b) string fields with DNS-name patterns/formats (needed by C29).
+            sibling_fields = None
+            if field.schema.get("type") == "string" and (
+                field.schema.get("enum")
+                or field.schema.get("pattern")
+                or field.schema.get("format")
+            ):
+                # Look up parent object properties for sibling detection.
+                sibling_fields = self._get_sibling_fields(
+                    spec_properties, field.parent_path, "spec",
+                )
+
+            classifications = classify_walked_field(
+                field, self.registry, kind, group,
+                sibling_fields=sibling_fields,
+                manifest_flags=flags,
+            )
+
+            for classified in classifications:
+                if classified.role != "input_ref" or not classified.target_kind:
+                    continue
+
+                classified_ref_paths.add(field.path)
+
+                # Resolve target against known_resources.
+                target_plural = self.registry.kind_to_plural(classified.target_kind)
+                if not target_plural:
+                    # Derive fallback plural from Kind name for CRD Kinds
+                    # not yet in the registry (e.g., auto-discovery path
+                    # without a pre-populated registry).
+                    target_plural = self._derive_plural(classified.target_kind)
+
+                resolved, cross_service = self._resolve_target(
+                    target_plural, known_resources,
+                )
+                if resolved is None:
+                    continue
+
+                dep_service = "k8s" if cross_service else operation.service
+                target_group = classified.target_group or group
+                target_field = classified.target_field or "name"
+
+                satisfaction = (
+                    "required_value" if classified.required
+                    else "optional_with_default"
+                )
+
+                results.append(Dependency(
+                    field=classified.field,
+                    target_resource=resolved,
+                    target_operation="create",
+                    fact_ref=f"crdfacts://{target_group}/{classified.target_kind}#{target_field}",
+                    confidence=classified.confidence,
+                    source=f"crd_dep:{classified.detection_source}",
+                    lineage_type="reference",
+                    target_service=dep_service if cross_service else None,
+                    satisfaction=satisfaction,
+                    detection_source=DetectionSource.DEFAULT,
+                ))
+
         return results
 
-    def _walk_and_detect(
-        self,
-        adapter: KubernetesCrdAdapter,
-        schema: dict[str, Any],
-        service: str,
-        known_resources: set[str],
-        results: list[Dependency],
-        depth: int,
-    ) -> None:
-        """Walk schema tree, detect K8s refs at each level."""
-        if depth > 6 or not isinstance(schema, dict):
-            return
+    def detect_outputs(
+        self, operation: OperationInfo, spec: dict[str, Any],
+    ) -> list[Output]:
+        """Detect CRD status outputs using walk_crd_status + detect_status_output.
 
-        refs = adapter.extract_field_refs(schema, "")
-        for ref in refs:
-            field = ref["field"]
-            target = ref["target_resource"]
-            if target == "any":
-                continue  # ObjectReference -- too generic.
+        Also detects scale subresource declarations (C20) from CRD-level metadata.
+        """
+        body = operation.body_schema
+        if not body or "properties" not in body:
+            return []
 
-            # Resolve target against known_resources.
-            resolved, cross_service = self._resolve_target(target, known_resources)
-            if resolved is None:
+        kind = self._extract_kind(body)
+        group = self._extract_group(body)
+
+        outputs: list[Output] = []
+
+        # Phase 5A (C20): Detect scale subresource declarations.
+        crd_spec = body.get("properties", {}).get("spec", {})
+        if crd_spec:
+            # Build a synthetic CRD spec with versions array.
+            # In real CRDs the versions are at spec-level, but our body schema
+            # has the spec properties directly. Construct a version dict.
+            scale_fields = detect_scale_subresource(
+                {"versions": [{
+                    "name": "v1",
+                    "subresources": body.get("x-kubernetes-subresources", {}),
+                    "schema": {"openAPIV3Schema": body},
+                }]},
+                kind, group, self.registry,
+            )
+            for sf in scale_fields:
+                if sf.confidence < 0.7:
+                    continue
+                target_group = sf.target_group or group
+                target_field = sf.target_field or "name"
+                fact_ref = f"crdfacts://{target_group}/{sf.target_kind}#{target_field}"
+                outputs.append(Output(
+                    field=sf.field,
+                    fact_ref=fact_ref,
+                    source=f"crd_dep:{sf.detection_source}",
+                    priority=3 if operation.method == "POST" else 1,
+                ))
+
+        # Extract status schema.
+        status_schema = body.get("properties", {}).get("status", {})
+        if not status_schema or "properties" not in status_schema:
+            return outputs
+
+        status_properties = status_schema["properties"]
+
+        for field in walk_crd_status(status_properties):
+            result = detect_status_output(field, kind, group, self.registry)
+            if result is None:
+                continue
+            # Only emit outputs above the 0.7 confidence threshold.
+            if result.confidence < 0.7:
                 continue
 
-            # Cross-service deps target the k8s service, not the source service.
-            dep_service = "k8s" if cross_service else service
-            confidence = 0.9 if ref.get("source") == "k8s_ref_pattern" else 0.7
-            results.append(Dependency(
-                field=field,
-                target_resource=resolved,
-                target_operation="create",
-                fact_ref=f"facts://{dep_service}/{resolved}#id",
-                confidence=confidence,
-                source=f"crd_dep:{ref.get('source', 'unknown')}",
-                lineage_type="reference",
-                target_service=dep_service if cross_service else None,
+            target_group = result.target_group or group
+            target_field = result.target_field or result.field.rsplit(".", 1)[-1]
+            fact_ref = f"crdfacts://{target_group}/{result.target_kind}#{target_field}"
+
+            outputs.append(Output(
+                field=result.field,
+                fact_ref=fact_ref,
+                source=f"crd_dep:{result.detection_source}",
+                priority=3 if operation.method == "POST" else 1,
             ))
 
-        # Recurse into nested objects that extract_field_refs didn't handle.
-        for prop_name, prop_schema in schema.get("properties", {}).items():
-            if not isinstance(prop_schema, dict):
-                continue
-            if prop_name in _K8S_ENVELOPE or prop_name in EXCLUDED_FIELDS:
-                continue
-            # Skip fields we already matched (they have Ref suffix or are known).
-            if prop_name in K8S_REF_PATTERNS or prop_name.lower() in K8S_REF_PATTERNS:
-                continue
-
-            # Recurse into nested objects.
-            if prop_schema.get("type") == "object" and "properties" in prop_schema:
-                self._walk_and_detect(
-                    adapter, prop_schema, service,
-                    known_resources, results, depth + 1,
-                )
-
-            # Recurse into array items.
-            items = prop_schema.get("items", {})
-            if (
-                prop_schema.get("type") == "array"
-                and isinstance(items, dict)
-                and "properties" in items
-            ):
-                self._walk_and_detect(
-                    adapter, items, service,
-                    known_resources, results, depth + 1,
-                )
+        return outputs
 
     def _resolve_target(
         self, target: str, known_resources: set[str],
@@ -149,8 +215,8 @@ class CrdDepAdapter:
         """Resolve a K8s ref target against known resources.
 
         Handles both direct matches (secretstores in known) and
-        lowercase normalization.  Falls back to core K8s resources
-        for cross-service targets (e.g. cert-manager → secrets).
+        lowercase normalization. Falls back to core K8s resources
+        for cross-service targets (e.g. cert-manager -> secrets).
 
         Returns:
             Tuple of (resolved_name, is_cross_service).
@@ -162,29 +228,106 @@ class CrdDepAdapter:
         for res in known_resources:
             if res.lower() == lower_target:
                 return res, False
-        # Allow core K8s resources as cross-service targets.
-        if lower_target in _CROSS_SERVICE_RESOURCES:
+        # Allow core K8s resources (bootstrap set only) as cross-service targets.
+        if lower_target in self.registry.core_plurals():
             return target, True
         return None, False
 
-    def detect_outputs(
-        self, operation: OperationInfo, spec: dict[str, Any],
-    ) -> list[Output]:
-        """Detect K8s-style outputs (metadata.uid, metadata.name)."""
-        adapter = KubernetesCrdAdapter(service=operation.service)
-        facts = adapter.extract_outputs(
-            operation.response_schema,
-            operation.resource,
-            operation.operation,
-        )
+    @staticmethod
+    def _derive_plural(kind: str) -> str:
+        """Derive a plural from a Kind name when not in the registry.
 
-        outputs: list[Output] = []
-        for fact in facts:
-            if hasattr(fact, "ref") and hasattr(fact.ref, "to_uri"):
-                outputs.append(Output(
-                    field=fact.response_field,
-                    fact_ref=fact.ref.to_uri(),
-                    source="crd_dep:k8s_output",
-                    priority=3 if operation.method == "POST" else 1,
-                ))
-        return outputs
+        Simple heuristic: lowercase + "s". Handles common K8s patterns:
+        Issuer → issuers, Certificate → certificates. Edge cases like
+        Ingress → ingresses are covered by the bootstrap registry.
+        """
+        lower = kind.lower()
+        if lower.endswith("s"):
+            return lower + "es"
+        return lower + "s"
+
+    @staticmethod
+    def _extract_kind(body: dict[str, Any]) -> str:
+        """Extract Kind from body schema (from properties.kind.enum[0])."""
+        kind_prop = body.get("properties", {}).get("kind", {})
+        enum = kind_prop.get("enum", [])
+        return enum[0] if enum else ""
+
+    @staticmethod
+    def _extract_group(body: dict[str, Any]) -> str:
+        """Extract API group from body schema (from apiVersion enum)."""
+        av_prop = body.get("properties", {}).get("apiVersion", {})
+        enum = av_prop.get("enum", [])
+        if enum:
+            # apiVersion is like "cert-manager.io/v1" — group is before the /
+            parts = enum[0].split("/")
+            return parts[0] if len(parts) > 1 else ""
+        return ""
+
+    @staticmethod
+    def _get_sibling_fields(
+        root_properties: dict[str, Any],
+        parent_path: str,
+        prefix: str,
+    ) -> dict[str, Any] | None:
+        """Navigate to parent object's properties for sibling detection."""
+        if parent_path == prefix:
+            return root_properties
+
+        # Walk the path segments to reach the parent.
+        segments = parent_path[len(prefix) + 1:].split(".")
+        current = root_properties
+        for seg in segments:
+            if not isinstance(current, dict):
+                return None
+            prop = current.get(seg, {})
+            if not isinstance(prop, dict):
+                return None
+            # Handle arrays — dive into items.
+            if prop.get("type") == "array":
+                items = prop.get("items", {})
+                if isinstance(items, dict) and "properties" in items:
+                    current = items["properties"]
+                else:
+                    return None
+            elif "properties" in prop:
+                current = prop["properties"]
+            else:
+                return None
+        return current
+
+
+def resolve_target_kind(
+    target_kind: str,
+    source_group: str,
+    registry: KindRegistry,
+) -> tuple[str, str] | None:
+    """Resolve ambiguous Kind name to (group, kind) using ecosystem locality.
+
+    When multiple groups contain the same Kind name, prefer:
+    1. Same API group as source
+    2. Same vendor prefix (first segment before '.')
+    3. Any available group (first match)
+
+    Returns (group, kind) or None if Kind not found.
+    """
+    groups = registry.groups_for_kind(target_kind)
+    if not groups:
+        return None
+    if len(groups) == 1:
+        return (groups[0], target_kind)
+
+    # Same group as source.
+    for g in groups:
+        if g == source_group:
+            return (g, target_kind)
+
+    # Same vendor prefix.
+    source_prefix = source_group.split(".")[0] if "." in source_group else source_group
+    for g in groups:
+        group_prefix = g.split(".")[0] if "." in g else g
+        if group_prefix == source_prefix:
+            return (g, target_kind)
+
+    # Fallback: first match.
+    return (groups[0], target_kind)

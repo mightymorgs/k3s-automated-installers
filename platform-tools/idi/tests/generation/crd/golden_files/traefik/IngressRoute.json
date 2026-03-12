@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "kind": "IngressRoute",
+  "group": "traefik.io",
+  "version": "v1alpha1",
+  "plural": "ingressroutes",
+  "scope": "namespaced",
+  "service": "traefik",
+  "description": "IngressRoute is the CRD implementation of a Traefik HTTP Router.",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.entryPoints",
+      "type": "array",
+      "description": "EntryPoints defines the list of entry point names to bind to.\nEntry points have to be configured in the static configuration.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/install-configuration/entrypoints/\nDefault: all."
+    },
+    {
+      "field": "spec.parentRefs",
+      "type": "array",
+      "description": "ParentRefs defines references to parent IngressRoute resources for multi-layer routing.\nWhen set, this IngressRoute's routers will be children of the referenced parent IngressRoute's routers.\nMore info: https://doc.traefik.io/traefik/v3.6/routing/routers/#parentrefs"
+    },
+    {
+      "field": "spec.routes",
+      "type": "array",
+      "description": "Routes defines the list of routes."
+    },
+    {
+      "field": "spec.tls",
+      "type": "object",
+      "description": "TLS defines the TLS configuration.\nMore info: https://doc.traefik.io/traefik/v3.6/reference/routing-configuration/http/routing/router/#tls"
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

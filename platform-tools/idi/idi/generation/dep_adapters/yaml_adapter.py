@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 
 class YamlDepAdapter:
@@ -60,6 +60,7 @@ class YamlDepAdapter:
                     source=f"yaml:{self.name}",
                     lineage_type=decl.get("lineage_type", "copy"),
                     discriminator_value=target.get("discriminator_value"),
+                    detection_source=DetectionSource.DEFAULT,
                 ))
         return results
 

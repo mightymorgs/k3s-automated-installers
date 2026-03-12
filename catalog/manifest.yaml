@@ -143,6 +143,29 @@ services:
     description: Neo4j graph database HTTP API
     style: rest
 
+  # ── Enterprise stress-test REST APIs ───────────────────────────────
+  keycloak:
+    schema: specs/keycloak-openapi.json
+    output: catalog/skills/openapi/keycloak/
+    url: https://raw.githubusercontent.com/ccouzens/keycloak-openapi/main/keycloak/23.0.7.json
+    source_type: download
+    description: Keycloak identity provider (OAuth2, OIDC, SAML, LDAP federation, token exchange)
+    style: rest
+  harbor:
+    schema: specs/harbor-openapi.yaml
+    output: catalog/skills/openapi/harbor/
+    url: https://raw.githubusercontent.com/goharbor/harbor/main/api/v2.0/swagger.yaml
+    source_type: download
+    description: Harbor container registry (projects, repos, artifacts, replication, RBAC)
+    style: rest
+  gitea:
+    schema: specs/gitea-openapi.json
+    output: catalog/skills/openapi/gitea/
+    url: https://raw.githubusercontent.com/go-gitea/gitea/main/templates/swagger/v1_json.tmpl
+    source_type: download
+    description: Gitea git hosting (repos, issues, PRs, webhooks, orgs, teams)
+    style: rest
+
   # ── Kubernetes / CRD services ────────────────────────────────────────
   traefik:
     schema: specs/traefik-openapi.json
@@ -487,6 +510,58 @@ services:
         kind: TeleportAccessList
         plural: teleportaccesslists
         namespaced: true
+
+  # ── Enterprise CRD operators (ArtifactHub chart extraction) ──────────
+  istio:
+    output: catalog/skills/crd/istio/
+    source_type: artifacthub
+    description: Istio service mesh CRDs (VirtualService, Gateway, DestinationRule, AuthorizationPolicy)
+    style: kubernetes
+    chart:
+      chart: base
+      artifacthub_repo: istio
+  strimzi:
+    output: catalog/skills/crd/strimzi/
+    source_type: artifacthub
+    description: Strimzi Kafka operator CRDs (Kafka, KafkaConnect, KafkaTopic, KafkaMirrorMaker2)
+    style: kubernetes
+    chart:
+      chart: strimzi-kafka-operator
+      artifacthub_repo: strimzi
+  cilium:
+    output: catalog/skills/crd/cilium/
+    source_type: artifacthub
+    description: Cilium eBPF networking CRDs (CiliumNetworkPolicy, CiliumEndpoint, CiliumBGP)
+    style: kubernetes
+    chart:
+      chart: cilium-crds
+      artifacthub_repo: wiremind
+  kyverno:
+    output: catalog/skills/crd/kyverno/
+    source_type: artifacthub
+    description: Kyverno policy engine CRDs (ClusterPolicy, Policy, PolicyException)
+    style: kubernetes
+    chart:
+      chart: kyverno
+      artifacthub_repo: kyverno
+  flux:
+    output: catalog/skills/crd/flux/
+    source_type: artifacthub
+    description: Flux CD GitOps CRDs (HelmRelease, Kustomization, GitRepository, HelmRepository)
+    style: kubernetes
+    chart:
+      chart: flux2
+      artifacthub_repo: fluxcd-community
+
+  # ── Enterprise stress-test operators (complex dependency patterns) ───
+  cloudnative-pg:
+    output: catalog/skills/crd/cloudnative-pg/
+    source_type: artifacthub
+    description: CloudNativePG PostgreSQL operator (Cluster, Backup, Pooler, ScheduledBackup)
+    style: kubernetes
+    chart:
+      chart: cloudnative-pg
+      artifacthub_repo: cloudnative-pg
 
   # ── Apps without public API specs ────────────────────────────────────
   claudebox:

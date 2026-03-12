@@ -15,12 +15,14 @@ Key differences from the previous implementation:
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Any
 
 from idi.generation.dep_adapters.naming import (
     _engine,
     normalize,
+    normalize_id_suffix,
     singularize,
     split_words,
     stem,
@@ -29,7 +31,16 @@ from idi.generation.resource_namer import strip_api_version_prefix
 
 _COMMON_FK_SUFFIXES: tuple[str, ...] = (
     "_id", "_pk", "_uuid", "_guid", "_key", "_ref",
-    "_ids", "_number", "_name", "_slug", "_flow",
+    "_ids", "_uuids", "_guids",
+    "_number", "_name", "_slug", "_flow",
+)
+
+# OWASP-derived credential parameter regex (#1).
+# Matches credential-like field names that should NOT be treated as FKs.
+_CREDENTIAL_PARAMS: re.Pattern = re.compile(
+    r"^(client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token"
+    r"|token|password|passwd|secret|api[_-]?key|apikey|authorization)$",
+    re.IGNORECASE,
 )
 
 # Low-priority aliases for resources that use non-obvious names.
@@ -57,6 +68,13 @@ _NEVER_FK_FIELDS: frozenset[str] = frozenset({
     "enabled", "disabled", "active", "is_active",
 })
 
+_NON_FK_FORMATS: frozenset[str] = frozenset({
+    "date-time", "date", "time", "duration",
+    "email", "idn-email", "uri", "uri-reference",
+    "iri", "iri-reference", "ipv4", "ipv6",
+    "hostname", "idn-hostname", "byte", "binary", "password",
+})
+
 
 def infer_target(
     field_name: str,
@@ -77,6 +95,12 @@ def infer_target(
         container: Parent property name (for nested body fields).
         json_path: Full JSON path to this field in the body schema.
     """
+    # Credential exclusion (#1): skip credential-like params unless they
+    # have an FK suffix (e.g. token_id, secret_id are legitimate FKs).
+    fn_lower = field_name.lower()
+    if not _has_fk_suffix(fn_lower) and _CREDENTIAL_PARAMS.match(fn_lower):
+        return None, 0.0
+
     # Compute type-based confidence factor.
     type_factor = _type_factor(field_name, field_info)
     if type_factor <= 0.0:
@@ -115,8 +139,25 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
     if fn_lower in _NEVER_FK_FIELDS:
         return 0.0
 
+    # --- Schema signal gates (section-03) ---
+    # Enum fields are categorical, never FKs.
+    if field_info.get("enum"):
+        return 0.0
+
+    # Server-generated fields can't be consumer inputs.
+    if field_info.get("readOnly"):
+        return 0.0
+
     ftype = field_info.get("type", "")
     fmt = field_info.get("format", "")
+
+    # Non-FK formats (date-time, email, uri, etc.) — reject early.
+    if fmt in _NON_FK_FORMATS:
+        return 0.0
+
+    # Pattern-constrained strings — heavily penalized but not excluded.
+    if field_info.get("pattern") and ftype == "string":
+        return 0.1
 
     # Strong FK signals.
     if ftype == "integer" or fmt == "uuid":
@@ -147,7 +188,7 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
             return 0.4
         return 0.2
 
-    # Boolean, enum, etc. — never FKs.
+    # Boolean, object, etc. — never FKs.
     return 0.0
 
 
@@ -194,6 +235,17 @@ def _build_candidates(
         stripped = fn_lower.removesuffix(suffix)
         if stripped != fn_lower and stripped:
             candidates.append((normalize(stripped), 0.5))
+
+    # --- ID synonym normalization (#8) ---
+    # Normalize _uuid/_guid/_uid to _id for cross-convention matching.
+    normalized = normalize_id_suffix(field_name)
+    if normalized != field_name:
+        # Re-run suffix stripping on the normalized form (e.g. user_uuid → user_id → user)
+        norm_lower = normalized.lower()
+        for suffix in _COMMON_FK_SUFFIXES:
+            stripped = norm_lower.removesuffix(suffix)
+            if stripped != norm_lower and stripped:
+                candidates.append((normalize(stripped), 0.48))  # Slight penalty for synonym
 
     # --- RestTestGen name qualification ---
     # If the field name is a bare qualifiable token (id, name, key, etc.),
@@ -318,7 +370,7 @@ def _match_resource(
 
     # Suffix containment: 'profile' is a suffix of 'qualityprofile'.
     # Also tries inflected plural form of the candidate.
-    if len(candidate) >= 4:
+    if len(candidate) >= 7:
         candidate_flat = candidate.replace("__", "")
         inflect_flat = _engine.plural_noun(candidate_flat) if candidate_flat else ""
         suffix_matches: list[str] = []

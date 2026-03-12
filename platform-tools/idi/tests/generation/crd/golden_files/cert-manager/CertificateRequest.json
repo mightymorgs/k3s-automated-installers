@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "kind": "CertificateRequest",
+  "group": "cert-manager.io",
+  "version": "v1",
+  "plural": "certificaterequests",
+  "scope": "namespaced",
+  "service": "cert-manager",
+  "description": "A CertificateRequest is used to request a signed certificate from one of the\nconfigured issuers.\n\nAll fields within the CertificateRequest's `spec` are immutable after creation.\nA CertificateRequest will either succeed or fail, as denoted by its `Ready` status\ncondition and its `status.failureTime` field.\n\nA CertificateRequest is a one-shot resource, meaning it represents a single\npoint in time request for a certificate and cannot be re-used.",
+  "input_refs": [
+    {
+      "field": "spec.issuerRef",
+      "target_kind": "Issuer",
+      "target_group": "cert-manager.io",
+      "role": "input_ref",
+      "required": true,
+      "cross_namespace": false,
+      "fact_ref": "crdfacts://cert-manager.io/Issuer#issuerRef"
+    }
+  ],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.duration",
+      "type": "string",
+      "description": "Requested 'duration' (i.e. lifetime) of the Certificate. Note that the\nissuer may choose to ignore the requested duration, just like any other\nrequested attribute."
+    },
+    {
+      "field": "spec.extra",
+      "type": "object",
+      "description": "Extra contains extra attributes of the user that created the CertificateRequest.\nPopulated by the cert-manager webhook on creation and immutable."
+    },
+    {
+      "field": "spec.groups",
+      "type": "array",
+      "description": "Groups contains group membership of the user that created the CertificateRequest.\nPopulated by the cert-manager webhook on creation and immutable."
+    },
+    {
+      "field": "spec.isCA",
+      "type": "boolean",
+      "description": "Requested basic constraints isCA value. Note that the issuer may choose\nto ignore the requested isCA value, just like any other requested attribute.\n\nNOTE: If the CSR in the `Request` field has a BasicConstraints extension,\nit must have the same isCA value as specified here.\n\nIf true, this will automatically add the `cert sign` usage to the list\nof requested `usages`."
+    },
+    {
+      "field": "spec.request",
+      "type": "string",
+      "description": "The PEM-encoded X.509 certificate signing request to be submitted to the\nissuer for signing.\n\nIf the CSR has a BasicConstraints extension, its isCA attribute must\nmatch the `isCA` value of this CertificateRequest.\nIf the CSR has a KeyUsage extension, its key usages must match the\nkey usages in the `usages` field of this CertificateRequest.\nIf the CSR has a ExtKeyUsage extension, its extended key usages\nmust match the extended key usages in the `usages` field of this\nCertificateRequest."
+    },
+    {
+      "field": "spec.uid",
+      "type": "string",
+      "description": "UID contains the uid of the user that created the CertificateRequest.\nPopulated by the cert-manager webhook on creation and immutable."
+    },
+    {
+      "field": "spec.usages",
+      "type": "array",
+      "description": "Requested key usages and extended key usages.\n\nNOTE: If the CSR in the `Request` field has uses the KeyUsage or\nExtKeyUsage extension, these extensions must have the same values\nas specified here without any additional values.\n\nIf unset, defaults to `digital signature` and `key encipherment`."
+    },
+    {
+      "field": "spec.username",
+      "type": "string",
+      "description": "Username contains the name of the user that created the CertificateRequest.\nPopulated by the cert-manager webhook on creation and immutable."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

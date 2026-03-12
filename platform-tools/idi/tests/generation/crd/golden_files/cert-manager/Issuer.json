@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "kind": "Issuer",
+  "group": "cert-manager.io",
+  "version": "v1",
+  "plural": "issuers",
+  "scope": "namespaced",
+  "service": "cert-manager",
+  "description": "An Issuer represents a certificate issuing authority which can be\nreferenced as part of `issuerRef` fields.\nIt is scoped to a single namespace and can therefore only be referenced by\nresources within the same namespace.",
+  "input_refs": [],
+  "output_declarations": [],
+  "config_fields": [
+    {
+      "field": "spec.acme",
+      "type": "object",
+      "description": "ACME configures this issuer to communicate with a RFC8555 (ACME) server\nto obtain signed x509 certificates."
+    },
+    {
+      "field": "spec.ca",
+      "type": "object",
+      "description": "CA configures this issuer to sign certificates using a signing CA keypair\nstored in a Secret resource.\nThis is used to build internal PKIs that are managed by cert-manager."
+    },
+    {
+      "field": "spec.selfSigned",
+      "type": "object",
+      "description": "SelfSigned configures this issuer to 'self sign' certificates using the\nprivate key used to create the CertificateRequest object."
+    },
+    {
+      "field": "spec.vault",
+      "type": "object",
+      "description": "Vault configures this issuer to sign certificates using a HashiCorp Vault\nPKI backend."
+    },
+    {
+      "field": "spec.venafi",
+      "type": "object",
+      "description": "Venafi configures this issuer to sign certificates using a Venafi TPP\nor Venafi Cloud policy zone."
+    }
+  ],
+  "status_conditions": [
+    "Ready"
+  ],
+  "execution": {
+    "method": "kubectl_apply",
+    "wait_condition": "condition=Ready"
+  }
+}

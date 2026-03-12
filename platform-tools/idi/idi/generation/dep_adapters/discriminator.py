@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo, Output
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo, Output
 
 
 class DiscriminatorAdapter:
@@ -35,6 +35,7 @@ class DiscriminatorAdapter:
                     fact_ref=f"facts://{operation.service}/{target}#id",
                     confidence=0.95, source="discriminator",
                     discriminator_value=disc_value,
+                    detection_source=DetectionSource.DEFAULT,
                 ))
         return results
 

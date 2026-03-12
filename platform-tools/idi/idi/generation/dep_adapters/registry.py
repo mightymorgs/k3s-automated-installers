@@ -12,7 +12,7 @@ from idi.generation.dep_adapters.base import (
     OperationInfo,
     Output,
 )
-from idi.generation.dep_adapters.merge import filter_self_refs, merge_deps, merge_outputs
+from idi.generation.dep_adapters.merge import filter_by_confidence, filter_self_refs, merge_deps, merge_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,16 @@ class DepAdapterRegistry:
             except Exception:
                 logger.warning("Adapter %s raised in detect_outputs", adapter.name)
         deps = merge_deps(all_deps)
-        deps = filter_self_refs(deps, operation.resource)
+        deps = filter_self_refs(deps, operation.resource, operation.method)
+        deps = filter_by_confidence(deps)
+        # Suppress body/operationid deps whose target is already covered by a
+        # path dep. Path skeleton is authoritative; weaker sources are fenced.
+        _FENCED_SOURCES = {"generic_odg:body", "generic_odg:operationid"}
+        path_targets = {d.target_resource for d in deps if d.source == "generic_odg:path"}
+        if path_targets:
+            deps = [
+                d for d in deps
+                if d.source not in _FENCED_SOURCES or d.target_resource not in path_targets
+            ]
         outputs = merge_outputs(all_outputs)
         return deps, outputs

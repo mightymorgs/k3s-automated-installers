@@ -55,9 +55,14 @@ def detect_ambiguous_leaves(ctx: GeneratorContext) -> Set[str]:
         if not non_param:
             continue
 
-        # Strip action suffixes to find the true resource leaf.
+        # Strip action suffixes to find the true resource leaf,
+        # but never strip down to only version/api prefixes.
+        _VS = {"api", "apis", "v1", "v2", "v3", "v4"}
         while len(non_param) > 1 and non_param[-1] in REST_ACTION_SUFFIXES:
-            non_param = non_param[:-1]
+            remaining = non_param[:-1]
+            if all(s.lower() in _VS for s in remaining):
+                break
+            non_param = remaining
 
         leaf = sanitize_name(non_param[-1])
         parent_path = tuple(non_param[:-1]) if len(non_param) > 1 else ()
@@ -94,9 +99,15 @@ def build_resource_name(ctx: GeneratorContext, path: str) -> str:
     if not non_param:
         return "resource"
 
-    # Strip action suffixes from the end.
+    # Strip action suffixes from the end, but never strip down to
+    # only version/api prefixes (that would lose the resource name).
+    _VERSION_SEGMENTS = {"api", "apis", "v1", "v2", "v3", "v4"}
     while len(non_param) > 1 and non_param[-1] in REST_ACTION_SUFFIXES:
-        non_param = non_param[:-1]
+        remaining = non_param[:-1]
+        # Guard: don't strip if all remaining segments are version/api prefixes.
+        if all(s.lower() in _VERSION_SEGMENTS for s in remaining):
+            break
+        non_param = remaining
 
     leaf = sanitize_name(non_param[-1])
     ambiguous = detect_ambiguous_leaves(ctx)

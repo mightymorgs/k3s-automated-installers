@@ -1,28 +1,25 @@
 """CRD skill JSON output writer.
 
-Serializes classified fields and CRD metadata into skill JSON files
-matching crd-kind.schema.json and helm-chart.schema.json schemas.
-Writes to catalog/skills/crd/{service}/{Kind}.json.
+Serializes classified fields and CRD metadata into skill JSON files.
+Supports both monolithic (schema v1.0) and decomposed (schema v2.0) formats.
+
+Monolithic: catalog/skills/crd/{service}/{Kind}.json
+Decomposed: catalog/skills/crd/{group}/{service}/{Kind}/manifest.json + subdirs
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from idi.generation.crd.field_classifier import ClassifiedField
+from idi.generation.crd.kind_registry import KindRegistry
 
 logger = logging.getLogger(__name__)
-
-
-def _fact_ref_for_field(field: ClassifiedField) -> str:
-    """Build a crdfacts:// URI for a classified field."""
-    group = field.target_group or "core"
-    kind = field.target_kind or "Unknown"
-    # Extract the leaf field name for the fragment.
-    leaf = field.field.rsplit(".", 1)[-1]
-    return f"crdfacts://{group}/{kind}#{leaf}"
 
 
 def _python_type(value: Any) -> str:
@@ -40,71 +37,367 @@ def _python_type(value: Any) -> str:
     return "string"
 
 
-def build_crd_skill_json(
+# ---------------------------------------------------------------------------
+# Decomposed output (schema v2.0)
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_path_segment(segment: str) -> str:
+    """Replace unsafe characters in path segments. Allow [A-Za-z0-9._-]."""
+    return re.sub(r'[^A-Za-z0-9._-]', '_', segment)
+
+
+def _satisfaction_for_field(field: ClassifiedField) -> str:
+    """Determine satisfaction mode for a ref field."""
+    return "required_value" if field.required else "optional"
+
+
+def _fact_ref_for_ref(field: ClassifiedField) -> str:
+    """Build crdfacts:// URI for an input_ref in decomposed format.
+
+    Uses target_field for the fragment if populated, falls back to leaf name.
+    This ensures two consumer fields referencing Secret#name produce
+    the same fact URI: crdfacts://core/Secret#name.
+    """
+    group = field.target_group or "core"
+    kind = field.target_kind or "Unknown"
+    fragment = field.target_field if field.target_field else field.field.rsplit(".", 1)[-1]
+    return f"crdfacts://{group}/{kind}#{fragment}"
+
+
+def _fact_ref_for_output(field: ClassifiedField) -> str:
+    """Build crdfacts:// URI for an output_declaration in decomposed format.
+
+    Uses target_field for the fragment if populated, falls back to leaf name.
+    """
+    group = field.target_group or "core"
+    kind = field.target_kind or "Unknown"
+    fragment = field.target_field if field.target_field else field.field.rsplit(".", 1)[-1]
+    return f"crdfacts://{group}/{kind}#{fragment}"
+
+
+def _resolve_filenames(
+    fields: list[ClassifiedField], role: str,
+) -> dict[tuple[str, str | None, str | None], str]:
+    """Map (field_path, target_group, target_kind) -> filename.
+
+    Returns dict mapping the triple to a safe filename (without .json extension).
+    Appends -target_kind to filename when multiple targets share the same field_path.
+    Detects collisions and uses hyphen-joined paths when needed.
+    """
+    # Filter based on role.
+    if role == "input_ref":
+        role_fields = [f for f in fields if f.role == "input_ref" and f.target_kind]
+    elif role == "output_declaration":
+        role_fields = [f for f in fields if f.role == "output_declaration"]
+    elif role == "config_field":
+        role_fields = [f for f in fields if f.role == "config_field"]
+    else:
+        role_fields = [f for f in fields if f.role == role]
+
+    # Sort for determinism.
+    role_fields.sort(key=lambda f: (f.field, f.target_kind or "", f.target_group or "", f.detection_source))
+
+    # Build key_to_leaf keyed by (field_path, target_group, target_kind).
+    key_to_leaf: dict[tuple[str, str | None, str | None], str] = {}
+    for f in role_fields:
+        key = (f.field, f.target_group, f.target_kind)
+        leaf = f.field.rsplit(".", 1)[-1]
+        key_to_leaf[key] = leaf
+
+    # Detect polymorphic paths: field_paths with >1 distinct (group, kind) pair.
+    path_keys: dict[str, list[tuple[str, str | None, str | None]]] = defaultdict(list)
+    for key in key_to_leaf:
+        path_keys[key[0]].append(key)
+
+    polymorphic_paths = {fp for fp, keys in path_keys.items() if len(keys) > 1}
+
+    # Append -target_kind suffix for polymorphic paths.
+    for key, leaf in list(key_to_leaf.items()):
+        if key[0] in polymorphic_paths and key[2]:
+            key_to_leaf[key] = f"{leaf}-{key[2]}"
+
+    # Detect collisions (case-insensitive) across all leaf names.
+    seen_lower: dict[str, list[tuple[str, str | None, str | None]]] = defaultdict(list)
+    for key, leaf in key_to_leaf.items():
+        seen_lower[leaf.lower()].append(key)
+
+    # Resolve collisions with hyphen-joined paths.
+    result: dict[tuple[str, str | None, str | None], str] = {}
+    for key, leaf in key_to_leaf.items():
+        lower = leaf.lower()
+        if len(seen_lower[lower]) > 1:
+            # Use hyphen-joined path: strip "spec." prefix, replace "." with "-".
+            path_part = key[0]
+            if path_part.startswith("spec."):
+                path_part = path_part[5:]
+            suffix = f"-{key[2]}" if key[0] in polymorphic_paths and key[2] else ""
+            result[key] = path_part.replace(".", "-") + suffix
+        else:
+            result[key] = leaf
+
+    return result
+
+
+def _compute_content_hash(file_contents: dict[str, dict]) -> str:
+    """Compute deterministic SHA-256 hash of all files (excluding manifest.json).
+
+    Args:
+        file_contents: Dict mapping relative_path -> JSON-serializable dict.
+
+    Returns:
+        Hex digest of SHA-256 hash.
+    """
+    parts: list[str] = []
+    for rel_path in sorted(file_contents.keys()):
+        canonical = json.dumps(file_contents[rel_path], sort_keys=True, separators=(',', ':'))
+        parts.append(f"{rel_path}\n{canonical}\n")
+    combined = "".join(parts)
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+
+def build_decomposed_skill(
     crd_info: dict[str, Any],
     fields: list[ClassifiedField],
     status_conditions: list[str] | None = None,
+    accepts_arbitrary_resources: bool = False,
+    registry: KindRegistry | None = None,
 ) -> dict[str, Any]:
-    """Build a CRD skill JSON document from CRD info and classified fields.
+    """Build decomposed CRD skill as a dict-of-dicts.
 
     Args:
         crd_info: Dict with kind, group, version, plural, scope, service, description.
         fields: Classified fields from field_classifier.
-        status_conditions: Status conditions to wait for (default: ["Ready"]).
+        status_conditions: Status conditions (default: ["Ready"]).
+        accepts_arbitrary_resources: If True, add flag to manifest JSON.
+        registry: KindRegistry for resolving target_plural. If None, plurals are empty.
 
     Returns:
-        Dict matching crd-kind.schema.json.
+        Dict with keys: 'manifest', 'operation', 'refs', 'outputs', 'fields'.
+        'refs', 'outputs', 'fields' are dicts mapping filename to content dict.
     """
-    input_refs = []
-    output_declarations = []
-    config_fields = []
+    conditions = status_conditions or ["Ready"]
+    kind = crd_info["kind"]
+    group = crd_info["group"]
+    service = crd_info["service"]
+    plural = crd_info.get("plural", "")
 
+    # Resolve filenames with collision detection.
+    ref_names = _resolve_filenames(fields, "input_ref")
+    output_names = _resolve_filenames(fields, "output_declaration")
+    field_names = _resolve_filenames(fields, "config_field")
+
+    # Build refs.
+    refs: dict[str, dict[str, Any]] = {}
     for f in fields:
-        if f.role == "input_ref" and f.target_kind:
-            input_refs.append({
-                "field": f.field,
-                "target_kind": f.target_kind,
-                "target_group": f.target_group or crd_info["group"],
-                "role": "input_ref",
-                "required": f.required,
-                "cross_namespace": f.cross_namespace,
-                "fact_ref": _fact_ref_for_field(f),
-            })
-        elif f.role == "output_declaration":
-            output_declarations.append({
-                "field": f.field,
-                "produces_kind": f.target_kind or "Unknown",
-                "produces_group": f.target_group or "core",
-                "role": "output_declaration",
-                "fact_ref": _fact_ref_for_field(f),
-            })
-        elif f.role == "config_field":
-            entry: dict[str, Any] = {
-                "field": f.field,
-                "type": f.field_type,
-            }
-            if f.description:
-                entry["description"] = f.description
-            config_fields.append(entry)
+        if f.role != "input_ref" or not f.target_kind:
+            continue
+        key = (f.field, f.target_group, f.target_kind)
+        fname = ref_names[key]
+        refs[fname] = {
+            "name": f.field.rsplit(".", 1)[-1],
+            "field_path": f.field,
+            "target_kind": f.target_kind,
+            "target_group": f.target_group or group,
+            "target_plural": (registry.kind_to_plural(f.target_kind) or "") if registry else "",
+            "role": "input_ref",
+            "required": f.required,
+            "cross_namespace": f.cross_namespace,
+            "fact_ref": _fact_ref_for_ref(f),
+            "fact_shape": f.fact_shape or "identity",
+            "satisfaction": _satisfaction_for_field(f),
+            "detection_source": f.detection_source,
+            "confidence": f.confidence,
+        }
 
-    return {
-        "schema_version": "1.0",
-        "kind": crd_info["kind"],
-        "group": crd_info["group"],
-        "version": crd_info["version"],
-        "plural": crd_info["plural"],
-        "scope": crd_info["scope"],
-        "service": crd_info["service"],
-        "description": crd_info.get("description") or f"{crd_info['kind']} CRD",
-        "input_refs": input_refs,
-        "output_declarations": output_declarations,
-        "config_fields": config_fields,
-        "status_conditions": status_conditions or ["Ready"],
+    # Build outputs.
+    outputs: dict[str, dict[str, Any]] = {}
+    for f in fields:
+        if f.role != "output_declaration":
+            continue
+        key = (f.field, f.target_group, f.target_kind)
+        fname = output_names[key]
+        outputs[fname] = {
+            "name": f.field.rsplit(".", 1)[-1],
+            "field_path": f.field,
+            "produces_kind": f.target_kind or "Unknown",
+            "produces_group": f.target_group or "core",
+            "produces_plural": (registry.kind_to_plural(f.target_kind) or "") if (registry and f.target_kind) else "",
+            "role": "output_declaration",
+            "fact_ref": _fact_ref_for_output(f),
+            "fact_shape": f.fact_shape or "identity",
+            "detection_source": f.detection_source,
+            "confidence": f.confidence,
+        }
+
+    # Build fields.
+    field_dicts: dict[str, dict[str, Any]] = {}
+    for f in fields:
+        if f.role != "config_field":
+            continue
+        key = (f.field, f.target_group, f.target_kind)
+        fname = field_names[key]
+        entry: dict[str, Any] = {
+            "name": f.field.rsplit(".", 1)[-1],
+            "field_path": f.field,
+            "type": f.field_type,
+            "required": f.required,
+            "cardinality": "many" if f.field_type == "array" else "one",
+            "fact_shape": "config",
+        }
+        if f.description:
+            entry["description"] = f.description
+        field_dicts[fname] = entry
+
+    # Build operation.
+    operation = {
+        "schema_version": "2.0",
+        "action_id": f"configure.{service}.{kind.lower()}",
+        "path": f"{service}/{kind}/apply",
+        "phase": "configure",
+        "executor": "crd",
+        "description": f"Apply a {kind} CRD manifest",
         "execution": {
             "method": "kubectl_apply",
             "wait_condition": "condition=Ready",
         },
+        "depends_on": [
+            {
+                "ref": refs[fname]["name"],
+                "target_kind": refs[fname]["target_kind"],
+                "target_group": refs[fname]["target_group"],
+                "fact_ref": refs[fname]["fact_ref"],
+                "required": refs[fname]["required"],
+                "satisfaction": refs[fname]["satisfaction"],
+            }
+            for fname in sorted(refs.keys())
+        ],
+        "outputs": [
+            {
+                "output": outputs[fname]["name"],
+                "produces_kind": outputs[fname]["produces_kind"],
+                "produces_group": outputs[fname]["produces_group"],
+                "fact_ref": outputs[fname]["fact_ref"],
+            }
+            for fname in sorted(outputs.keys())
+        ],
     }
+
+    # Compute content hash from all files except manifest.
+    all_files: dict[str, dict] = {}
+    all_files["operations/apply.json"] = operation
+    for fname, content in sorted(refs.items()):
+        all_files[f"refs/{fname}.json"] = content
+    for fname, content in sorted(outputs.items()):
+        all_files[f"outputs/{fname}.json"] = content
+    for fname, content in sorted(field_dicts.items()):
+        all_files[f"fields/{fname}.json"] = content
+
+    content_hash = _compute_content_hash(all_files)
+
+    # Build manifest.
+    manifest: dict[str, Any] = {
+        "schema_version": "2.0",
+        "kind": kind,
+        "group": group,
+        "version": crd_info["version"],
+        "plural": plural,
+        "scope": crd_info["scope"],
+        "service": service,
+        "description": crd_info.get("description") or f"{kind} CRD",
+        "operations": ["apply"],
+        "refs": sorted(refs.keys()),
+        "outputs": sorted(outputs.keys()),
+        "fields": sorted(field_dicts.keys()),
+        "status_conditions": conditions,
+        "content_hash": content_hash,
+    }
+    if accepts_arbitrary_resources:
+        manifest["accepts_arbitrary_resources"] = True
+
+    return {
+        "manifest": manifest,
+        "operation": operation,
+        "refs": refs,
+        "outputs": outputs,
+        "fields": field_dicts,
+    }
+
+
+def write_decomposed_skill(
+    crd_info: dict[str, Any],
+    fields: list[ClassifiedField],
+    output_dir: Path,
+    status_conditions: list[str] | None = None,
+    accepts_arbitrary_resources: bool = False,
+    registry: KindRegistry | None = None,
+) -> Path:
+    """Write decomposed CRD skill files to the Kind directory.
+
+    Creates: {output_dir}/{group}/{service}/{Kind}/ with subdirectories.
+    Sanitizes path segments. Asserts output within output_dir.
+
+    Returns:
+        The Kind directory path.
+    """
+    skill = build_decomposed_skill(
+        crd_info, fields, status_conditions,
+        accepts_arbitrary_resources=accepts_arbitrary_resources,
+        registry=registry,
+    )
+
+    group_seg = _sanitize_path_segment(crd_info["group"])
+    service_seg = _sanitize_path_segment(crd_info["service"])
+    kind_seg = _sanitize_path_segment(crd_info["kind"])
+
+    kind_dir = output_dir / group_seg / service_seg / kind_seg
+
+    # Path traversal guard.
+    resolved = kind_dir.resolve()
+    assert resolved.is_relative_to(output_dir.resolve()), f"Path traversal: {kind_dir}"
+
+    # Create directories.
+    (kind_dir / "operations").mkdir(parents=True, exist_ok=True)
+    if skill["refs"]:
+        (kind_dir / "refs").mkdir(exist_ok=True)
+    if skill["outputs"]:
+        (kind_dir / "outputs").mkdir(exist_ok=True)
+    if skill["fields"]:
+        (kind_dir / "fields").mkdir(exist_ok=True)
+
+    def _write(path: Path, content: dict) -> None:
+        path.write_text(json.dumps(content, indent=2, sort_keys=True) + "\n")
+
+    # Write files.
+    _write(kind_dir / "manifest.json", skill["manifest"])
+    _write(kind_dir / "operations" / "apply.json", skill["operation"])
+
+    written_files: set[str] = set()
+    for fname, content in skill["refs"].items():
+        fpath = f"refs/{fname}.json"
+        assert fpath not in written_files, f"Duplicate file: {fpath}"
+        written_files.add(fpath)
+        _write(kind_dir / "refs" / f"{fname}.json", content)
+
+    for fname, content in skill["outputs"].items():
+        fpath = f"outputs/{fname}.json"
+        assert fpath not in written_files, f"Duplicate file: {fpath}"
+        written_files.add(fpath)
+        _write(kind_dir / "outputs" / f"{fname}.json", content)
+
+    for fname, content in skill["fields"].items():
+        fpath = f"fields/{fname}.json"
+        assert fpath not in written_files, f"Duplicate file: {fpath}"
+        written_files.add(fpath)
+        _write(kind_dir / "fields" / f"{fname}.json", content)
+
+    logger.info("Wrote decomposed CRD skill: %s", kind_dir)
+    return kind_dir
+
+
+# ---------------------------------------------------------------------------
+# Helm output (unrelated to CRD decomposition)
+# ---------------------------------------------------------------------------
 
 
 def build_helm_spec_json(
@@ -157,35 +450,6 @@ def build_helm_spec_json(
         doc["version"] = version
 
     return doc
-
-
-def write_crd_skill(
-    crd_info: dict[str, Any],
-    fields: list[ClassifiedField],
-    output_dir: Path,
-    status_conditions: list[str] | None = None,
-) -> Path:
-    """Write a CRD skill JSON file.
-
-    Args:
-        crd_info: CRD metadata dict.
-        fields: Classified fields.
-        output_dir: Base output directory (e.g. catalog/skills/crd).
-        status_conditions: Status conditions.
-
-    Returns:
-        Path to the written JSON file.
-    """
-    doc = build_crd_skill_json(crd_info, fields, status_conditions)
-
-    service_dir = output_dir / crd_info["service"]
-    service_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = service_dir / f"{crd_info['kind']}.json"
-    out_path.write_text(json.dumps(doc, indent=2) + "\n")
-    logger.info("Wrote CRD skill: %s", out_path)
-
-    return out_path
 
 
 def write_helm_spec(

@@ -12,8 +12,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from idi.generation.dep_adapters.base import Dependency, OperationInfo
-from idi.generation.dep_adapters.target_inference import infer_target
+from idi.generation.dep_adapters.base import Dependency, DetectionSource, OperationInfo
+from idi.generation.dep_adapters.naming import _engine, normalize, singularize
+from idi.generation.dep_adapters.target_inference import (
+    _CREDENTIAL_PARAMS,
+    _has_fk_suffix,
+    infer_target,
+)
 
 _EXCLUDED_FIELDS: frozenset[str] = frozenset({
     "namespace", "namespaces", "ns",
@@ -29,6 +34,89 @@ _SELF_PRODUCED_FIELDS: frozenset[str] = frozenset({
 })
 
 _MAX_DEPTH = 8
+
+# Identity fields that signal a nested object refers to an external resource.
+_IDENTITY_FIELDS: frozenset[str] = frozenset({"id", "name", "uuid"})
+
+# Depth threshold above which FK confidence is reduced.
+_DEEP_NESTING_THRESHOLD = 3
+
+# Confidence multiplier for FKs found at depth >= _DEEP_NESTING_THRESHOLD.
+_DEEP_CONFIDENCE_FACTOR = 0.9375  # 0.8 * 0.9375 = 0.75
+
+
+def _detect_nested_producer(
+    container_name: str,
+    inner_properties: dict[str, Any],
+    known_resources: set[str],
+    service: str,
+) -> Dependency | None:
+    """Resolve a nested object container name to a known resource FK.
+
+    Returns a Dependency if the container name matches exactly one known resource
+    and the inner object has an identity field (id, name, uuid). Returns None on
+    ambiguity or no match.
+    """
+    # Check if inner properties include an identity field.
+    if not _IDENTITY_FIELDS & set(inner_properties):
+        return None
+
+    # Generate normalized, singular, and plural forms of the container name.
+    norm = normalize(container_name).replace("__", "")
+    singular = singularize(norm)
+    plural = _engine.plural_noun(norm)
+
+    candidates = {norm, singular}
+    if plural:
+        candidates.add(plural)
+
+    # Also try without common suffixes like "ref"
+    for suffix in ("ref", "reference", "spec", "config"):
+        for form in (norm, singular):
+            if form.endswith(suffix) and len(form) > len(suffix):
+                stripped = form[: -len(suffix)]
+                candidates.add(stripped)
+                p = _engine.plural_noun(stripped)
+                if p:
+                    candidates.add(p)
+
+    # Match against known resources.
+    matches: set[str] = set()
+    for c in candidates:
+        if c in known_resources:
+            matches.add(c)
+
+    # Ambiguity guard: only single-match resolution emits an edge.
+    if len(matches) != 1:
+        return None
+
+    target = matches.pop()
+    return Dependency(
+        field=container_name,
+        target_resource=target,
+        target_operation="create",
+        fact_ref=f"facts://{service}/{target}#id",
+        confidence=0.8,
+        source="generic_odg:body",
+        lineage_type="copy",
+        detection_source=DetectionSource.NESTED_PRODUCER,
+    )
+
+
+def _infer_resource_hint(operation: OperationInfo) -> str | None:
+    """Infer a parent resource hint from the operation's URL path.
+
+    For paths like ``/api/v3/blocklist/bulk``, returns ``"blocklist"``
+    so top-level body fields like ``ids`` can be qualified.
+    """
+    import re as _re
+    _skip = {"api", "apis", "v1", "v2", "v3", "v4", "bulk", "editor", "paged"}
+    segments = [
+        s for s in operation.path.strip("/").split("/")
+        if s and not s.startswith("{") and s.lower() not in _skip
+        and not _re.match(r"^v\d+$", s, _re.IGNORECASE)
+    ]
+    return segments[-1].lower() if segments else None
 
 
 def detect_body_deps(
@@ -47,6 +135,10 @@ def detect_body_deps(
     # Build set of response field paths for same-body filtering.
     response_fields = _collect_response_fields(operation.response_schema)
 
+    # Derive a resource hint from the URL path for qualifying bare tokens
+    # like ``ids`` at the top level of the body schema.
+    resource_hint = _infer_resource_hint(operation)
+
     results: list[Dependency] = []
     _walk_body(
         schema=body,
@@ -57,6 +149,7 @@ def detect_body_deps(
         json_path=[],
         depth=0,
         results=results,
+        resource_hint=resource_hint,
     )
     return results
 
@@ -70,29 +163,94 @@ def _walk_body(
     json_path: list[str],
     depth: int,
     results: list[Dependency],
+    visited: set[int] | None = None,
+    resource_hint: str | None = None,
 ) -> None:
     """Recursive body tree walker (RESTler Tree.iterCtx equivalent)."""
     if depth > _MAX_DEPTH or not isinstance(schema, dict):
         return
 
+    # Circular reference detection via schema object identity.
+    if visited is None:
+        visited = set()
+    schema_id = id(schema)
+    if schema_id in visited:
+        return
+    visited = visited | {schema_id}  # Copy-on-add for branch isolation
+
     for field_name, field_info in schema.get("properties", {}).items():
         if not isinstance(field_info, dict):
             continue
-        if field_name.lower() in _EXCLUDED_FIELDS:
+        fn_lower = field_name.lower()
+        if fn_lower in _EXCLUDED_FIELDS:
             continue
 
         current_path = json_path + [field_name]
-        container = json_path[-1] if json_path else None
+        container = json_path[-1] if json_path else resource_hint
 
         # Same-body filter: only skip fields that are auto-generated outputs
         # (pk, id, uuid, etc.) echoed in the response.  Most REST APIs echo
         # ALL input fields — only self-produced identifiers indicate this
         # operation is the true producer and should not be a consumer.
         path_key = "/".join(current_path)
-        if path_key in response_fields and field_name.lower() in _SELF_PRODUCED_FIELDS:
+        if path_key in response_fields and fn_lower in _SELF_PRODUCED_FIELDS:
             _recurse_nested(
                 field_info, known_resources, service, resource,
-                response_fields, current_path, depth, results,
+                response_fields, current_path, depth, results, visited,
+                resource_hint=resource_hint,
+            )
+            continue
+
+        # Credential exclusion: skip credential-like fields at any depth.
+        if not _has_fk_suffix(fn_lower) and _CREDENTIAL_PARAMS.match(fn_lower):
+            _recurse_nested(
+                field_info, known_resources, service, resource,
+                response_fields, current_path, depth, results, visited,
+                resource_hint=resource_hint,
+            )
+            continue
+
+        # Nested object producer: check if this field is an object whose
+        # container name maps to a known resource.
+        if field_info.get("type") == "object" and "properties" in field_info:
+            nested_dep = _detect_nested_producer(
+                container_name=field_name,
+                inner_properties=field_info["properties"],
+                known_resources=known_resources,
+                service=service,
+            )
+            if nested_dep is not None:
+                # Apply depth penalty to nested producer edges too.
+                if depth >= _DEEP_NESTING_THRESHOLD:
+                    nested_dep = Dependency(
+                        **{**nested_dep.__dict__,
+                           "confidence": round(nested_dep.confidence * _DEEP_CONFIDENCE_FACTOR, 3)},
+                    )
+                results.append(nested_dep)
+                # Still recurse into the nested object for deeper FKs.
+                _recurse_nested(
+                    field_info, known_resources, service, resource,
+                    response_fields, current_path, depth, results, visited,
+                    resource_hint=resource_hint,
+                )
+                continue
+
+        # Precondition gate: only call infer_target() for fields with FK
+        # suffix evidence or strong type signal (uuid format, integer type).
+        # This fences the fuzzy body matcher to ~30% of its activation surface.
+        has_fk_suffix = _has_fk_suffix(fn_lower)
+        items = field_info.get("items", {}) if field_info.get("type") == "array" else {}
+        is_strong_type = (
+            field_info.get("format") == "uuid"
+            or field_info.get("type") == "integer"
+            or (isinstance(items, dict) and items.get("type") == "integer")
+            or (isinstance(items, dict) and items.get("format") == "uuid")
+        )
+        if not has_fk_suffix and not is_strong_type:
+            _recurse_nested(
+                field_info, known_resources, service, resource,
+                response_fields, current_path, depth, results, visited,
+                resource_hint=resource_hint,
             )
             continue
 
@@ -103,6 +261,11 @@ def _walk_body(
         )
 
         if target is not None:
+            # Depth-based confidence adjustment.
+            if depth >= _DEEP_NESTING_THRESHOLD:
+                confidence *= _DEEP_CONFIDENCE_FACTOR
+                confidence = round(confidence, 3)
+
             results.append(Dependency(
                 field=field_name,
                 target_resource=target,
@@ -111,12 +274,14 @@ def _walk_body(
                 confidence=confidence,
                 source="generic_odg:body",
                 lineage_type="copy",
+                detection_source=DetectionSource.NESTED_FK if depth > 0 else DetectionSource.DEFAULT,
             ))
 
         # Recurse into nested objects and arrays.
         _recurse_nested(
             field_info, known_resources, service, resource,
-            response_fields, current_path, depth, results,
+            response_fields, current_path, depth, results, visited,
+            resource_hint=resource_hint,
         )
 
 
@@ -129,13 +294,16 @@ def _recurse_nested(
     current_path: list[str],
     depth: int,
     results: list[Dependency],
+    visited: set[int] | None = None,
+    resource_hint: str | None = None,
 ) -> None:
     """Recurse into nested objects and array items."""
     # Nested object.
     if field_info.get("type") == "object" and "properties" in field_info:
         _walk_body(
             field_info, known_resources, service, resource,
-            response_fields, current_path, depth + 1, results,
+            response_fields, current_path, depth + 1, results, visited,
+            resource_hint=resource_hint,
         )
 
     # Array items with properties.
@@ -147,7 +315,8 @@ def _recurse_nested(
     ):
         _walk_body(
             items, known_resources, service, resource,
-            response_fields, current_path + ["[0]"], depth + 1, results,
+            response_fields, current_path + ["[0]"], depth + 1, results, visited,
+            resource_hint=resource_hint,
         )
 
     # allOf composition — merge and recurse.
@@ -159,7 +328,8 @@ def _recurse_nested(
         if merged["properties"]:
             _walk_body(
                 merged, known_resources, service, resource,
-                response_fields, current_path, depth + 1, results,
+                response_fields, current_path, depth + 1, results, visited,
+                resource_hint=resource_hint,
             )
 
     # oneOf / anyOf composition — merge and recurse (same as allOf).
@@ -172,7 +342,8 @@ def _recurse_nested(
             if merged_variant["properties"]:
                 _walk_body(
                     merged_variant, known_resources, service, resource,
-                    response_fields, current_path, depth + 1, results,
+                    response_fields, current_path, depth + 1, results, visited,
+                    resource_hint=resource_hint,
                 )
 
 

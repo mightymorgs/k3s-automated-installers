@@ -1,0 +1,48 @@
+{
+  "name": "cert-manager",
+  "displayName": "cert-manager",
+  "description": "Cloud native certificate management",
+  "spec": {
+    "customresourcedefinitions": {
+      "owned": [
+        {
+          "name": "certificates.cert-manager.io",
+          "kind": "Certificate",
+          "version": "v1",
+          "description": "A Certificate resource should be created to ensure an up to date and signed x509 certificate is stored in the Kubernetes Secret resource named in spec.secretName."
+        },
+        {
+          "name": "issuers.cert-manager.io",
+          "kind": "Issuer",
+          "version": "v1",
+          "description": "An Issuer represents a certificate issuing authority."
+        },
+        {
+          "name": "clusterissuers.cert-manager.io",
+          "kind": "ClusterIssuer",
+          "version": "v1",
+          "description": "A ClusterIssuer represents a certificate issuing authority which can be referenced as part of issuerRef fields."
+        },
+        {
+          "name": "certificaterequests.cert-manager.io",
+          "kind": "CertificateRequest",
+          "version": "v1",
+          "description": "A CertificateRequest is used to request a signed certificate from one of the configured issuers."
+        },
+        {
+          "name": "orders.acme.cert-manager.io",
+          "kind": "Order",
+          "version": "v1",
+          "description": "Order is a type to represent an Order with an ACME server."
+        },
+        {
+          "name": "challenges.acme.cert-manager.io",
+          "kind": "Challenge",
+          "version": "v1",
+          "description": "Challenge is a type to represent a Challenge request with an ACME server."
+        }
+      ],
+      "required": []
+    }
+  }
+}

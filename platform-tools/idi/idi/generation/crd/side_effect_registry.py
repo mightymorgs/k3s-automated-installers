@@ -2,6 +2,13 @@
 
 Layer 1: Description NLP (confidence 0.6) — parse field descriptions
 Layer 2: Dictionary (confidence 0.95) — known operator side effects, overrides NLP
+Layer 3: RBAC extraction (dep_adapters/rbac_deps.py) — auto-discovers operator
+         side effects from Helm chart ClusterRole/Role permissions at runtime.
+
+The hand-written ``OPERATOR_SIDE_EFFECTS`` dictionary in this module remains
+as a high-confidence (0.95) fallback override for known ground-truth that RBAC
+extraction may not discover or may misclassify.  RBAC extraction is the primary
+automated discovery mechanism (Phase 4); this dictionary supplements it.
 """
 from __future__ import annotations
 

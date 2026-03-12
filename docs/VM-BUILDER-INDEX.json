@@ -1,11 +1,11 @@
 {
   "package": "vm_builder",
-  "generated_at": "2026-03-09",
+  "generated_at": "2026-03-11",
   "total_modules": 300,
   "cgc_mode": false,
   "git": {
-    "commit": "e7b739932b9f7b8142129203db20f3312d1eb2e9",
-    "branch": "main",
+    "commit": "1cad1095ed8c0a4ca7a4b277ec7e99bdd3145a30",
+    "branch": "feat/crd-implementation",
     "dirty": true
   },
   "surface_dirs": [
