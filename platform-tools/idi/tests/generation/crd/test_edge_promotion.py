@@ -4,6 +4,7 @@ from __future__ import annotations
 from idi.generation.crd.edge_promotion import (
     CrdGateResult,
     gate_crd1_intra_service,
+    gate_crd2_field_type,
 )
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.topo_sort import (
@@ -158,4 +159,39 @@ class TestGateCrd1:
         })
         edge = _make_edge(source_gk="test.io/EmptySvc", target_gk="postgresql.cnpg.io/Cluster")
         r = gate_crd1_intra_service(edge, _make_cf(), graph)
+        assert r.keep is False
+
+
+# ── G-CRD2 tests ────────────────────────────────────────────
+
+
+class TestGateCrd2:
+    """Tests for G-CRD2: Field Type Validation gate."""
+
+    def test_string_passes(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type="string"), _make_graph())
+        assert r.keep is True
+
+    def test_array_passes(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type="array"), _make_graph())
+        assert r.keep is True
+
+    def test_boolean_fails(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type="boolean"), _make_graph())
+        assert r.keep is False
+
+    def test_integer_fails(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type="integer"), _make_graph())
+        assert r.keep is False
+
+    def test_number_fails(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type="number"), _make_graph())
+        assert r.keep is False
+
+    def test_object_fails(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type="object"), _make_graph())
+        assert r.keep is False
+
+    def test_empty_type_fails(self):
+        r = gate_crd2_field_type(_make_edge(), _make_cf(field_type=""), _make_graph())
         assert r.keep is False

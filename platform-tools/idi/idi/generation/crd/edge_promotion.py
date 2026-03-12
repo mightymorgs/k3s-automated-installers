@@ -50,3 +50,20 @@ def gate_crd1_intra_service(
             f"cross-service: {src_node.service} -> {tgt_node.service}",
         )
     return CrdGateResult("G-CRD1", True, "same service")
+
+
+# ── Gate G-CRD2: Field Type Validation ──────────────────────
+
+_PROMOTABLE_FIELD_TYPES: frozenset[str] = frozenset({"string", "array"})
+
+
+def gate_crd2_field_type(
+    edge: DependencyEdge,
+    source_cf: ClassifiedField,
+    graph: DependencyGraph,
+) -> CrdGateResult:
+    """G-CRD2: Only promote edges from string or array fields."""
+    ft = source_cf.field_type
+    if ft in _PROMOTABLE_FIELD_TYPES:
+        return CrdGateResult("G-CRD2", True, f"type={ft}")
+    return CrdGateResult("G-CRD2", False, f"non-ref type: {ft}")
