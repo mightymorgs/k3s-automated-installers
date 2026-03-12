@@ -324,15 +324,16 @@ class TestBuildDependencyGraph:
         assert hard_edges[0].source_gk == "cert-manager.io/Certificate"
         assert hard_edges[0].target_gk == "cert-manager.io/Issuer"
 
-    def test_optional_input_ref_creates_optional_edge(self):
+    def test_optional_input_ref_promoted_to_hard(self):
+        """optional intra-service edge promoted to hard by promotion gates."""
         g = _build(classified_fields={
             ("cert-manager.io", "Certificate"): [
                 _cf(target_kind="Issuer", target_group="cert-manager.io", required=False),
             ],
             ("cert-manager.io", "Issuer"): [],
         })
-        opt_edges = [e for e in g.dependency_edges if e.edge_type == "optional"]
-        assert len(opt_edges) == 1
+        hard_edges = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        assert len(hard_edges) == 1
 
     def test_ref_to_external_creates_soft_edge(self):
         g = _build(classified_fields={
@@ -485,8 +486,8 @@ class TestHardEdgeSourceGate:
         hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
         assert len(hard) == 1
 
-    def test_parent_kind_name_required_creates_soft_edge(self):
-        """parent_kind_name + required=True → soft (NOT hard)."""
+    def test_parent_kind_name_required_promoted_to_hard(self):
+        """parent_kind_name + required=True → soft, then promoted to hard by gates."""
         g = _build(classified_fields={
             ("cert-manager.io", "Certificate"): [
                 _cf(target_kind="Issuer", target_group="cert-manager.io",
@@ -495,12 +496,10 @@ class TestHardEdgeSourceGate:
             ("cert-manager.io", "Issuer"): [],
         })
         hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
-        soft = [e for e in g.dependency_edges if e.edge_type == "soft"]
-        assert len(hard) == 0
-        assert len(soft) == 1
+        assert len(hard) == 1
 
-    def test_enum_kind_required_creates_soft_edge(self):
-        """enum_kind + required=True → soft (NOT hard)."""
+    def test_enum_kind_required_promoted_to_hard(self):
+        """enum_kind + required=True → soft, then promoted to hard by gates."""
         g = _build(classified_fields={
             ("cert-manager.io", "Certificate"): [
                 _cf(target_kind="Issuer", target_group="cert-manager.io",
@@ -509,9 +508,7 @@ class TestHardEdgeSourceGate:
             ("cert-manager.io", "Issuer"): [],
         })
         hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
-        soft = [e for e in g.dependency_edges if e.edge_type == "soft"]
-        assert len(hard) == 0
-        assert len(soft) == 1
+        assert len(hard) == 1
 
     def test_secret_key_selector_required_creates_hard_edge(self):
         """secret_key_selector + required=True → hard edge."""
@@ -557,8 +554,8 @@ class TestHardEdgeSourceGate:
         hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
         assert len(hard) == 1
 
-    def test_not_required_any_source_creates_optional(self):
-        """required=False from any detection source → optional edge."""
+    def test_not_required_any_source_promoted_to_hard(self):
+        """required=False → optional, then promoted to hard by gates (intra-service)."""
         g = _build(classified_fields={
             ("cert-manager.io", "Certificate"): [
                 _cf(target_kind="Issuer", target_group="cert-manager.io",
@@ -566,8 +563,8 @@ class TestHardEdgeSourceGate:
             ],
             ("cert-manager.io", "Issuer"): [],
         })
-        opt = [e for e in g.dependency_edges if e.edge_type == "optional"]
-        assert len(opt) == 1
+        hard = [e for e in g.dependency_edges if e.edge_type == "hard"]
+        assert len(hard) == 1
 
     def test_external_target_always_soft(self):
         """External target → soft edge regardless of detection source."""
@@ -635,8 +632,8 @@ class TestCrossEcosystemFilter:
         for e in edges:
             assert e.edge_type == "soft"  # soft from weak detector, not optional
 
-    def test_intra_group_weak_not_affected(self):
-        """Intra-group weak edge → NOT affected by cross-ecosystem filter."""
+    def test_intra_group_weak_promoted_to_hard(self):
+        """Intra-group weak edge → promoted to hard by promotion gates."""
         g = _build(classified_fields={
             ("cert-manager.io", "Certificate"): [
                 _cf(target_kind="Issuer", target_group="cert-manager.io",
@@ -646,7 +643,7 @@ class TestCrossEcosystemFilter:
         })
         edges = g.dependency_edges
         assert len(edges) == 1
-        assert edges[0].edge_type == "soft"  # soft from weak detector, not demoted further
+        assert edges[0].edge_type == "hard"  # soft from weak detector, promoted by gates
 
     def test_two_weak_cross_group_edges_same_pair_not_demoted(self):
         """Two weak edges from different fields same pair → mutual support."""

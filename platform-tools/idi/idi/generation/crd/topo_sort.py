@@ -338,6 +338,25 @@ def build_dependency_graph(
                 detection_source=cf.detection_source, confidence=cf.confidence,
             ))
 
+    # Step 4b: Promotion gate pass — promote qualified soft edges to hard.
+    # Lazy import to avoid circular dependency (edge_promotion imports topo_sort types).
+    from idi.generation.crd.edge_promotion import promote_soft_edges as _promote
+
+    cf_index: dict[tuple[str, str, str], ClassifiedField] = {}
+    for (group, kind), fields in classified_fields.items():
+        source_gk = f"{group}/{kind}"
+        for cf in fields:
+            if cf.role == "input_ref" and cf.target_kind is not None:
+                target_gk = f"{cf.target_group or ''}/{cf.target_kind}"
+                cf_index[(source_gk, cf.field, target_gk)] = cf
+    graph_stub = DependencyGraph(
+        nodes=nodes,
+        dependency_edges=[],
+        production_edges=[],
+        external_kinds=external_kinds,
+    )
+    raw_dep_edges = _promote(raw_dep_edges, cf_index, graph_stub)
+
     # Step 5: RBAC production edges.
     for service, outputs in rbac_outputs.items():
         service_nodes = [n for n in nodes.values() if n.service == service and not n.is_external]
@@ -1304,13 +1323,21 @@ def _cli_main(
     # Build graph and sort.
     registry = KindRegistry()
 
+    # Pre-register OLM owned GVKs so Gate 5 (kind_to_plural) works.
+    for service, owned_gvks in catalog_data["olm_owned"].items():
+        for gvk in owned_gvks:
+            registry.register(gvk.kind, gvk.plural, group=gvk.group, service=service)
+
     # Collect ALM label edges from OLM CSV data.
     from idi.generation.dep_adapters.olm_deps import OlmDepAdapter
 
     olm_adapter = OlmDepAdapter(registry=registry)
     alm_edges: list[DependencyEdge] = []
-    for service in catalog_data["olm_owned"]:
-        alm_edges.extend(olm_adapter.detect_alm_label_edges(service, registry))
+    olm_dir = str(olm_cache_dir) if olm_cache_dir else "catalog/specs/olm/"
+    for service, owned_gvks in catalog_data["olm_owned"].items():
+        alm_edges.extend(olm_adapter.detect_alm_label_edges(
+            service, registry, cache_dir=olm_dir, owned_gvks=owned_gvks,
+        ))
 
     graph = build_dependency_graph(
         classified_fields=catalog_data["classified_fields"],

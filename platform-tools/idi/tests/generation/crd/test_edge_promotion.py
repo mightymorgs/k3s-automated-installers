@@ -410,3 +410,181 @@ class TestPromoteSoftEdges:
         assert result[0].edge_type == "hard"  # passthrough
         assert result[1].edge_type == "hard"  # promoted
         assert result[2].edge_type == "soft"  # kept (external)
+
+
+# ── Integration tests ───────────────────────────────────────
+
+
+class TestIntegration:
+    """Integration tests for edge promotion in build_dependency_graph."""
+
+    def test_cloudnative_pg_scenario(self):
+        """Backup->Cluster promoted, external edges stay soft."""
+        from idi.generation.crd.kind_registry import KindRegistry
+        from idi.generation.crd.topo_sort import build_dependency_graph
+
+        registry = KindRegistry()
+        classified_fields = {
+            ("postgresql.cnpg.io", "Cluster"): [],
+            ("postgresql.cnpg.io", "Backup"): [
+                _make_cf(
+                    field="spec.cluster.name",
+                    field_type="string",
+                    detection_source="parent_kind_name",
+                    confidence=0.8,
+                    target_kind="Cluster",
+                    target_group="postgresql.cnpg.io",
+                    required=False,
+                ),
+            ],
+            ("postgresql.cnpg.io", "Database"): [
+                _make_cf(
+                    field="spec.cluster.name",
+                    field_type="string",
+                    detection_source="parent_kind_name",
+                    confidence=0.8,
+                    target_kind="Cluster",
+                    target_group="postgresql.cnpg.io",
+                    required=False,
+                ),
+            ],
+        }
+        graph = build_dependency_graph(
+            classified_fields=classified_fields,
+            rbac_outputs={},
+            olm_owned={},
+            side_effect_dict={},
+            registry=registry,
+        )
+        # Backup->Cluster should be promoted to hard
+        backup_to_cluster = [
+            e for e in graph.dependency_edges
+            if e.source_gk == "postgresql.cnpg.io/Backup"
+            and e.target_gk == "postgresql.cnpg.io/Cluster"
+        ]
+        assert len(backup_to_cluster) == 1
+        assert backup_to_cluster[0].edge_type == "hard"
+
+        # Database->Cluster should be promoted to hard
+        db_to_cluster = [
+            e for e in graph.dependency_edges
+            if e.source_gk == "postgresql.cnpg.io/Database"
+            and e.target_gk == "postgresql.cnpg.io/Cluster"
+        ]
+        assert len(db_to_cluster) == 1
+        assert db_to_cluster[0].edge_type == "hard"
+
+    def test_external_edge_stays_soft(self):
+        """Edges to external kinds are not promoted."""
+        from idi.generation.crd.kind_registry import KindRegistry
+        from idi.generation.crd.topo_sort import build_dependency_graph
+
+        registry = KindRegistry()
+        classified_fields = {
+            ("postgresql.cnpg.io", "Cluster"): [
+                _make_cf(
+                    field="spec.storage.storageClassName",
+                    field_type="string",
+                    detection_source="parent_kind_name",
+                    confidence=0.8,
+                    target_kind="StorageClass",
+                    target_group="storage.k8s.io",
+                    required=False,
+                ),
+            ],
+        }
+        graph = build_dependency_graph(
+            classified_fields=classified_fields,
+            rbac_outputs={},
+            olm_owned={},
+            side_effect_dict={},
+            registry=registry,
+        )
+        ext_edges = [
+            e for e in graph.dependency_edges
+            if "StorageClass" in e.target_gk
+        ]
+        assert len(ext_edges) == 1
+        # External edge starts as soft (Step 4), stays soft through promotion
+        # (G-CRD1 blocks), but may be further demoted to optional by the
+        # cross-ecosystem filter (Step 9). Either way, it's NOT hard.
+        assert ext_edges[0].edge_type != "hard"
+
+    def test_existing_hard_edges_unchanged(self):
+        """Hard edges from structural detectors are never demoted."""
+        from idi.generation.crd.kind_registry import KindRegistry
+        from idi.generation.crd.topo_sort import build_dependency_graph
+
+        registry = KindRegistry()
+        classified_fields = {
+            ("cert-manager.io", "Certificate"): [
+                ClassifiedField(
+                    field="spec.issuerRef",
+                    role="input_ref",
+                    confidence=1.0,
+                    field_type="string",
+                    target_kind="Issuer",
+                    target_group="cert-manager.io",
+                    required=True,
+                    detection_source="structural_ref",
+                ),
+            ],
+            ("cert-manager.io", "Issuer"): [],
+        }
+        graph = build_dependency_graph(
+            classified_fields=classified_fields,
+            rbac_outputs={},
+            olm_owned={},
+            side_effect_dict={},
+            registry=registry,
+        )
+        cert_to_issuer = [
+            e for e in graph.dependency_edges
+            if e.source_gk == "cert-manager.io/Certificate"
+            and e.target_gk == "cert-manager.io/Issuer"
+        ]
+        assert len(cert_to_issuer) == 1
+        assert cert_to_issuer[0].edge_type == "hard"
+
+    def test_polymorphic_field_index(self):
+        """Multiple targets from same field path handled correctly."""
+        from idi.generation.crd.kind_registry import KindRegistry
+        from idi.generation.crd.topo_sort import build_dependency_graph
+
+        registry = KindRegistry()
+        classified_fields = {
+            ("test.io", "Source"): [
+                _make_cf(
+                    field="spec.ref.name",
+                    field_type="string",
+                    detection_source="parent_kind_name",
+                    confidence=0.8,
+                    target_kind="TargetA",
+                    target_group="test.io",
+                ),
+                _make_cf(
+                    field="spec.ref.name",
+                    field_type="string",
+                    detection_source="parent_kind_name",
+                    confidence=0.8,
+                    target_kind="TargetB",
+                    target_group="test.io",
+                ),
+            ],
+            ("test.io", "TargetA"): [],
+            ("test.io", "TargetB"): [],
+        }
+        graph = build_dependency_graph(
+            classified_fields=classified_fields,
+            rbac_outputs={},
+            olm_owned={},
+            side_effect_dict={},
+            registry=registry,
+        )
+        # Both edges should be promoted (both pass all gates)
+        source_edges = [
+            e for e in graph.dependency_edges
+            if e.source_gk == "test.io/Source"
+        ]
+        assert len(source_edges) == 2
+        assert all(e.edge_type == "hard" for e in source_edges)
