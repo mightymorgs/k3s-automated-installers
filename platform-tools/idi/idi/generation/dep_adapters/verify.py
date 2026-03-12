@@ -477,6 +477,57 @@ _GATES = [
 ]
 
 
+# ── Fan-out suppression ──────────────────────────────────────────────
+
+# Penalty multiplier for non-FK-suffixed fields in high-fan-out groups.
+_FAN_OUT_PENALTY = 0.2
+_FAN_OUT_THRESHOLD = 3
+
+
+def suppress_fan_out(deps: list[Dependency]) -> list[Dependency]:
+    """Penalize non-FK-suffixed fields in high-fan-out target groups.
+
+    When 3+ body FK edges point to the same target and strictly >50% lack
+    FK suffixes, apply a penalty to all non-FK-suffixed fields in the group.
+    FK-suffixed fields are preserved. Non-body sources are excluded.
+    """
+    from idi.generation.dep_adapters.target_inference import _has_fk_suffix
+
+    # Group body deps by target_resource.
+    body_groups: dict[str, list[int]] = {}
+    for i, dep in enumerate(deps):
+        if dep.source == "generic_odg:body":
+            body_groups.setdefault(dep.target_resource, []).append(i)
+
+    # Identify indices to penalize.
+    penalize: set[int] = set()
+    for _target, indices in body_groups.items():
+        if len(indices) < _FAN_OUT_THRESHOLD:
+            continue
+        fk_count = sum(
+            1 for i in indices if _has_fk_suffix(deps[i].field.lower())
+        )
+        non_fk_count = len(indices) - fk_count
+        if non_fk_count > fk_count:  # Strictly >50% lack FK suffix
+            for i in indices:
+                if not _has_fk_suffix(deps[i].field.lower()):
+                    penalize.add(i)
+
+    if not penalize:
+        return deps
+
+    result: list[Dependency] = []
+    for i, dep in enumerate(deps):
+        if i in penalize:
+            result.append(Dependency(
+                **{**dep.__dict__,
+                   "confidence": round(dep.confidence * _FAN_OUT_PENALTY, 3)},
+            ))
+        else:
+            result.append(dep)
+    return result
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 
@@ -506,5 +557,8 @@ def apply_gates(
                 break
         if not killed:
             survivors.append(dep)
+
+    # Batch post-processing: fan-out suppression.
+    survivors = suppress_fan_out(survivors)
 
     return survivors
