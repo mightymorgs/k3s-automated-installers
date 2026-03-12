@@ -10,6 +10,7 @@ name lists or curated verb sets.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +36,78 @@ _NON_ID_FORMATS: frozenset[str] = frozenset({
 _ID_FIELD_NAMES: frozenset[str] = frozenset({
     "id", "uuid", "slug", "key", "name", "pk", "uid", "identifier",
 })
+
+_PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
+
+
+# ── Identifier index pre-computation ─────────────────────────────────
+
+
+def build_identifier_index(
+    spec: dict[str, Any],
+    skill_paths: dict[str, dict],
+) -> dict[str, set[str]]:
+    """Build a map of resource -> set of identifier field names.
+
+    Extracts identifiers from:
+    1. Response schemas of GET/LIST operations (id, uuid, pk, key, slug,
+       name fields, and fields ending with ``_id``)
+    2. Path parameters adjacent to the resource segment
+    """
+    from idi.generation.dep_adapters.target_inference import _COMMON_FK_SUFFIXES
+
+    index: dict[str, set[str]] = {}
+
+    for sp_key, sp_val in skill_paths.items():
+        parts = sp_key.split("/")
+        if len(parts) != 3:
+            continue
+        _service, resource, op_type = parts
+
+        if resource not in index:
+            index[resource] = set()
+
+        # --- Response schema identifiers ---
+        if op_type in ("list", "retrieve"):
+            endpoint = sp_val.get("endpoint", "")
+            method = sp_val.get("method", "")
+            if endpoint and method:
+                resp_schema = _get_target_response_schema(spec, endpoint, method)
+                if resp_schema:
+                    resp_schema = _resolve_schema(spec, resp_schema)
+                    for fname, fschema in resp_schema.get("properties", {}).items():
+                        resolved = _resolve_schema(spec, fschema) if isinstance(fschema, dict) else {}
+                        fname_lower = fname.lower()
+                        is_id_name = (
+                            fname_lower in _ID_FIELD_NAMES
+                            or fname_lower.endswith("_id")
+                        )
+                        has_id_format = resolved.get("format") in ("uuid", "int64", "int32")
+                        if is_id_name or has_id_format:
+                            index[resource].add(fname_lower)
+
+        # --- Path parameter identifiers ---
+        endpoint = sp_val.get("endpoint", "")
+        if endpoint:
+            segments = endpoint.strip("/").split("/")
+            for i, seg in enumerate(segments):
+                # Check if this segment is the resource name or a variant
+                seg_lower = seg.lower().rstrip("/")
+                if seg_lower == resource or seg_lower == resource.replace("-", ""):
+                    # Next segment is the resource's path param
+                    if i + 1 < len(segments):
+                        param_match = _PATH_PARAM_RE.match(segments[i + 1])
+                        if param_match:
+                            param_name = param_match.group(1).lower()
+                            index[resource].add(param_name)
+                            # Also add stripped form
+                            for suffix in _COMMON_FK_SUFFIXES:
+                                stripped = param_name.removesuffix(suffix)
+                                if stripped != param_name and stripped:
+                                    index[resource].add(stripped)
+                                    break
+
+    return index
 
 
 # ── Field schema resolution ─────────────────────────────────────────
@@ -536,6 +609,7 @@ def apply_gates(
     operation: OperationInfo,
     spec: dict[str, Any],
     skill_paths: dict[str, dict] | None = None,
+    identifier_index: dict[str, set[str]] | None = None,
 ) -> list[Dependency]:
     """Apply all gates to a list of dependencies, returning survivors."""
     if not deps:

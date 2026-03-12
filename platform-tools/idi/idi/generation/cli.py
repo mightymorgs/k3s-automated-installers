@@ -163,6 +163,10 @@ def _generate_json_v2(
     known_resources = get_all_resource_names(ctx, include_non_post=True)
     namespace_params = detect_namespace_params(ctx.schema)
 
+    # Pre-compute identifier index for identifier reference validation.
+    from idi.generation.dep_adapters.verify import build_identifier_index
+    identifier_index = build_identifier_index(ctx.schema, ctx.generated_skill_paths)
+
     for resource, operations in resources.items():
         seen: set = set()
         v2_operations: List[Dict[str, Any]] = []
@@ -221,6 +225,7 @@ def _generate_json_v2(
             deps_detected, outputs_detected = dep_registry.detect(
                 dep_op, ctx.schema, known_resources,
                 skill_paths=ctx.generated_skill_paths,
+                identifier_index=identifier_index,
             )
 
             depends_on: List[Dict[str, Any]] = []
