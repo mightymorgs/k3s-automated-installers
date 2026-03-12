@@ -607,6 +607,9 @@ def build_gate_context(
     resource_methods: dict[str, set[str]] = defaultdict(set)
     outputs_by_resource: dict[str, dict[str, str]] = {}
 
+    # Track create endpoints for output extraction.
+    create_endpoints: dict[str, tuple[str, str]] = {}  # resource -> (endpoint_pattern, method)
+
     for skill_path, meta in generated_skill_paths.items():
         parts = skill_path.split("/")
         if len(parts) < 3:
@@ -618,6 +621,39 @@ def build_gate_context(
         resource_operations[resource].append(op_type)
         if method:
             resource_methods[resource].add(method)
+
+        # Track create endpoints for G7's outputs check.
+        if op_type == "create" and method:
+            create_endpoints[resource] = (resource, method)
+
+    # Build outputs_by_resource for G7: check create operations' response schemas.
+    for resource, (_, method) in create_endpoints.items():
+        # Search spec paths for this resource's create endpoint.
+        for spec_path, path_item in spec.get("paths", {}).items():
+            if not isinstance(path_item, dict):
+                continue
+            op = path_item.get(method.lower())
+            if op is None:
+                continue
+            # Simple heuristic: resource name appears in path segments.
+            path_segs = [s for s in spec_path.split("/") if s and not s.startswith("{")]
+            resource_clean = resource.replace("-", "").replace("_", "")
+            resource_matches = any(
+                resource_clean in seg.replace("-", "").replace("_", "")
+                for seg in path_segs
+            )
+            if not resource_matches:
+                continue
+
+            resp_schema = _get_response_schema_for_operation(spec, spec_path, method)
+            if resp_schema:
+                ids = _extract_response_identifiers(spec, resp_schema)
+                if ids:
+                    outputs_by_resource[resource] = {
+                        f"facts://{parts[0]}/{resource}#{fname}": fname
+                        for fname in ids
+                    }
+            break  # Use first matching path
 
     return GateContext(
         operation=None,  # set per-call in registry.detect()
