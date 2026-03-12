@@ -10,6 +10,7 @@ from idi.generation.dep_adapters.verify import (
     gate_g2_enum,
     gate_g3_bounded_value,
     gate_g4_non_scalar,
+    gate_g5_producer_consumer,
     gate_g6_query_filter,
 )
 
@@ -309,4 +310,148 @@ class TestGateG3BoundedValue:
 
     def test_passes_number_with_minimum_only(self):
         r = gate_g3_bounded_value(_dep(), {"type": "number", "minimum": 0}, {}, _op(), None)
+        assert r.keep is True
+
+
+# ── G5: Producer-Consumer Type Verification ────────────────────────
+
+def _g5_spec():
+    """Spec with a target resource that produces string IDs."""
+    return {
+        "paths": {
+            "/targets": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string", "format": "uuid"},
+                                            "name": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "/targets/{id}": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string", "format": "uuid"},
+                                            "name": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
+def _g5_skill_paths():
+    """skill_paths with a target resource that has list and retrieve."""
+    return {
+        "svc/target/list": {
+            "resource": "target", "operation": "list",
+            "method": "GET", "endpoint": "/targets",
+        },
+        "svc/target/retrieve": {
+            "resource": "target", "operation": "retrieve",
+            "method": "GET", "endpoint": "/targets/{id}",
+        },
+    }
+
+
+class TestGateG5ProducerConsumer:
+    def test_kills_boolean_consumer_vs_string_producer(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "boolean"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is False
+
+    def test_kills_object_consumer_vs_string_producer(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "object"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is False
+
+    def test_kills_array_consumer_vs_string_producer(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "array"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is False
+
+    def test_passes_string_consumer_vs_string_producer(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "string"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is True
+
+    def test_passes_integer_consumer_vs_string_producer(self):
+        """string and integer are interchangeable ID types."""
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "integer"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is True
+
+    def test_passes_number_consumer_vs_string_producer(self):
+        """number is interchangeable with string/integer for IDs."""
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "number"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is True
+
+    def test_passes_when_no_skill_paths(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "boolean"}, _g5_spec(), _op(), None)
+        assert r.keep is True
+
+    def test_passes_when_target_not_in_skill_paths(self):
+        dep = _dep(field="target_id", target="unknown")
+        r = gate_g5_producer_consumer(dep, {"type": "boolean"}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is True
+
+    def test_passes_when_no_consumer_type(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {}, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is True
+
+    def test_passes_when_no_schema(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, None, _g5_spec(), _op(), _g5_skill_paths())
+        assert r.keep is True
+
+    def test_passes_when_target_has_no_response_ids(self):
+        """Target endpoint exists but response has no identifier fields."""
+        spec = {
+            "paths": {
+                "/targets": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "status": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        dep = _dep(field="target_id", target="target")
+        r = gate_g5_producer_consumer(dep, {"type": "boolean"}, spec, _op(), _g5_skill_paths())
         assert r.keep is True

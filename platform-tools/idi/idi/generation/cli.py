@@ -111,6 +111,7 @@ def generate(ctx: GeneratorContext) -> Dict[str, int]:
                 "resource": resource,
                 "operation": op_type,
                 "method": op_data["op_info"]["method"],
+                "endpoint": op_data["op_info"].get("endpoint", op_data["op_info"].get("path", "")),
             }
 
     # -- Pass 2: emit JSON artefacts ---------------------------------------

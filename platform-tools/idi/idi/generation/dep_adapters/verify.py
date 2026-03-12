@@ -213,6 +213,179 @@ def gate_g3_bounded_value(
     return GateResult("G3", True, "numeric but unbounded")
 
 
+# ── Gate G5: Producer-Consumer Type Verification ─────────────────────
+
+# Types interchangeable for identifier references.
+_ID_COMPATIBLE_TYPES: frozenset[str] = frozenset({"string", "integer", "number"})
+
+
+def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
+    """Resolve a JSON Pointer $ref string to its schema dict."""
+    if not ref.startswith("#/"):
+        return {}
+    parts = ref.lstrip("#/").split("/")
+    node: Any = spec
+    for part in parts:
+        if isinstance(node, dict):
+            node = node.get(part, {})
+        else:
+            return {}
+    return node if isinstance(node, dict) else {}
+
+
+def _resolve_schema(
+    spec: dict[str, Any], schema: dict[str, Any], depth: int = 0,
+) -> dict[str, Any]:
+    """Recursively resolve $ref and allOf in a schema."""
+    if depth > 10:
+        return schema
+    if "$ref" in schema:
+        return _resolve_schema(spec, _resolve_ref(spec, schema["$ref"]), depth + 1)
+    if "allOf" in schema:
+        merged: dict[str, Any] = {}
+        for sub in schema["allOf"]:
+            resolved = _resolve_schema(spec, sub, depth + 1)
+            for k, v in resolved.items():
+                if k == "properties" and "properties" in merged:
+                    merged["properties"].update(v)
+                elif k == "required" and "required" in merged:
+                    merged["required"] = list(set(merged["required"]) | set(v))
+                else:
+                    merged[k] = v
+        return merged
+    return schema
+
+
+def _get_target_response_schema(
+    spec: dict[str, Any], endpoint: str, method: str,
+) -> dict[str, Any] | None:
+    """Look up an endpoint in the spec and extract its response schema."""
+    import re
+    paths = spec.get("paths", {})
+    method_lower = method.lower()
+
+    # Direct match, then fuzzy
+    candidates = [endpoint]
+    alt = endpoint.rstrip("/") + "/" if not endpoint.endswith("/") else endpoint.rstrip("/")
+    candidates.append(alt)
+
+    operation_obj = None
+    for candidate in candidates:
+        path_item = paths.get(candidate)
+        if path_item and method_lower in path_item:
+            operation_obj = path_item[method_lower]
+            break
+
+    if operation_obj is None:
+        # Fuzzy: normalize path params
+        norm = re.sub(r"\{[^}]+\}", "{}", endpoint)
+        for spec_path, path_item in paths.items():
+            if re.sub(r"\{[^}]+\}", "{}", spec_path) == norm and method_lower in path_item:
+                operation_obj = path_item[method_lower]
+                break
+
+    if operation_obj is None:
+        return None
+
+    # Extract response schema from 200/201/202
+    responses = operation_obj.get("responses", {})
+    is_swagger2 = spec.get("swagger", "").startswith("2")
+    for code in ("200", "201", "202"):
+        resp = responses.get(code)
+        if not resp:
+            continue
+        if is_swagger2:
+            schema = resp.get("schema", {})
+            if schema:
+                resolved = _resolve_schema(spec, schema)
+                if resolved.get("type") == "array" and "items" in resolved:
+                    return _resolve_schema(spec, resolved["items"])
+                return resolved
+        else:
+            for _ct, ct_val in resp.get("content", {}).items():
+                schema = ct_val.get("schema", {})
+                if schema:
+                    resolved = _resolve_schema(spec, schema)
+                    if resolved.get("type") == "array" and "items" in resolved:
+                        return _resolve_schema(spec, resolved["items"])
+                    props = resolved.get("properties", {})
+                    if "results" in props:
+                        results_schema = _resolve_schema(spec, props["results"])
+                        if results_schema.get("type") == "array" and "items" in results_schema:
+                            return _resolve_schema(spec, results_schema["items"])
+                    return resolved
+    return None
+
+
+def _extract_response_id_types(
+    spec: dict[str, Any], response_schema: dict[str, Any],
+) -> set[str]:
+    """Extract types of identifier fields from a response schema."""
+    types: set[str] = set()
+    props = response_schema.get("properties", {})
+    for fname, fschema in props.items():
+        resolved = _resolve_schema(spec, fschema)
+        fname_lower = fname.lower()
+        is_id_name = fname_lower in _ID_FIELD_NAMES or fname_lower.endswith("_id")
+        has_id_format = resolved.get("format") in ("uuid", "int64", "int32")
+        if is_id_name or has_id_format:
+            t = resolved.get("type", "")
+            if t:
+                types.add(t)
+    return types
+
+
+def gate_g5_producer_consumer(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    operation: OperationInfo,
+    skill_paths: dict[str, dict] | None,
+) -> GateResult:
+    """G5: Producer-Consumer Type Verification — kill on type incompatibility."""
+    if field_schema is None:
+        return GateResult("G5", True, "no schema")
+
+    consumer_type = field_schema.get("type", "")
+    if not consumer_type:
+        return GateResult("G5", True, "consumer type unknown")
+
+    if skill_paths is None:
+        return GateResult("G5", True, "no skill_paths")
+
+    # Find target resource operations
+    target_resource = dep.target_resource
+    service = operation.service
+    produced_types: set[str] = set()
+
+    for op_name in ("create", "list", "retrieve"):
+        sp_key = f"{service}/{target_resource}/{op_name}"
+        sp_val = skill_paths.get(sp_key)
+        if sp_val is None:
+            continue
+        endpoint = sp_val.get("endpoint", "")
+        method = sp_val.get("method", "")
+        if not endpoint or not method:
+            continue
+        resp_schema = _get_target_response_schema(spec, endpoint, method)
+        if resp_schema:
+            produced_types |= _extract_response_id_types(spec, resp_schema)
+
+    if not produced_types:
+        return GateResult("G5", True, "no producer ID types found")
+
+    # Direct type match
+    if consumer_type in produced_types:
+        return GateResult("G5", True, f"type match: {consumer_type}")
+
+    # ID-compatible coercion (string/integer/number are interchangeable)
+    if consumer_type in _ID_COMPATIBLE_TYPES and produced_types & _ID_COMPATIBLE_TYPES:
+        return GateResult("G5", True, f"type coercible: {consumer_type} vs {produced_types}")
+
+    return GateResult("G5", False,
+                      f"type mismatch: consumer={consumer_type}, producers={produced_types}")
+
+
 # ── Gate G6: Query Filter Quarantine ─────────────────────────────────
 
 
@@ -244,13 +417,14 @@ def gate_g6_query_filter(
 
 # ── Gate registry ────────────────────────────────────────────────────
 
-# Gates added in implementation order. G5, G7 will be added
-# in subsequent sections.
+# Gates added in implementation order. G7 will be added
+# in subsequent section.
 _GATES = [
     gate_g4_non_scalar,
     gate_g1_non_id_format,
     gate_g2_enum,
     gate_g3_bounded_value,
+    gate_g5_producer_consumer,
     gate_g6_query_filter,
 ]
 
