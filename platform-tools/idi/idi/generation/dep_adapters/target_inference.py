@@ -59,6 +59,10 @@ _QUALIFIABLE_TOKENS: frozenset[str] = frozenset({
     "id", "ids", "pk", "uuid", "name", "key", "ref", "slug",
 })
 
+# Match-margin ambiguity suppression constants.
+_MARGIN_THRESHOLD = 0.10
+_AMBIGUITY_PENALTY = 0.15
+
 _NEVER_FK_FIELDS: frozenset[str] = frozenset({
     "name", "slug", "url", "path", "type", "kind", "mode", "format",
     "description", "summary", "title", "label", "comment",
@@ -109,22 +113,48 @@ def infer_target(
     # Freeze for hashing in lru_cache.
     frozen_resources = _freeze(known_resources)
 
-    # Generate all candidate names with base confidence.
-    candidates = _build_candidates(field_name, container)
+    # Generate candidates: field-derived and container-derived separately.
+    field_candidates = _build_candidates(field_name, None)
+    all_candidates = _build_candidates(field_name, container)
 
-    # Try ALL candidates and keep the best match.
-    best: tuple[str | None, float] = (None, 0.0)
-    for candidate, base_confidence in candidates:
+    # Score all candidates grouped by resource.
+    resource_scores: dict[str, float] = {}
+    for candidate, base_confidence in all_candidates:
         match = _match_resource(candidate, frozen_resources)
         if match is not None:
             resource, match_confidence = match
             confidence = base_confidence * match_confidence * type_factor
-            if confidence > best[1]:
-                best = (resource, confidence)
-    if best[0] is not None:
-        return best[0], round(best[1], 3)
+            if resource not in resource_scores or confidence > resource_scores[resource]:
+                resource_scores[resource] = confidence
 
-    return None, 0.0
+    if not resource_scores:
+        return None, 0.0
+
+    # Sort by score descending to get top-2 distinct resources.
+    sorted_resources = sorted(resource_scores.items(), key=lambda x: -x[1])
+    top1_resource, top1_score = sorted_resources[0]
+
+    # Match-margin ambiguity suppression: if top-2 distinct resources from
+    # field-derived candidates are within _MARGIN_THRESHOLD, apply a flat
+    # confidence penalty. Container-derived candidates are excluded from
+    # margin calculation to avoid penalizing fields whose parent resource
+    # name happens to match a different resource.
+    if len(sorted_resources) >= 2:
+        field_scores: dict[str, float] = {}
+        for candidate, base_confidence in field_candidates:
+            match = _match_resource(candidate, frozen_resources)
+            if match is not None:
+                resource, match_confidence = match
+                confidence = base_confidence * match_confidence * type_factor
+                if resource not in field_scores or confidence > field_scores[resource]:
+                    field_scores[resource] = confidence
+        sorted_field = sorted(field_scores.items(), key=lambda x: -x[1])
+        if len(sorted_field) >= 2:
+            margin = sorted_field[0][1] - sorted_field[1][1]
+            if margin < _MARGIN_THRESHOLD:
+                top1_score = max(0.0, top1_score - _AMBIGUITY_PENALTY)
+
+    return top1_resource, round(top1_score, 3)
 
 
 def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
