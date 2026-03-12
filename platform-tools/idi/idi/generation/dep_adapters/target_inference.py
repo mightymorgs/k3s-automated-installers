@@ -26,6 +26,7 @@ from idi.generation.dep_adapters.naming import (
     singularize,
     split_words,
     stem,
+    stem_token,
 )
 from idi.generation.resource_namer import strip_api_version_prefix
 
@@ -62,6 +63,10 @@ _QUALIFIABLE_TOKENS: frozenset[str] = frozenset({
 # Match-margin ambiguity suppression constants.
 _MARGIN_THRESHOLD = 0.10
 _AMBIGUITY_PENALTY = 0.15
+
+# Lexical cohesion penalty: applied to container-derived matches where
+# the field name shares zero stemmed word tokens with the target resource.
+_LEXICAL_COHESION_PENALTY = 0.15
 
 _NEVER_FK_FIELDS: frozenset[str] = frozenset({
     "name", "slug", "url", "path", "type", "kind", "mode", "format",
@@ -158,6 +163,15 @@ def infer_target(
             margin = sorted_field[0][1] - sorted_field[1][1]
             if margin < _MARGIN_THRESHOLD:
                 top1_score = max(0.0, top1_score - _AMBIGUITY_PENALTY)
+
+    # Lexical cohesion penalty: container-derived matches with zero
+    # field↔target token overlap are almost always false positives
+    # (config values sitting on a sub-resource endpoint).
+    if top1_origin == "container":
+        field_tokens = {stem_token(w.lower()) for w in split_words(field_name)}
+        target_tokens = {stem_token(w.lower()) for w in split_words(top1_resource)}
+        if field_tokens and target_tokens and not (field_tokens & target_tokens):
+            top1_score *= _LEXICAL_COHESION_PENALTY
 
     return top1_resource, round(top1_score, 3)
 
