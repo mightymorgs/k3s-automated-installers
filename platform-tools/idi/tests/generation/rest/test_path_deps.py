@@ -26,9 +26,9 @@ class TestMatchSegmentNormalization:
         assert _match_segment("nonexistent_resource", {"something-else"}) is None
 
 
-def _op(path: str, service: str = "test-svc") -> OperationInfo:
+def _op(path: str, service: str = "test-svc", resource: str = "test") -> OperationInfo:
     return OperationInfo(
-        service=service, resource="test", operation="get_test",
+        service=service, resource=resource, operation="get_test",
         path=path, method="GET", body_schema={}, response_schema={},
     )
 
@@ -114,3 +114,90 @@ class TestNearestAncestor:
         for param in ("orgId", "repoId", "issueId"):
             param_deps = [d for d in deps if d.field == param]
             assert len(param_deps) == 1, f"{param} should have exactly 1 dep"
+
+
+class TestSelfResourcePreference:
+    """Prefer self/parent resource when multiple suffix matches exist."""
+
+    def test_self_resource_over_unrelated_suffix(self):
+        """'ldap' should match propertymappings-source-ldap (self), not sources-ldap."""
+        deps = detect_path_deps(
+            _op(
+                "/propertymappings/source/ldap/{pm_uuid}",
+                resource="propertymappings-source-ldap",
+            ),
+            known_resources={"sources-ldap", "propertymappings-source-ldap"},
+        )
+        pm_deps = [d for d in deps if d.field == "pm_uuid"]
+        assert len(pm_deps) == 1
+        assert pm_deps[0].target_resource == "propertymappings-source-ldap"
+
+    def test_self_resource_hooks_ambiguity(self):
+        """'hooks' should match orgs-hooks (self), not user-hooks."""
+        deps = detect_path_deps(
+            _op("/orgs/{org}/hooks/{id}", resource="orgs-hooks"),
+            known_resources={"orgs", "user-hooks", "orgs-hooks"},
+        )
+        id_deps = [d for d in deps if d.field == "id"]
+        assert len(id_deps) == 1
+        assert id_deps[0].target_resource == "orgs-hooks"
+
+    def test_self_resource_endpoints_ambiguity(self):
+        """'endpoints' should match stages-endpoints (self), not rac-endpoints."""
+        deps = detect_path_deps(
+            _op("/stages/endpoints/{stage_uuid}", resource="stages-endpoints"),
+            known_resources={"stages", "rac-endpoints", "stages-endpoints"},
+        )
+        stage_deps = [d for d in deps if d.field == "stage_uuid"]
+        assert len(stage_deps) == 1
+        assert stage_deps[0].target_resource == "stages-endpoints"
+
+    def test_parent_resource_over_unrelated_suffix(self):
+        """'policies' should match projects-preheat-policies (parent of self),
+        not replication-policies."""
+        deps = detect_path_deps(
+            _op(
+                "/projects/{project_name}/preheat/policies/{policy_name}/executions",
+                resource="projects-preheat-policies-executions",
+            ),
+            known_resources={
+                "projects", "replication-policies",
+                "projects-preheat-policies", "projects-preheat-policies-executions",
+            },
+        )
+        policy_deps = [d for d in deps if d.field == "policy_name"]
+        assert len(policy_deps) == 1
+        assert policy_deps[0].target_resource == "projects-preheat-policies"
+
+    def test_no_self_resource_falls_back_to_shortest(self):
+        """Without self_resource hint, shortest suffix match wins (existing behavior)."""
+        result = _match_segment("hooks", {"user-hooks", "orgs-hooks"})
+        # No self_resource → picks shortest (or arbitrary same-length)
+        assert result in {"user-hooks", "orgs-hooks"}
+
+    def test_exact_match_unaffected(self):
+        """Exact matches still take priority over suffix matching."""
+        result = _match_segment("clients", {"clients", "users-role-mappings-clients"},
+                                self_resource="users-role-mappings-clients")
+        assert result == "clients"
+
+    def test_single_suffix_match_unaffected(self):
+        """Single suffix match doesn't need disambiguation."""
+        result = _match_segment("ldap", {"sources-ldap"}, self_resource="other-thing")
+        assert result == "sources-ldap"
+
+    def test_vault_okta_ambiguity(self):
+        """'okta' should match identity-mfa-method-okta (self),
+        not sys-mfa-method-okta."""
+        deps = detect_path_deps(
+            _op(
+                "/identity/mfa/method/okta/{method_id}",
+                resource="identity-mfa-method-okta",
+            ),
+            known_resources={
+                "identity", "sys-mfa-method-okta", "identity-mfa-method-okta",
+            },
+        )
+        method_deps = [d for d in deps if d.field == "method_id"]
+        assert len(method_deps) == 1
+        assert method_deps[0].target_resource == "identity-mfa-method-okta"

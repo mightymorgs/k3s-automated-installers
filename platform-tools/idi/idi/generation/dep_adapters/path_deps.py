@@ -81,11 +81,37 @@ def detect_namespace_params(spec: dict) -> frozenset[str]:
     return frozenset(result)
 
 
-def _match_segment(candidate: str, known_resources: set[str]) -> str | None:
+def _pick_best_suffix(
+    suffix_matches: list[str],
+    self_resource: str | None,
+) -> str:
+    """Choose the best match from multiple suffix matches.
+
+    Prefers: self-resource > parent of self-resource > shortest name.
+    """
+    if self_resource:
+        # Exact self-resource match.
+        if self_resource in suffix_matches:
+            return self_resource
+        # Parent of self-resource (most specific prefix).
+        parents = [r for r in suffix_matches if self_resource.startswith(r + "-")]
+        if parents:
+            return max(parents, key=len)
+    return min(suffix_matches, key=len)
+
+
+def _match_segment(
+    candidate: str,
+    known_resources: set[str],
+    self_resource: str | None = None,
+) -> str | None:
     """Match a path segment against known resources with fuzzy fallbacks.
 
     Tries exact match, then suffix containment (e.g., "series" matches
     "api-v3-series"), then singular/plural variants.
+
+    When multiple suffix matches exist, prefers the operation's own resource
+    or a parent of it over an unrelated resource with the same suffix.
     """
     candidate = candidate.replace("_", "-")  # Normalize to match resource names
     if candidate in known_resources:
@@ -96,7 +122,7 @@ def _match_segment(candidate: str, known_resources: set[str]) -> str | None:
     if len(suffix_matches) == 1:
         return suffix_matches[0]
     if suffix_matches:
-        return min(suffix_matches, key=len)
+        return _pick_best_suffix(suffix_matches, self_resource)
 
     # Singular/plural: "client" matches "clients" and vice versa
     singular = singularize(candidate)
@@ -111,8 +137,10 @@ def _match_segment(candidate: str, known_resources: set[str]) -> str | None:
         if variant == candidate:
             continue
         suffix_matches = [r for r in known_resources if r.endswith("-" + variant)]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
         if suffix_matches:
-            return min(suffix_matches, key=len)
+            return _pick_best_suffix(suffix_matches, self_resource)
 
     return None
 
@@ -189,7 +217,7 @@ def detect_path_deps(
             if _SKIP_SEGMENTS.match(candidate):
                 continue
 
-            resource = _match_segment(candidate, known_resources)
+            resource = _match_segment(candidate, known_resources, operation.resource)
             if resource is not None:
                 nearest_resource = resource
                 break
