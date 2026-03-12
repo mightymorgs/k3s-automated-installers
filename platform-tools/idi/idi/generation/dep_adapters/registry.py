@@ -12,7 +12,6 @@ from idi.generation.dep_adapters.base import (
     OperationInfo,
     Output,
 )
-from idi.generation.dep_adapters.gates import GateContext, apply_gates
 from idi.generation.dep_adapters.merge import filter_by_confidence, filter_self_refs, merge_deps, merge_outputs
 
 logger = logging.getLogger(__name__)
@@ -81,7 +80,6 @@ class DepAdapterRegistry:
 
     def detect(
         self, operation: OperationInfo, spec: dict, known_resources: set[str],
-        gate_context: GateContext | None = None,
     ) -> tuple[list[Dependency], list[Output]]:
         adapters = self.get_adapters_for(spec, operation.service)
         all_deps: list[Dependency] = []
@@ -98,10 +96,6 @@ class DepAdapterRegistry:
         deps = merge_deps(all_deps)
         deps = filter_self_refs(deps, operation.resource, operation.method)
         deps = filter_by_confidence(deps)
-        # Apply programmatic gates (spec-derived FP filters).
-        if gate_context is not None:
-            gate_context.operation = operation
-            deps, _gate_stats = apply_gates(deps, operation, spec, gate_context)
         # Suppress body/operationid deps whose target is already covered by a
         # path dep. Path skeleton is authoritative; weaker sources are fenced.
         _FENCED_SOURCES = {"generic_odg:body", "generic_odg:operationid"}

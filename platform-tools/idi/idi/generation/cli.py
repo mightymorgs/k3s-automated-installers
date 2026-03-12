@@ -162,9 +162,6 @@ def _generate_json_v2(
     known_resources = get_all_resource_names(ctx, include_non_post=True)
     namespace_params = detect_namespace_params(ctx.schema)
 
-    from idi.generation.dep_adapters.gates import build_gate_context
-    gate_ctx = build_gate_context(ctx.schema, ctx.generated_skill_paths, known_resources)
-
     for resource, operations in resources.items():
         seen: set = set()
         v2_operations: List[Dict[str, Any]] = []
@@ -222,7 +219,6 @@ def _generate_json_v2(
 
             deps_detected, outputs_detected = dep_registry.detect(
                 dep_op, ctx.schema, known_resources,
-                gate_context=gate_ctx,
             )
 
             depends_on: List[Dict[str, Any]] = []
@@ -242,8 +238,6 @@ def _generate_json_v2(
                     "fact_ref": d.fact_ref,
                     "lineage_type": d.lineage_type,
                     "discriminator_value": d.discriminator_value,
-                    "detection_source": d.detection_source.value if hasattr(d.detection_source, "value") else str(d.detection_source),
-                    "confidence": d.confidence,
                 })
 
             # Build field_refs_map and all_field_refs from validated deps only.
