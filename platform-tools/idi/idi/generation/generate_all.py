@@ -499,7 +499,13 @@ def cli(argv: Optional[List[str]] = None) -> int:
         return 1
 
     specs_dir = Path(args.specs_dir) if args.specs_dir else manifest_path.parent
-    output_base = Path(args.output_base)
+    # Output paths in the manifest (e.g. "catalog/skills/openapi/vault/") are
+    # relative to the repo root.  Default output_base to the manifest's parent
+    # directory so that generation works regardless of CWD.
+    if args.output_base == ".":
+        output_base = manifest_path.parent.resolve()
+    else:
+        output_base = Path(args.output_base)
 
     if args.list_mode:
         services = list_services(manifest, specs_dir)
