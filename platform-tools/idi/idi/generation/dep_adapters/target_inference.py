@@ -117,22 +117,27 @@ def infer_target(
     field_candidates = _build_candidates(field_name, None)
     all_candidates = _build_candidates(field_name, container)
 
-    # Score all candidates grouped by resource.
-    resource_scores: dict[str, float] = {}
-    for candidate, base_confidence in all_candidates:
+    # Score all candidates grouped by resource, tracking origin.
+    # Value: (confidence, origin) — 'field' origin wins ties over 'container'.
+    resource_scores: dict[str, tuple[float, str]] = {}
+    for candidate, base_confidence, origin in all_candidates:
         match = _match_resource(candidate, frozen_resources)
         if match is not None:
             resource, match_confidence = match
             confidence = base_confidence * match_confidence * type_factor
-            if resource not in resource_scores or confidence > resource_scores[resource]:
-                resource_scores[resource] = confidence
+            current = resource_scores.get(resource)
+            if current is None or confidence > current[0]:
+                resource_scores[resource] = (confidence, origin)
+            elif confidence == current[0] and origin == "field":
+                # Field origin takes precedence on ties
+                resource_scores[resource] = (confidence, origin)
 
     if not resource_scores:
         return None, 0.0
 
     # Sort by score descending to get top-2 distinct resources.
-    sorted_resources = sorted(resource_scores.items(), key=lambda x: -x[1])
-    top1_resource, top1_score = sorted_resources[0]
+    sorted_resources = sorted(resource_scores.items(), key=lambda x: -x[1][0])
+    top1_resource, (top1_score, top1_origin) = sorted_resources[0]
 
     # Match-margin ambiguity suppression: if top-2 distinct resources from
     # field-derived candidates are within _MARGIN_THRESHOLD, apply a flat
@@ -141,7 +146,7 @@ def infer_target(
     # name happens to match a different resource.
     if len(sorted_resources) >= 2:
         field_scores: dict[str, float] = {}
-        for candidate, base_confidence in field_candidates:
+        for candidate, base_confidence, _origin in field_candidates:
             match = _match_resource(candidate, frozen_resources)
             if match is not None:
                 resource, match_confidence = match
@@ -230,13 +235,17 @@ def _has_fk_suffix(fn_lower: str) -> bool:
 def _build_candidates(
     field_name: str,
     container: str | None,
-) -> list[tuple[str, float]]:
-    """Generate candidate resource names with base confidence.
+) -> list[tuple[str, float, str]]:
+    """Generate candidate resource names with base confidence and origin.
 
     RESTler two-name search: ProducerParameterName (last word) and
     ResourceName (full name minus last word).
+
+    Returns list of ``(candidate_name, base_confidence, origin)`` where
+    origin is ``'field'`` for field-name-derived candidates or
+    ``'container'`` for container/path-derived candidates.
     """
-    candidates: list[tuple[str, float]] = []
+    candidates: list[tuple[str, float, str]] = []
     words = split_words(field_name)
 
     if not words:
@@ -247,24 +256,24 @@ def _build_candidates(
     # Low confidence — just the suffix.
     producer_param = words[-1].lower()
     if len(words) > 1:
-        candidates.append((producer_param, 0.3))
+        candidates.append((producer_param, 0.3, "field"))
 
     # --- RESTler ResourceName: full name minus last word ---
     # accountId → "account", credential_type_id → "credential__type"
     if len(words) > 1:
         resource_name = "__".join(w.lower() for w in words[:-1])
-        candidates.append((resource_name, 0.6))
+        candidates.append((resource_name, 0.6, "field"))
 
     # --- Full normalized name ---
     full_normalized = normalize(field_name)
-    candidates.append((full_normalized, 0.7))
+    candidates.append((full_normalized, 0.7, "field"))
 
     # --- FK suffix stripping ---
     fn_lower = field_name.lower()
     for suffix in _COMMON_FK_SUFFIXES:
         stripped = fn_lower.removesuffix(suffix)
         if stripped != fn_lower and stripped:
-            candidates.append((normalize(stripped), 0.5))
+            candidates.append((normalize(stripped), 0.5, "field"))
 
     # --- ID synonym normalization (#8) ---
     # Normalize _uuid/_guid/_uid to _id for cross-convention matching.
@@ -275,18 +284,20 @@ def _build_candidates(
         for suffix in _COMMON_FK_SUFFIXES:
             stripped = norm_lower.removesuffix(suffix)
             if stripped != norm_lower and stripped:
-                candidates.append((normalize(stripped), 0.48))  # Slight penalty for synonym
+                candidates.append((normalize(stripped), 0.48, "field"))
 
     # --- RestTestGen name qualification ---
     # If the field name is a bare qualifiable token (id, name, key, etc.),
     # prepend the container to form a qualified candidate.
     # E.g., container="subnet", field="id" → candidate "subnet__id" → "subnet"
+    # Origin is 'field' because this qualifies the field by its context,
+    # rather than generating a container-derived candidate.
     if container and full_normalized in _QUALIFIABLE_TOKENS:
         qualified = normalize(container) + "__" + full_normalized
-        candidates.append((qualified, 0.5))
+        candidates.append((qualified, 0.5, "field"))
         # Also add just the container name (since "subnet.id" means the
         # FK points to "subnets").
-        candidates.append((normalize(container), 0.6))
+        candidates.append((normalize(container), 0.6, "field"))
 
     # --- Container-based candidate type names (for nested fields) ---
     if container:
@@ -295,11 +306,11 @@ def _build_candidates(
         # All suffix subsequences (RESTler getCandidateTypeNames).
         for i in range(len(container_words)):
             type_name = "__".join(w.lower() for w in container_words[i:])
-            candidates.append((type_name, max(0.3, 0.6 - i * 0.1)))
+            candidates.append((type_name, max(0.3, 0.6 - i * 0.1), "container"))
         # Remove-last + singularize variant (for 3+ word containers).
         if len(container_words) > 2:
             remove_suffix = "__".join(w.lower() for w in container_words[:-1])
-            candidates.append((singularize(remove_suffix), 0.4))
+            candidates.append((singularize(remove_suffix), 0.4, "container"))
 
     return candidates
 
