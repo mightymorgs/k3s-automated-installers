@@ -12,6 +12,7 @@ from idi.generation.dep_adapters.verify import (
     gate_g4_non_scalar,
     gate_g5_producer_consumer,
     gate_g6_query_filter,
+    gate_g7_crud_signature,
 )
 
 
@@ -455,3 +456,143 @@ class TestGateG5ProducerConsumer:
         dep = _dep(field="target_id", target="target")
         r = gate_g5_producer_consumer(dep, {"type": "boolean"}, spec, _op(), _g5_skill_paths())
         assert r.keep is True
+
+
+# ── G7: CRUD Signature Gate ────────────────────────────────────────
+
+class TestGateG7CrudSignature:
+    def test_passes_when_target_has_list(self):
+        sp = {
+            "svc/target/list": {"resource": "target", "operation": "list",
+                                "method": "GET", "endpoint": "/targets"},
+            "svc/target/create": {"resource": "target", "operation": "create",
+                                  "method": "POST", "endpoint": "/targets"},
+        }
+        dep = _dep(field="target_id", target="target")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, {}, _op(), sp)
+        assert r.keep is True
+
+    def test_passes_when_target_has_retrieve(self):
+        sp = {
+            "svc/target/retrieve": {"resource": "target", "operation": "retrieve",
+                                    "method": "GET", "endpoint": "/targets/{id}"},
+        }
+        dep = _dep(field="target_id", target="target")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, {}, _op(), sp)
+        assert r.keep is True
+
+    def test_passes_when_target_has_get_method(self):
+        sp = {
+            "svc/target/status": {"resource": "target", "operation": "status",
+                                  "method": "GET", "endpoint": "/targets/status"},
+        }
+        dep = _dep(field="target_id", target="target")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, {}, _op(), sp)
+        assert r.keep is True
+
+    def test_kills_post_only_with_no_response_ids(self):
+        sp = {
+            "svc/destroy/create": {"resource": "destroy", "operation": "create",
+                                   "method": "POST", "endpoint": "/secret/destroy/{path}"},
+        }
+        spec = {
+            "paths": {
+                "/secret/destroy/{path}": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "status": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        dep = _dep(field="path", target="destroy")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, spec, _op(), sp)
+        assert r.keep is False
+
+    def test_passes_post_only_with_response_ids(self):
+        """POST-only but produces identifiers — real resource like dashboards/import."""
+        sp = {
+            "svc/dashboard/create": {"resource": "dashboard", "operation": "create",
+                                     "method": "POST", "endpoint": "/dashboards"},
+        }
+        spec = {
+            "paths": {
+                "/dashboards": {
+                    "post": {
+                        "responses": {
+                            "201": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "title": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        dep = _dep(field="dashboard_id", target="dashboard")
+        r = gate_g7_crud_signature(dep, {"type": "integer"}, spec, _op(), sp)
+        assert r.keep is True
+
+    def test_passes_when_no_skill_paths(self):
+        dep = _dep(field="target_id", target="target")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, {}, _op(), None)
+        assert r.keep is True
+
+    def test_passes_when_target_not_in_skill_paths(self):
+        dep = _dep(field="target_id", target="unknown")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, {}, _op(), {})
+        assert r.keep is True
+
+    def test_kills_rpc_verb_sign(self):
+        """RPC verb like /pki/sign/{role} — POST-only, no identifiers."""
+        sp = {
+            "svc/sign/create": {"resource": "sign", "operation": "create",
+                                "method": "POST", "endpoint": "/pki/sign/{role}"},
+        }
+        spec = {
+            "paths": {
+                "/pki/sign/{role}": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "certificate": {"type": "string"},
+                                                "serial_number": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        dep = _dep(field="role", target="sign")
+        r = gate_g7_crud_signature(dep, {"type": "string"}, spec, _op(), sp)
+        assert r.keep is False

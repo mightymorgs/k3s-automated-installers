@@ -415,10 +415,57 @@ def gate_g6_query_filter(
     return GateResult("G6", True, "param not found in query_params")
 
 
+# ── Gate G7: CRUD Signature Gate ─────────────────────────────────────
+
+
+def gate_g7_crud_signature(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    operation: OperationInfo,
+    skill_paths: dict[str, dict] | None,
+) -> GateResult:
+    """G7: CRUD Signature Gate — kill edges to POST-only targets with no outputs."""
+    if skill_paths is None:
+        return GateResult("G7", True, "no skill_paths")
+
+    target_resource = dep.target_resource
+    service = dep.target_service or operation.service
+    prefix = f"{service}/{target_resource}/"
+
+    # Find all operations for the target resource
+    target_ops = {k: v for k, v in skill_paths.items() if k.startswith(prefix)}
+    if not target_ops:
+        return GateResult("G7", True, "target not in skill_paths")
+
+    # Check for list/retrieve/any GET
+    if f"{prefix}list" in target_ops:
+        return GateResult("G7", True, "target has list")
+    if f"{prefix}retrieve" in target_ops:
+        return GateResult("G7", True, "target has retrieve")
+    for _key, val in target_ops.items():
+        if val.get("method", "").upper() == "GET":
+            return GateResult("G7", True, "target has GET operation")
+
+    # POST-only target — check if create produces identifiers
+    create_key = f"{prefix}create"
+    create_val = target_ops.get(create_key)
+    if create_val:
+        endpoint = create_val.get("endpoint", "")
+        method = create_val.get("method", "")
+        if endpoint and method:
+            resp_schema = _get_target_response_schema(spec, endpoint, method)
+            if resp_schema:
+                id_types = _extract_response_id_types(spec, resp_schema)
+                if id_types:
+                    return GateResult("G7", True, "POST-only but produces IDs")
+
+    ops_list = [k.split("/")[-1] for k in target_ops]
+    return GateResult("G7", False, f"POST-only, no IDs: {ops_list}")
+
+
 # ── Gate registry ────────────────────────────────────────────────────
 
-# Gates added in implementation order. G7 will be added
-# in subsequent section.
 _GATES = [
     gate_g4_non_scalar,
     gate_g1_non_id_format,
@@ -426,6 +473,7 @@ _GATES = [
     gate_g3_bounded_value,
     gate_g5_producer_consumer,
     gate_g6_query_filter,
+    gate_g7_crud_signature,
 ]
 
 
