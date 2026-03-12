@@ -25,3 +25,28 @@ class CrdGateResult:
     gate: str   # "G-CRD1", "G-CRD2", etc.
     keep: bool  # True = passes gate (eligible for promotion)
     reason: str  # Human-readable explanation
+
+
+# ── Gate G-CRD1: Intra-Service Scope ────────────────────────
+
+
+def gate_crd1_intra_service(
+    edge: DependencyEdge,
+    source_cf: ClassifiedField,
+    graph: DependencyGraph,
+) -> CrdGateResult:
+    """G-CRD1: Only promote edges where source and target are same service."""
+    src_node = graph.nodes.get(edge.source_gk)
+    tgt_node = graph.nodes.get(edge.target_gk)
+    if src_node is None or tgt_node is None:
+        return CrdGateResult("G-CRD1", False, "node not found")
+    if tgt_node.is_external:
+        return CrdGateResult("G-CRD1", False, "target is external")
+    if not src_node.service or not tgt_node.service:
+        return CrdGateResult("G-CRD1", False, "missing service")
+    if src_node.service != tgt_node.service:
+        return CrdGateResult(
+            "G-CRD1", False,
+            f"cross-service: {src_node.service} -> {tgt_node.service}",
+        )
+    return CrdGateResult("G-CRD1", True, "same service")

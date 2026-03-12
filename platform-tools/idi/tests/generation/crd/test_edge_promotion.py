@@ -1,7 +1,10 @@
 """Tests for CRD edge promotion gates."""
 from __future__ import annotations
 
-from idi.generation.crd.edge_promotion import CrdGateResult
+from idi.generation.crd.edge_promotion import (
+    CrdGateResult,
+    gate_crd1_intra_service,
+)
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.topo_sort import (
     DependencyEdge,
@@ -108,4 +111,51 @@ class TestCrdGateResult:
 
     def test_failing_gate(self):
         r = CrdGateResult(gate="G-CRD1", keep=False, reason="target is external")
+        assert r.keep is False
+
+
+# ── G-CRD1 tests ────────────────────────────────────────────
+
+
+class TestGateCrd1:
+    """Tests for G-CRD1: Intra-Service Scope gate."""
+
+    def test_same_service_passes(self):
+        edge = _make_edge(source_gk="postgresql.cnpg.io/Backup", target_gk="postgresql.cnpg.io/Cluster")
+        graph = _make_graph()
+        r = gate_crd1_intra_service(edge, _make_cf(), graph)
+        assert r.keep is True
+
+    def test_cross_service_fails(self):
+        edge = _make_edge(source_gk="postgresql.cnpg.io/Backup", target_gk="traefik.io/IngressRoute")
+        graph = _make_graph()
+        r = gate_crd1_intra_service(edge, _make_cf(), graph)
+        assert r.keep is False
+        assert "cross-service" in r.reason
+
+    def test_external_target_fails(self):
+        edge = _make_edge(source_gk="postgresql.cnpg.io/Backup", target_gk="/StorageClass")
+        graph = _make_graph()
+        r = gate_crd1_intra_service(edge, _make_cf(), graph)
+        assert r.keep is False
+        assert "external" in r.reason
+
+    def test_source_node_not_found_fails(self):
+        edge = _make_edge(source_gk="unknown.io/Missing", target_gk="postgresql.cnpg.io/Cluster")
+        graph = _make_graph()
+        r = gate_crd1_intra_service(edge, _make_cf(), graph)
+        assert r.keep is False
+
+    def test_target_node_not_found_fails(self):
+        edge = _make_edge(source_gk="postgresql.cnpg.io/Backup", target_gk="unknown.io/Missing")
+        graph = _make_graph()
+        r = gate_crd1_intra_service(edge, _make_cf(), graph)
+        assert r.keep is False
+
+    def test_empty_service_fails(self):
+        graph = _make_graph(extra_nodes={
+            "test.io/EmptySvc": KindNode(kind="EmptySvc", group="test.io", service=""),
+        })
+        edge = _make_edge(source_gk="test.io/EmptySvc", target_gk="postgresql.cnpg.io/Cluster")
+        r = gate_crd1_intra_service(edge, _make_cf(), graph)
         assert r.keep is False
