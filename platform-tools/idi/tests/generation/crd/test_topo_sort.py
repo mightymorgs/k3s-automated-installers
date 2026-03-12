@@ -17,7 +17,9 @@ from idi.generation.crd.topo_sort import (
     KindNode,
     ProductionEdge,
     SortTier,
+    _HARD_EDGE_SOURCES,
     _cli_main,
+    _is_hard_eligible,
     _load_catalog_for_sort,
     _load_olm_owned,
     _sanitize_path_segment,
@@ -2030,3 +2032,405 @@ class TestIntegration:
         raw = global_path.read_text()
         expected = json.dumps(global_data, indent=2, sort_keys=True) + "\n"
         assert raw == expected, "global-ordering.json is not canonical JSON"
+
+
+# ---------------------------------------------------------------------------
+# Section 03: ALM label integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestAlmLabelHardEdgeSources:
+    """Test that alm_label is recognized as a hard edge source."""
+
+    def test_alm_label_in_hard_edge_sources(self):
+        assert "alm_label" in _HARD_EDGE_SOURCES
+
+    def test_is_hard_eligible_alm_label(self):
+        assert _is_hard_eligible("olm_deps:alm_label") is True
+
+    def test_is_hard_eligible_colon_prefix_extraction(self):
+        """_is_hard_eligible extracts suffix after last colon."""
+        assert _is_hard_eligible("olm_deps:alm_label") is True
+        assert _is_hard_eligible("alm_label") is True
+
+
+class TestBuildDependencyGraphAlmEdges:
+    """Test build_dependency_graph with alm_edges parameter."""
+
+    @staticmethod
+    def _strimzi_inputs():
+        """Build minimal classified_fields + registry for Strimzi-like setup."""
+        reg = KindRegistry()
+        reg.register("Kafka", "kafkas", "kafka.strimzi.io", service="strimzi")
+        reg.register("KafkaTopic", "kafkatopics", "kafka.strimzi.io", service="strimzi")
+
+        classified_fields = {
+            ("kafka.strimzi.io", "Kafka"): [],
+            ("kafka.strimzi.io", "KafkaTopic"): [],
+        }
+        olm_owned = {
+            "strimzi": [
+                GVKRef(kind="Kafka", group="kafka.strimzi.io", version="v1beta2", plural="kafkas"),
+                GVKRef(kind="KafkaTopic", group="kafka.strimzi.io", version="v1beta2", plural="kafkatopics"),
+            ],
+        }
+        return classified_fields, olm_owned, reg
+
+    def test_alm_edges_none_unchanged(self):
+        cf, olm, reg = self._strimzi_inputs()
+        g = build_dependency_graph(cf, {}, olm, {}, reg, alm_edges=None)
+        assert g.dependency_edges == []
+
+    def test_alm_edges_empty_unchanged(self):
+        cf, olm, reg = self._strimzi_inputs()
+        g = build_dependency_graph(cf, {}, olm, {}, reg, alm_edges=[])
+        assert g.dependency_edges == []
+
+    def test_alm_edge_appears_in_graph(self):
+        cf, olm, reg = self._strimzi_inputs()
+        edge = DependencyEdge(
+            source_gk="kafka.strimzi.io/KafkaTopic",
+            target_gk="kafka.strimzi.io/Kafka",
+            edge_type="hard",
+            source_field="metadata.labels[strimzi.io/cluster]",
+            detection_source="olm_deps:alm_label",
+            confidence=0.90,
+        )
+        g = build_dependency_graph(cf, {}, olm, {}, reg, alm_edges=[edge])
+        assert len(g.dependency_edges) == 1
+        assert g.dependency_edges[0].source_gk == "kafka.strimzi.io/KafkaTopic"
+        assert g.dependency_edges[0].target_gk == "kafka.strimzi.io/Kafka"
+
+    def test_alm_edge_dedup_with_structural(self):
+        """ALM + structural edge to same pair → dedup selects highest priority."""
+        cf, olm, reg = self._strimzi_inputs()
+        # Simulate a structural hard edge already in classified_fields
+        from idi.generation.crd.field_classifier import ClassifiedField
+        cf[("kafka.strimzi.io", "KafkaTopic")] = [
+            ClassifiedField(
+                field="spec.clusterRef",
+                role="input_ref",
+                target_kind="Kafka",
+                target_group="kafka.strimzi.io",
+                confidence=0.85,
+                field_type="string",
+                required=True,
+                detection_source="ref_detector:structural_ref",
+            ),
+        ]
+        alm_edge = DependencyEdge(
+            source_gk="kafka.strimzi.io/KafkaTopic",
+            target_gk="kafka.strimzi.io/Kafka",
+            edge_type="hard",
+            source_field="metadata.labels[strimzi.io/cluster]",
+            detection_source="olm_deps:alm_label",
+            confidence=0.90,
+        )
+        g = build_dependency_graph(cf, {}, olm, {}, reg, alm_edges=[alm_edge])
+        # Dedup should merge to one edge with merged detection sources
+        topic_to_kafka = [
+            e for e in g.dependency_edges
+            if e.source_gk == "kafka.strimzi.io/KafkaTopic"
+            and e.target_gk == "kafka.strimzi.io/Kafka"
+        ]
+        assert len(topic_to_kafka) == 1
+        assert "olm_deps:alm_label" in topic_to_kafka[0].detection_source
+        assert "ref_detector:structural_ref" in topic_to_kafka[0].detection_source
+
+
+class TestSCCAlmEdgeRemoval:
+    """Test SCC preferential ALM edge removal."""
+
+    @staticmethod
+    def _make_cycle_graph_with_alm():
+        """Build a graph with A -> B (structural) and B -> A (ALM) creating a cycle."""
+        nodes = {
+            "g/A": KindNode(kind="A", group="g", service="s"),
+            "g/B": KindNode(kind="B", group="g", service="s"),
+        }
+        edges = [
+            DependencyEdge(
+                source_gk="g/B", target_gk="g/A", edge_type="hard",
+                source_field="spec.aRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            DependencyEdge(
+                source_gk="g/A", target_gk="g/B", edge_type="hard",
+                source_field="metadata.labels[g.io/b]", detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+        ]
+        return DependencyGraph(nodes=nodes, dependency_edges=edges, production_edges=[], external_kinds=set())
+
+    def test_alm_edge_removed_breaks_scc(self):
+        """SCC with exclusively-ALM edge → ALM edge removed, correct tiers."""
+        g = self._make_cycle_graph_with_alm()
+        tiers = topological_sort(g)
+        tier_map = {}
+        for t in tiers:
+            for gk in t.kinds:
+                tier_map[gk] = t.tier
+        # A should be at tier 0 (no longer depends on B after ALM edge removal)
+        # B should be at tier 1 (depends on A via structural edge)
+        assert tier_map["g/A"] == 0
+        assert tier_map["g/B"] == 1
+
+    def test_structural_only_scc_no_alm_removal(self):
+        """SCC with only structural edges → no ALM removal, condensation applies."""
+        nodes = {
+            "g/A": KindNode(kind="A", group="g", service="s"),
+            "g/B": KindNode(kind="B", group="g", service="s"),
+        }
+        edges = [
+            DependencyEdge(
+                source_gk="g/B", target_gk="g/A", edge_type="hard",
+                source_field="spec.aRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            DependencyEdge(
+                source_gk="g/A", target_gk="g/B", edge_type="hard",
+                source_field="spec.bRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+        ]
+        g = DependencyGraph(nodes=nodes, dependency_edges=edges, production_edges=[], external_kinds=set())
+        tiers = topological_sort(g)
+        # Both condensed to same tier
+        assert len(tiers) == 1
+        assert set(tiers[0].kinds) == {"g/A", "g/B"}
+
+    def test_merged_detection_source_kept(self):
+        """Merged ALM+structural edge is NOT removed during SCC cleanup."""
+        nodes = {
+            "g/A": KindNode(kind="A", group="g", service="s"),
+            "g/B": KindNode(kind="B", group="g", service="s"),
+        }
+        edges = [
+            DependencyEdge(
+                source_gk="g/B", target_gk="g/A", edge_type="hard",
+                source_field="spec.aRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            # This is a merged edge (comma = multiple sources) — should NOT be removed
+            DependencyEdge(
+                source_gk="g/A", target_gk="g/B", edge_type="hard",
+                source_field="metadata.labels[g.io/b]",
+                detection_source="olm_deps:alm_label,ref_detector:structural_ref",
+                confidence=0.90,
+            ),
+        ]
+        g = DependencyGraph(nodes=nodes, dependency_edges=edges, production_edges=[], external_kinds=set())
+        tiers = topological_sort(g)
+        # Merged edge is kept — cycle persists → condensation
+        assert len(tiers) == 1
+        assert set(tiers[0].kinds) == {"g/A", "g/B"}
+
+    def test_alm_edges_outside_scc_preserved(self):
+        """ALM edges not in any SCC are preserved."""
+        nodes = {
+            "g/A": KindNode(kind="A", group="g", service="s"),
+            "g/B": KindNode(kind="B", group="g", service="s"),
+            "g/C": KindNode(kind="C", group="g", service="s"),
+            "g/D": KindNode(kind="D", group="g", service="s"),
+        }
+        edges = [
+            # SCC between C and D
+            DependencyEdge(
+                source_gk="g/D", target_gk="g/C", edge_type="hard",
+                source_field="spec.cRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            DependencyEdge(
+                source_gk="g/C", target_gk="g/D", edge_type="hard",
+                source_field="metadata.labels[g.io/d]", detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+            # ALM edge NOT in the SCC: B -> A
+            DependencyEdge(
+                source_gk="g/B", target_gk="g/A", edge_type="hard",
+                source_field="metadata.labels[g.io/a]", detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+        ]
+        g = DependencyGraph(nodes=nodes, dependency_edges=edges, production_edges=[], external_kinds=set())
+        tiers = topological_sort(g)
+        tier_map = {}
+        for t in tiers:
+            for gk in t.kinds:
+                tier_map[gk] = t.tier
+        # A at tier 0, B at tier 1 (ALM edge preserved)
+        assert tier_map["g/A"] < tier_map["g/B"]
+        # C at tier 0 (ALM removed from SCC), D at tier 1
+        assert tier_map["g/C"] < tier_map["g/D"]
+
+    def test_two_disjoint_sccs_only_alm_one_removed(self):
+        """Two disjoint SCCs, only one with ALM edge → only that one's ALM removed."""
+        nodes = {
+            "g/A": KindNode(kind="A", group="g", service="s"),
+            "g/B": KindNode(kind="B", group="g", service="s"),
+            "g/C": KindNode(kind="C", group="g", service="s"),
+            "g/D": KindNode(kind="D", group="g", service="s"),
+        }
+        edges = [
+            # SCC 1: A <-> B (structural only)
+            DependencyEdge(
+                source_gk="g/A", target_gk="g/B", edge_type="hard",
+                source_field="spec.bRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            DependencyEdge(
+                source_gk="g/B", target_gk="g/A", edge_type="hard",
+                source_field="spec.aRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            # SCC 2: C <-> D (structural + ALM)
+            DependencyEdge(
+                source_gk="g/C", target_gk="g/D", edge_type="hard",
+                source_field="spec.dRef", detection_source="ref_detector:structural_ref",
+                confidence=0.85,
+            ),
+            DependencyEdge(
+                source_gk="g/D", target_gk="g/C", edge_type="hard",
+                source_field="metadata.labels[g.io/c]", detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+        ]
+        g = DependencyGraph(nodes=nodes, dependency_edges=edges, production_edges=[], external_kinds=set())
+        tiers = topological_sort(g)
+        tier_map = {}
+        for t in tiers:
+            for gk in t.kinds:
+                tier_map[gk] = t.tier
+        # SCC 1 (structural only) → condensed together
+        assert tier_map["g/A"] == tier_map["g/B"]
+        # SCC 2 (ALM removed) → C depends on D (C->D edge: source depends on target)
+        assert tier_map["g/D"] < tier_map["g/C"]
+
+
+class TestAlmEdgeIntegration:
+    """Integration tests for ALM edges through the full pipeline."""
+
+    def test_strimzi_like_with_alm_edges(self):
+        """Strimzi 5-Kind ecosystem with ALM edges → correct tier assignment."""
+        reg = KindRegistry()
+        for kind, plural in [
+            ("Kafka", "kafkas"), ("KafkaTopic", "kafkatopics"),
+            ("KafkaUser", "kafkausers"), ("KafkaConnect", "kafkaconnects"),
+            ("KafkaConnector", "kafkaconnectors"),
+        ]:
+            reg.register(kind, plural, "kafka.strimzi.io", service="strimzi")
+
+        classified_fields = {
+            ("kafka.strimzi.io", k): []
+            for k in ("Kafka", "KafkaTopic", "KafkaUser", "KafkaConnect", "KafkaConnector")
+        }
+        olm_owned = {
+            "strimzi": [
+                GVKRef(kind=k, group="kafka.strimzi.io", version="v1beta2", plural=p)
+                for k, p in [("Kafka", "kafkas"), ("KafkaTopic", "kafkatopics"),
+                              ("KafkaUser", "kafkausers"), ("KafkaConnect", "kafkaconnects"),
+                              ("KafkaConnector", "kafkaconnectors")]
+            ],
+        }
+        alm_edges = [
+            DependencyEdge(
+                source_gk="kafka.strimzi.io/KafkaTopic",
+                target_gk="kafka.strimzi.io/Kafka",
+                edge_type="hard",
+                source_field="metadata.labels[strimzi.io/cluster]",
+                detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+            DependencyEdge(
+                source_gk="kafka.strimzi.io/KafkaUser",
+                target_gk="kafka.strimzi.io/Kafka",
+                edge_type="hard",
+                source_field="metadata.labels[strimzi.io/cluster]",
+                detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+            DependencyEdge(
+                source_gk="kafka.strimzi.io/KafkaConnector",
+                target_gk="kafka.strimzi.io/KafkaConnect",
+                edge_type="hard",
+                source_field="metadata.labels[strimzi.io/cluster]",
+                detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+        ]
+        g = build_dependency_graph(classified_fields, {}, olm_owned, {}, reg, alm_edges=alm_edges)
+        tiers = topological_sort(g)
+        tier_map = {}
+        for t in tiers:
+            for gk in t.kinds:
+                tier_map[gk] = t.tier
+
+        # Kafka and KafkaConnect at tier 0 (no deps)
+        assert tier_map["kafka.strimzi.io/Kafka"] == 0
+        assert tier_map["kafka.strimzi.io/KafkaConnect"] == 0
+        # KafkaTopic, KafkaUser, KafkaConnector at tier 1
+        assert tier_map["kafka.strimzi.io/KafkaTopic"] == 1
+        assert tier_map["kafka.strimzi.io/KafkaUser"] == 1
+        assert tier_map["kafka.strimzi.io/KafkaConnector"] == 1
+
+    def test_no_alm_edges_unchanged(self):
+        """Ecosystem with no ALM edges → unchanged behavior (regression)."""
+        reg = KindRegistry()
+        reg.register("Kafka", "kafkas", "kafka.strimzi.io", service="strimzi")
+        reg.register("KafkaTopic", "kafkatopics", "kafka.strimzi.io", service="strimzi")
+
+        classified_fields = {
+            ("kafka.strimzi.io", "Kafka"): [],
+            ("kafka.strimzi.io", "KafkaTopic"): [],
+        }
+        olm_owned = {
+            "strimzi": [
+                GVKRef(kind="Kafka", group="kafka.strimzi.io", version="v1beta2", plural="kafkas"),
+                GVKRef(kind="KafkaTopic", group="kafka.strimzi.io", version="v1beta2", plural="kafkatopics"),
+            ],
+        }
+        g = build_dependency_graph(classified_fields, {}, olm_owned, {}, reg)
+        tiers = topological_sort(g)
+        # Both at tier 0 (no hard edges)
+        assert len(tiers) == 1
+        assert set(tiers[0].kinds) == {"kafka.strimzi.io/Kafka", "kafka.strimzi.io/KafkaTopic"}
+
+    def test_alm_cycle_with_structural_broken(self):
+        """ALM edge creating cycle with structural edge → cycle broken by ALM removal."""
+        reg = KindRegistry()
+        reg.register("A", "as", "g", service="s")
+        reg.register("B", "bs", "g", service="s")
+
+        classified_fields = {("g", "A"): [], ("g", "B"): []}
+        olm_owned = {"s": [
+            GVKRef(kind="A", group="g", version="v1", plural="as"),
+            GVKRef(kind="B", group="g", version="v1", plural="bs"),
+        ]}
+
+        # Structural: B -> A, ALM: A -> B (creates cycle)
+        from idi.generation.crd.field_classifier import ClassifiedField
+        classified_fields[("g", "B")] = [
+            ClassifiedField(
+                field="spec.aRef", role="input_ref",
+                target_kind="A", target_group="g",
+                confidence=0.85, field_type="string",
+                required=True,
+                detection_source="ref_detector:structural_ref",
+            ),
+        ]
+        alm_edges = [
+            DependencyEdge(
+                source_gk="g/A", target_gk="g/B", edge_type="hard",
+                source_field="metadata.labels[g.io/b]", detection_source="olm_deps:alm_label",
+                confidence=0.90,
+            ),
+        ]
+        g = build_dependency_graph(classified_fields, {}, olm_owned, {}, reg, alm_edges=alm_edges)
+        tiers = topological_sort(g)
+        tier_map = {}
+        for t in tiers:
+            for gk in t.kinds:
+                tier_map[gk] = t.tier
+        # ALM edge removed → A at tier 0, B at tier 1
+        assert tier_map["g/A"] == 0
+        assert tier_map["g/B"] == 1

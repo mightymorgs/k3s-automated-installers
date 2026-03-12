@@ -145,6 +145,7 @@ _HARD_EDGE_SOURCES: frozenset[str] = frozenset({
     "cataloged_shape",
     "constraint_fk",
     "embedded_workload",
+    "alm_label",
 })
 
 
@@ -250,6 +251,7 @@ def build_dependency_graph(
     olm_owned: dict[str, list[GVKRef]],
     side_effect_dict: dict[tuple[str, str], list[dict]],
     registry: KindRegistry,
+    alm_edges: list[DependencyEdge] | None = None,
 ) -> DependencyGraph:
     """Build a Kind-level dependency graph from detection pipeline output.
 
@@ -377,6 +379,10 @@ def build_dependency_graph(
                 production_type="side_effect", confidence=0.95,
                 detection_source=f"side_effect_dict:{effect['field']}",
             ))
+
+    # Step 7.5: ALM label edges (pre-classified as hard).
+    if alm_edges:
+        raw_dep_edges.extend(alm_edges)
 
     # Step 8: Deduplicate dependency edges.
     edge_groups: dict[tuple[str, str], list[DependencyEdge]] = {}
@@ -532,11 +538,59 @@ def topological_sort(graph: DependencyGraph, *, _depth: int = 0) -> list[SortTie
         else:
             nontrivial_sccs.append(scc)
 
+    # SCC preferential ALM edge removal: remove exclusively-ALM edges
+    # within non-trivial SCCs before condensation. ALM edges are more
+    # likely to be false positives in cycles than structural edges.
+    alm_removed = False
+    for scc in nontrivial_sccs:
+        scc_nodes = set(scc)
+        to_remove: list[DependencyEdge] = []
+        for e in subgraph.dependency_edges:
+            if (
+                e.source_gk in scc_nodes
+                and e.target_gk in scc_nodes
+                and e.detection_source == "olm_deps:alm_label"
+            ):
+                to_remove.append(e)
+        if to_remove:
+            remove_set = set(id(e) for e in to_remove)
+            subgraph = DependencyGraph(
+                nodes=subgraph.nodes,
+                dependency_edges=[
+                    e for e in subgraph.dependency_edges
+                    if id(e) not in remove_set
+                ],
+                production_edges=subgraph.production_edges,
+                external_kinds=subgraph.external_kinds,
+            )
+            alm_removed = True
+            for e in to_remove:
+                logger.info(
+                    "Removed ALM edge from SCC: %s -> %s (%s)",
+                    e.source_gk, e.target_gk, e.source_field,
+                )
+
+    if alm_removed:
+        sccs = detect_cycles(subgraph)
+        nontrivial_sccs = []
+        for scc in sccs:
+            if len(scc) == 1 and (scc[0], scc[0]) in self_loop_pairs:
+                trivial_gks.add(scc[0])
+            else:
+                nontrivial_sccs.append(scc)
+        if not nontrivial_sccs:
+            # ALM removal resolved all cycles — re-sort the modified subgraph.
+            sub_tiers = topological_sort(subgraph, _depth=_depth + 1)
+            for st in sub_tiers:
+                st.tier += tier_num
+            tiers.extend(sub_tiers)
+            return tiers
+
     # Log warnings for non-trivial SCCs.
     for scc in nontrivial_sccs:
         scc_set = set(scc)
         cycle_edges = [
-            e for e in graph.dependency_edges
+            e for e in subgraph.dependency_edges
             if e.edge_type == "hard" and e.source_gk in scc_set and e.target_gk in scc_set
         ]
         edge_strs = [f"{e.source_gk} -> {e.target_gk} ({e.source_field})" for e in cycle_edges]
