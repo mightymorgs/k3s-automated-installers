@@ -8,10 +8,18 @@ from idi.generation.dep_adapters.gates import (
     GateContext,
     GateResult,
     GateStats,
+    _extract_response_identifiers,
     _normalize_type,
     _resolve_field_schema,
     apply_gates,
     build_gate_context,
+    gate_g1_non_id_format,
+    gate_g2_enum,
+    gate_g3_bounded_value,
+    gate_g4_non_scalar,
+    gate_g5_producer_consumer,
+    gate_g6_query_filter,
+    gate_g7_crud_signature,
 )
 
 
@@ -248,3 +256,420 @@ class TestBuildGateContext:
         ctx = build_gate_context({}, {}, set())
         assert ctx.resource_operations == {}
         assert ctx.resource_methods == {}
+
+
+# ===========================================================================
+# Gate G1: Non-ID Format Block
+# ===========================================================================
+
+class TestGateG1NonIdFormat:
+    def test_kills_date_time(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "date-time"}, {}, _gate_ctx())
+        assert r.keep is False and r.gate == "G1"
+
+    def test_kills_email(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "email"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_uri(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "uri"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_ipv4(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "ipv4"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_binary(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "binary"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_password(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "password"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_passes_uuid(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string", "format": "uuid"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_int64(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "integer", "format": "int64"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_no_format(self):
+        r = gate_g1_non_id_format(_dep(), {"type": "string"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_none_schema(self):
+        r = gate_g1_non_id_format(_dep(), None, {}, _gate_ctx())
+        assert r.keep is True
+
+
+# ===========================================================================
+# Gate G2: Enum Block
+# ===========================================================================
+
+class TestGateG2Enum:
+    def test_kills_string_enum(self):
+        r = gate_g2_enum(_dep(), {"type": "string", "enum": ["active", "inactive"]}, {}, _gate_ctx())
+        assert r.keep is False and r.gate == "G2"
+
+    def test_kills_integer_enum(self):
+        r = gate_g2_enum(_dep(), {"type": "integer", "enum": [1, 2, 3]}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_passes_no_enum(self):
+        r = gate_g2_enum(_dep(), {"type": "string"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_none_schema(self):
+        r = gate_g2_enum(_dep(), None, {}, _gate_ctx())
+        assert r.keep is True
+
+
+# ===========================================================================
+# Gate G3: Bounded Value Detector
+# ===========================================================================
+
+class TestGateG3BoundedValue:
+    def test_kills_integer_with_tight_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 100}, {}, _gate_ctx())
+        assert r.keep is False and r.gate == "G3"
+
+    def test_kills_integer_with_max_9999(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 9999}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_integer_with_default_zero(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "default": 0}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_integer_with_default_30(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "default": 30}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_number_with_tight_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "number", "maximum": 99.9}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_passes_default_null(self):
+        """default: null is a nullable FK pattern, NOT a config signal."""
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "default": None}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_minimum_only(self):
+        """minimum: 1 is common FK validation -- NOT a config signal."""
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "minimum": 1}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_no_bounds(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_int32_max(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 2147483647}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_max_at_boundary(self):
+        """maximum: 10000 is NOT less than 10000."""
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": 10000}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_string_type(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "string", "maximum": 100}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_none_schema(self):
+        r = gate_g3_bounded_value(_dep(), None, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_handles_string_maximum(self):
+        """Defensive parsing: maximum as string."""
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": "100"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_handles_unparseable_maximum(self):
+        r = gate_g3_bounded_value(_dep(), {"type": "integer", "maximum": "not_a_number"}, {}, _gate_ctx())
+        assert r.keep is True
+
+
+# ===========================================================================
+# Gate G4: Non-Scalar Block
+# ===========================================================================
+
+class TestGateG4NonScalar:
+    def test_kills_boolean(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "boolean"}, {}, _gate_ctx())
+        assert r.keep is False and r.gate == "G4"
+
+    def test_kills_object(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "object"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_plain_string_array(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "array", "items": {"type": "string"}}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_object_array(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "array", "items": {"type": "object"}}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_kills_array_no_items(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "array"}, {}, _gate_ctx())
+        assert r.keep is False
+
+    def test_passes_uuid_string_array(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "array", "items": {"type": "string", "format": "uuid"}}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_integer_array(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "array", "items": {"type": "integer"}}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_string(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "string"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_integer(self):
+        r = gate_g4_non_scalar(_dep(), {"type": "integer"}, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_passes_none_schema(self):
+        r = gate_g4_non_scalar(_dep(), None, {}, _gate_ctx())
+        assert r.keep is True
+
+    def test_handles_nullable_boolean(self):
+        """type: ["boolean", "null"] normalizes to boolean -> kill."""
+        r = gate_g4_non_scalar(_dep(), {"type": ["boolean", "null"]}, {}, _gate_ctx())
+        assert r.keep is False
+
+
+# ===========================================================================
+# Gate G6: Query Filter Quarantine
+# ===========================================================================
+
+class TestGateG6QueryFilter:
+    def test_kills_optional_query_on_get(self):
+        op = _op(method="GET", query_params=[
+            {"name": "user_id", "in": "query", "required": False, "schema": {"type": "string"}},
+        ])
+        ctx = _gate_ctx(operation=op)
+        r = gate_g6_query_filter(_dep(field="user_id"), None, {}, ctx)
+        assert r.keep is False and r.gate == "G6"
+
+    def test_passes_required_query_on_get(self):
+        op = _op(method="GET", query_params=[
+            {"name": "user_id", "in": "query", "required": True, "schema": {"type": "string"}},
+        ])
+        ctx = _gate_ctx(operation=op)
+        r = gate_g6_query_filter(_dep(field="user_id"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_query_on_post(self):
+        op = _op(method="POST", query_params=[
+            {"name": "user_id", "in": "query", "required": False, "schema": {"type": "string"}},
+        ])
+        ctx = _gate_ctx(operation=op)
+        r = gate_g6_query_filter(_dep(field="user_id"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_body_param_on_get(self):
+        op = _op(method="GET", query_params=[])
+        ctx = _gate_ctx(operation=op)
+        r = gate_g6_query_filter(_dep(field="body_field"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_kills_when_required_absent(self):
+        """required defaults to false when absent."""
+        op = _op(method="GET", query_params=[
+            {"name": "filter_id", "in": "query", "schema": {"type": "string"}},
+        ])
+        ctx = _gate_ctx(operation=op)
+        r = gate_g6_query_filter(_dep(field="filter_id"), None, {}, ctx)
+        assert r.keep is False
+
+    def test_kills_query_sourced_dep_on_get(self):
+        """Fallback: dep.source == generic_odg:query on GET."""
+        op = _op(method="GET", query_params=[])
+        ctx = _gate_ctx(operation=op)
+        r = gate_g6_query_filter(_dep(field="some_field", source="generic_odg:query"), None, {}, ctx)
+        assert r.keep is False
+
+
+# ===========================================================================
+# Gate G5: Producer-Consumer Type Verification
+# ===========================================================================
+
+class TestGateG5ProducerConsumer:
+    def test_passes_string_to_string(self):
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"string"}
+        r = gate_g5_producer_consumer(_dep(target="target"), {"type": "string"}, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_integer_to_string(self):
+        """string and integer are interchangeable for IDs."""
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"string"}
+        r = gate_g5_producer_consumer(_dep(target="target"), {"type": "integer"}, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_string_to_integer(self):
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"integer"}
+        r = gate_g5_producer_consumer(_dep(target="target"), {"type": "string"}, {}, ctx)
+        assert r.keep is True
+
+    def test_kills_boolean_to_string(self):
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"string", "integer"}
+        r = gate_g5_producer_consumer(_dep(target="target"), {"type": "boolean"}, {}, ctx)
+        assert r.keep is False and r.gate == "G5"
+
+    def test_passes_array_string_unwrapped(self):
+        """Array of strings unwraps to string -> compatible with string producer."""
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"string"}
+        schema = {"type": "array", "items": {"type": "string"}}
+        r = gate_g5_producer_consumer(_dep(target="target"), schema, {}, ctx)
+        assert r.keep is True
+
+    def test_kills_array_boolean_unwrapped(self):
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"string"}
+        schema = {"type": "array", "items": {"type": "boolean"}}
+        r = gate_g5_producer_consumer(_dep(target="target"), schema, {}, ctx)
+        assert r.keep is False
+
+    def test_passes_no_response_schema(self):
+        """Conservative: pass when target has no response identifiers."""
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = set()  # empty = no identifiers
+        r = gate_g5_producer_consumer(_dep(target="target"), {"type": "string"}, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_none_schema(self):
+        ctx = _gate_ctx()
+        r = gate_g5_producer_consumer(_dep(target="target"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_unknown_consumer_type(self):
+        ctx = _gate_ctx()
+        ctx._producer_cache["target"] = {"string"}
+        r = gate_g5_producer_consumer(_dep(target="target"), {"no_type": True}, {}, ctx)
+        assert r.keep is True
+
+    def test_uses_producer_cache(self):
+        ctx = _gate_ctx()
+        ctx._producer_cache["cached-res"] = {"string"}
+        r = gate_g5_producer_consumer(_dep(target="cached-res"), {"type": "string"}, {}, ctx)
+        assert r.keep is True
+        assert "cached-res" in ctx._producer_cache
+
+
+# ===========================================================================
+# Gate G7: CRUD Signature Gate
+# ===========================================================================
+
+class TestGateG7CrudSignature:
+    def test_passes_target_with_list(self):
+        ctx = _gate_ctx(resource_operations={"target-res": ["create", "list"]})
+        r = gate_g7_crud_signature(_dep(target="target-res"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_target_with_retrieve(self):
+        ctx = _gate_ctx(resource_operations={"target-res": ["create", "retrieve"]})
+        r = gate_g7_crud_signature(_dep(target="target-res"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_target_with_get_method(self):
+        ctx = _gate_ctx(
+            resource_operations={"target-res": ["create"]},
+            resource_methods={"target-res": {"POST", "GET"}},
+        )
+        r = gate_g7_crud_signature(_dep(target="target-res"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_passes_post_only_with_outputs(self):
+        ctx = _gate_ctx(
+            resource_operations={"target-res": ["create"]},
+            resource_methods={"target-res": {"POST"}},
+            outputs_by_resource={"target-res": {"facts://svc/target-res#id": "id"}},
+        )
+        r = gate_g7_crud_signature(_dep(target="target-res"), None, {}, ctx)
+        assert r.keep is True
+
+    def test_kills_post_only_no_outputs(self):
+        ctx = _gate_ctx(
+            resource_operations={"target-res": ["create"]},
+            resource_methods={"target-res": {"POST"}},
+            outputs_by_resource={"target-res": {}},
+        )
+        r = gate_g7_crud_signature(_dep(target="target-res"), None, {}, ctx)
+        assert r.keep is False and r.gate == "G7"
+
+    def test_kills_post_only_not_in_outputs_index(self):
+        ctx = _gate_ctx(
+            resource_operations={"target-res": ["create"]},
+            resource_methods={"target-res": {"POST"}},
+            outputs_by_resource={},  # target-res not present
+        )
+        r = gate_g7_crud_signature(_dep(target="target-res"), None, {}, ctx)
+        assert r.keep is False
+
+    def test_passes_unknown_target(self):
+        """Conservative: pass when target not in indexes."""
+        ctx = _gate_ctx()
+        r = gate_g7_crud_signature(_dep(target="unknown-res"), None, {}, ctx)
+        assert r.keep is True
+
+
+# ===========================================================================
+# _extract_response_identifiers
+# ===========================================================================
+
+class TestExtractResponseIdentifiers:
+    def test_finds_id_field(self):
+        schema = {"properties": {"id": {"type": "string"}}}
+        ids = _extract_response_identifiers({}, schema)
+        assert "id" in ids
+
+    def test_finds_uuid_format(self):
+        schema = {"properties": {"resource_key": {"type": "string", "format": "uuid"}}}
+        ids = _extract_response_identifiers({}, schema)
+        assert "resource_key" in ids
+
+    def test_finds_field_ending_with_id(self):
+        schema = {"properties": {"user_id": {"type": "integer"}}}
+        ids = _extract_response_identifiers({}, schema)
+        assert "user_id" in ids
+
+    def test_empty_for_non_id_fields(self):
+        schema = {"properties": {"status": {"type": "string"}, "message": {"type": "string"}}}
+        ids = _extract_response_identifiers({}, schema)
+        assert len(ids) == 0
+
+    def test_empty_for_no_properties(self):
+        ids = _extract_response_identifiers({}, {})
+        assert len(ids) == 0
+
+
+# ===========================================================================
+# Integration: apply_gates with real gates
+# ===========================================================================
+
+class TestApplyGatesIntegration:
+    def test_kills_boolean_passes_string(self):
+        """G4 kills boolean dep, string dep survives."""
+        op = _op(body_schema={"properties": {
+            "is_active": {"type": "boolean"},
+            "role_id": {"type": "string", "format": "uuid"},
+        }})
+        deps = [
+            _dep(field="is_active", target="t1"),
+            _dep(field="role_id", target="t2"),
+        ]
+        ctx = _gate_ctx(operation=op)
+        result, stats = apply_gates(deps, op, {}, ctx)
+        assert len(result) == 1
+        assert result[0].field == "role_id"
+        assert stats.kills_by_gate["G4"] == 1

@@ -175,11 +175,374 @@ def _resolve_field_schema(
     return None
 
 
+# ── Gate constants ───────────────────────────────────────────────────────
+
+NON_ID_FORMATS = frozenset({
+    "date", "date-time", "email", "uri", "ipv4", "ipv6",
+    "byte", "binary", "password",
+})
+
+ID_FIELD_NAMES = frozenset({
+    "id", "uuid", "slug", "key", "name", "pk", "uid", "identifier",
+})
+
+# Types that are interchangeable for ID compatibility (G5).
+_ID_COMPATIBLE_TYPES = frozenset({"string", "integer"})
+
+
+# ── Gate implementations ────────────────────────────────────────────────
+
+
+def gate_g1_non_id_format(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G1: Reject fields with non-identifier formats (safety net)."""
+    if field_schema is None:
+        return GateResult(keep=True, gate="G1", reason="no schema")
+    fmt = field_schema.get("format", "")
+    if isinstance(fmt, str) and fmt.lower() in NON_ID_FORMATS:
+        return GateResult(keep=False, gate="G1", reason=f"non-id format: {fmt}")
+    return GateResult(keep=True, gate="G1", reason="format ok")
+
+
+def gate_g2_enum(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G2: Reject fields with enum constraints (safety net)."""
+    if field_schema is None:
+        return GateResult(keep=True, gate="G2", reason="no schema")
+    if "enum" in field_schema:
+        return GateResult(keep=False, gate="G2", reason="enum present")
+    return GateResult(keep=True, gate="G2", reason="no enum")
+
+
+def gate_g3_bounded_value(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G3: Reject integer/number fields with tight bounds or defaults."""
+    if field_schema is None:
+        return GateResult(keep=True, gate="G3", reason="no schema")
+
+    field_type = _normalize_type(field_schema.get("type", ""))
+    if field_type not in ("integer", "number"):
+        return GateResult(keep=True, gate="G3", reason=f"type={field_type}")
+
+    # Check for tight maximum (< 10000).
+    has_tight_max = False
+    maximum = field_schema.get("maximum")
+    if maximum is not None:
+        try:
+            max_val = float(maximum)
+            if max_val < 10000:
+                has_tight_max = True
+        except (ValueError, TypeError):
+            pass  # Unparseable maximum — skip this check
+
+    # Check for non-null default.
+    has_default = (
+        "default" in field_schema
+        and field_schema["default"] is not None
+    )
+
+    bounds: list[str] = []
+    if has_tight_max:
+        bounds.append(f"max={maximum}")
+    if has_default:
+        bounds.append(f"default={field_schema['default']}")
+
+    if bounds:
+        return GateResult(keep=False, gate="G3", reason=f"bounded: {', '.join(bounds)}")
+    return GateResult(keep=True, gate="G3", reason="numeric but unbounded")
+
+
+def gate_g4_non_scalar(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G4: Reject boolean, object, and plain-string-array fields."""
+    if field_schema is None:
+        return GateResult(keep=True, gate="G4", reason="no schema")
+
+    field_type = _normalize_type(field_schema.get("type", ""))
+    if field_type == "boolean":
+        return GateResult(keep=False, gate="G4", reason="type=boolean")
+    if field_type == "object":
+        return GateResult(keep=False, gate="G4", reason="type=object")
+    if field_type == "array":
+        items = field_schema.get("items", {})
+        if not isinstance(items, dict):
+            return GateResult(keep=False, gate="G4", reason="array with unknown items")
+        items_type = _normalize_type(items.get("type", ""))
+        items_format = items.get("format", "")
+        # UUID-formatted string arrays pass (multi-FK).
+        if items_type == "string" and items_format not in ("uuid",):
+            return GateResult(keep=False, gate="G4", reason="array of plain strings")
+        if items_type not in ("string", "integer"):
+            return GateResult(keep=False, gate="G4", reason=f"array of {items_type or 'unknown'}")
+    return GateResult(keep=True, gate="G4", reason=f"type={field_type}")
+
+
+def gate_g6_query_filter(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G6: Reject optional query parameters on GET endpoints."""
+    if ctx.operation is None:
+        return GateResult(keep=True, gate="G6", reason="no operation context")
+    if ctx.operation.method.upper() != "GET":
+        return GateResult(keep=True, gate="G6", reason=f"method={ctx.operation.method}")
+
+    # Check if field is a query param.
+    for param in ctx.operation.query_params:
+        if not isinstance(param, dict):
+            continue
+        if param.get("name") == dep.field:
+            required = param.get("required", False)
+            if not required:
+                return GateResult(
+                    keep=False, gate="G6",
+                    reason="optional query filter on GET",
+                )
+            return GateResult(keep=True, gate="G6", reason="required query param")
+
+    # Fallback: check dep.source for query-tagged edges.
+    if dep.source == "generic_odg:query":
+        return GateResult(
+            keep=False, gate="G6",
+            reason="query-sourced dep on GET",
+        )
+    return GateResult(keep=True, gate="G6", reason="not a query param")
+
+
+def gate_g5_producer_consumer(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G5: Reject edges where consumer type is incompatible with all producer types."""
+    if field_schema is None:
+        return GateResult(keep=True, gate="G5", reason="no schema")
+
+    consumer_type = _normalize_type(field_schema.get("type", ""))
+    # Unwrap array types to items.type.
+    if consumer_type == "array":
+        items = field_schema.get("items", {})
+        if isinstance(items, dict):
+            consumer_type = _normalize_type(items.get("type", ""))
+
+    if not consumer_type:
+        return GateResult(keep=True, gate="G5", reason="consumer type unknown")
+
+    produced_types = _get_producer_types(dep.target_resource, ctx)
+    if not produced_types:
+        return GateResult(keep=True, gate="G5", reason="target has no response identifiers")
+
+    # Check type compatibility.
+    if consumer_type in produced_types:
+        return GateResult(
+            keep=True, gate="G5",
+            reason=f"type compatible: {consumer_type} in {produced_types}",
+        )
+    if consumer_type in _ID_COMPATIBLE_TYPES and produced_types & _ID_COMPATIBLE_TYPES:
+        return GateResult(
+            keep=True, gate="G5",
+            reason=f"type coercible: {consumer_type} vs {produced_types}",
+        )
+
+    return GateResult(
+        keep=False, gate="G5",
+        reason=f"type mismatch: consumer={consumer_type}, producers={produced_types}",
+    )
+
+
+def gate_g7_crud_signature(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    ctx: GateContext,
+) -> GateResult:
+    """G7: Reject edges targeting POST-only endpoints with no outputs."""
+    target_resource = dep.target_resource
+    if target_resource not in ctx.resource_operations:
+        return GateResult(keep=True, gate="G7", reason="target resource not found")
+
+    operations = ctx.resource_operations[target_resource]
+    if "list" in operations or "retrieve" in operations:
+        return GateResult(
+            keep=True, gate="G7",
+            reason=f"has {'list' if 'list' in operations else 'retrieve'}",
+        )
+
+    methods = ctx.resource_methods.get(target_resource, set())
+    if "GET" in methods:
+        return GateResult(keep=True, gate="G7", reason="has GET endpoint")
+
+    # POST-only: check for outputs.
+    outputs = ctx.outputs_by_resource.get(target_resource, {})
+    if outputs:
+        return GateResult(
+            keep=True, gate="G7",
+            reason="POST-only but produces outputs",
+        )
+
+    return GateResult(
+        keep=False, gate="G7",
+        reason=f"POST-only target with no outputs: {target_resource}",
+    )
+
+
+# ── G5 helpers ───────────────────────────────────────────────────────────
+
+
+def _extract_response_identifiers(
+    spec: dict[str, Any],
+    response_schema: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Extract identifier fields from a response schema."""
+    identifiers: dict[str, dict[str, Any]] = {}
+    props = response_schema.get("properties", {})
+    for fname, fschema in props.items():
+        if not isinstance(fschema, dict):
+            continue
+        resolved = _resolve_schema(spec, fschema)
+        fname_lower = fname.lower()
+        is_id_name = fname_lower in ID_FIELD_NAMES or fname_lower.endswith("_id")
+        has_id_format = resolved.get("format") in ("uuid", "int64", "int32")
+        if is_id_name or has_id_format:
+            identifiers[fname] = resolved
+    return identifiers
+
+
+def _get_response_schema_for_operation(
+    spec: dict[str, Any],
+    endpoint: str,
+    method: str,
+) -> dict[str, Any] | None:
+    """Extract the primary response schema from the spec for an endpoint."""
+    paths = spec.get("paths", {})
+    path_item = paths.get(endpoint)
+    if path_item is None:
+        # Try with/without trailing slash.
+        alt = endpoint.rstrip("/") + "/" if not endpoint.endswith("/") else endpoint.rstrip("/")
+        path_item = paths.get(alt)
+    if path_item is None:
+        return None
+
+    operation = path_item.get(method.lower())
+    if operation is None:
+        return None
+
+    responses = operation.get("responses", {})
+    for code in ("200", "201", "202", 200, 201, 202):
+        resp = responses.get(code)
+        if not resp:
+            continue
+        # OpenAPI 3.x
+        for _ct, ct_val in resp.get("content", {}).items():
+            schema = ct_val.get("schema", {})
+            if schema:
+                resolved = _resolve_schema(spec, schema)
+                # Handle array responses.
+                if resolved.get("type") == "array" and "items" in resolved:
+                    return _resolve_schema(spec, resolved["items"])
+                return resolved
+        # Swagger 2.0
+        schema = resp.get("schema", {})
+        if schema:
+            resolved = _resolve_schema(spec, schema)
+            if resolved.get("type") == "array" and "items" in resolved:
+                return _resolve_schema(spec, resolved["items"])
+            return resolved
+    return None
+
+
+def _get_producer_types(
+    target_resource: str,
+    ctx: GateContext,
+) -> set[str]:
+    """Get the set of identifier types produced by a target resource.
+
+    Memoized in ``ctx._producer_cache``.
+    """
+    if target_resource in ctx._producer_cache:
+        return ctx._producer_cache[target_resource]
+
+    produced_types: set[str] = set()
+
+    # Find target operations from generated_skill_paths.
+    for skill_path, meta in ctx.generated_skill_paths.items():
+        parts = skill_path.split("/")
+        if len(parts) < 3:
+            continue
+        if parts[1] != target_resource:
+            continue
+        op_type = meta.get("operation", parts[2])
+        if op_type not in ("create", "list", "retrieve"):
+            continue
+
+        # Find endpoint info.
+        endpoint = None
+        method = meta.get("method", "")
+        # Look up the endpoint from the spec paths.
+        for spec_path, path_item in ctx.spec.get("paths", {}).items():
+            if not isinstance(path_item, dict):
+                continue
+            op = path_item.get(method.lower())
+            if op is None:
+                continue
+            # Match by checking if this path corresponds to the target resource.
+            # Simple heuristic: resource name appears in the path segments.
+            path_segs = [s for s in spec_path.split("/") if s and not s.startswith("{")]
+            resource_matches = any(
+                target_resource.replace("-", "").replace("_", "")
+                in seg.replace("-", "").replace("_", "")
+                for seg in path_segs
+            )
+            if resource_matches:
+                endpoint = spec_path
+                break
+
+        if endpoint:
+            resp_schema = _get_response_schema_for_operation(
+                ctx.spec, endpoint, method,
+            )
+            if resp_schema:
+                ids = _extract_response_identifiers(ctx.spec, resp_schema)
+                for id_schema in ids.values():
+                    id_type = _normalize_type(id_schema.get("type", ""))
+                    if id_type:
+                        produced_types.add(id_type)
+
+    ctx._producer_cache[target_resource] = produced_types
+    return produced_types
+
+
 # ── Gate registry ────────────────────────────────────────────────────────
 
 # Each entry is (gate_id, gate_function).
-# Gate functions are appended by subsequent sections.
-_GATES: list[tuple[str, Any]] = []
+_GATES: list[tuple[str, Any]] = [
+    ("G1", gate_g1_non_id_format),
+    ("G2", gate_g2_enum),
+    ("G3", gate_g3_bounded_value),
+    ("G4", gate_g4_non_scalar),
+    ("G5", gate_g5_producer_consumer),
+    ("G6", gate_g6_query_filter),
+    ("G7", gate_g7_crud_signature),
+]
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────
