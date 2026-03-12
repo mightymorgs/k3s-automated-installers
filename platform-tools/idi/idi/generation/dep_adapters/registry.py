@@ -80,6 +80,7 @@ class DepAdapterRegistry:
 
     def detect(
         self, operation: OperationInfo, spec: dict, known_resources: set[str],
+        skill_paths: dict[str, dict] | None = None,
     ) -> tuple[list[Dependency], list[Output]]:
         adapters = self.get_adapters_for(spec, operation.service)
         all_deps: list[Dependency] = []
@@ -96,6 +97,9 @@ class DepAdapterRegistry:
         deps = merge_deps(all_deps)
         deps = filter_self_refs(deps, operation.resource, operation.method)
         deps = filter_by_confidence(deps)
+        # Apply programmatic gates (spec-derived FP filters).
+        from idi.generation.dep_adapters.verify import apply_gates
+        deps = apply_gates(deps, operation, spec, skill_paths)
         # Suppress body/operationid deps whose target is already covered by a
         # path dep. Path skeleton is authoritative; weaker sources are fenced.
         _FENCED_SOURCES = {"generic_odg:body", "generic_odg:operationid"}

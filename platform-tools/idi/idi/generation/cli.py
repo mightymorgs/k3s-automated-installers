@@ -219,6 +219,7 @@ def _generate_json_v2(
 
             deps_detected, outputs_detected = dep_registry.detect(
                 dep_op, ctx.schema, known_resources,
+                skill_paths=ctx.generated_skill_paths,
             )
 
             depends_on: List[Dict[str, Any]] = []
