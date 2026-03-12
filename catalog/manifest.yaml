@@ -2,91 +2,91 @@ schema_version: '1.0'
 services:
   # ── REST / OpenAPI services ──────────────────────────────────────────
   authentik:
-    schema: specs/authentik-openapi.json
+    schema: specs/openapi/authentik-openapi.json
     output: catalog/skills/openapi/authentik/
     url: https://raw.githubusercontent.com/goauthentik/authentik/version/2025.12.2/schema.yml
     source_type: download
     description: Identity provider (SSO, OAuth2, SAML, LDAP)
     style: rest
   vault:
-    schema: specs/vault-openapi.json
+    schema: specs/openapi/vault-openapi.json
     output: catalog/skills/openapi/vault/
     url: https://raw.githubusercontent.com/hashicorp/vault-client-go/main/openapi.json
     source_type: download
     description: HashiCorp Vault secrets management (v1.15.0 client spec)
     style: rest
   cloudflare:
-    schema: specs/cloudflare-openapi.yaml
+    schema: specs/openapi/cloudflare-openapi.yaml
     output: catalog/skills/openapi/cloudflare/
     url: https://raw.githubusercontent.com/cloudflare/api-schemas/main/openapi.yaml
     source_type: download
     description: Cloudflare DNS, tunnels, workers, WAF
     style: rest
   tailscale:
-    schema: specs/tailscale-openapi.yaml
+    schema: specs/openapi/tailscale-openapi.yaml
     output: catalog/skills/openapi/tailscale/
     url: https://api.tailscale.com/api/v2?outputOpenapiSchema=true
     source_type: download
     description: Tailscale VPN and mesh networking
     style: rest
   elastic:
-    schema: specs/elastic-openapi.json
+    schema: specs/openapi/elastic-openapi.json
     output: catalog/skills/openapi/elastic/
     url: https://raw.githubusercontent.com/elastic/elasticsearch-specification/main/output/openapi/elasticsearch-openapi.json
     source_type: download
     description: Elasticsearch search and analytics
     style: rest
   kibana:
-    schema: specs/kibana-openapi.json
+    schema: specs/openapi/kibana-openapi.json
     output: catalog/skills/openapi/kibana/
     url: https://raw.githubusercontent.com/elastic/kibana/main/oas_docs/output/kibana.yaml
     source_type: download
     description: Kibana visualization and dashboards
     style: rest
   grafana:
-    schema: specs/grafana-openapi.json
+    schema: specs/openapi/grafana-openapi.json
     output: catalog/skills/openapi/grafana/
     url: https://raw.githubusercontent.com/grafana/grafana/main/public/openapi3.json
     source_type: download
     description: Grafana dashboards and observability
     style: rest
   loki-api:
-    schema: specs/loki-openapi.json
+    schema: specs/openapi/loki-openapi.json
     output: catalog/skills/openapi/loki/
     source_type: bundled
     notes: Hand-crafted from runtime endpoint probing. No official OpenAPI spec exists.
     description: Grafana Loki log aggregation HTTP API
     style: rest
   prometheus-alertmanager:
-    schema: specs/alertmanager-openapi.json
+    schema: specs/openapi/alertmanager-openapi.json
     output: catalog/skills/openapi/alertmanager/
     url: https://raw.githubusercontent.com/prometheus/alertmanager/main/api/v2/openapi.yaml
     source_type: download
     description: Prometheus Alertmanager
     style: rest
   argocd:
-    schema: specs/argocd-openapi.json
+    schema: specs/openapi/argocd-openapi.json
     output: catalog/skills/openapi/argocd/
     url: https://raw.githubusercontent.com/argoproj/argo-cd/master/assets/swagger.json
     source_type: download
     description: ArgoCD GitOps continuous delivery
     style: rest
   awx:
-    schema: specs/awx-openapi.json
+    schema: specs/openapi/awx-openapi.json
     output: catalog/skills/openapi/awx/
     url: https://s3.amazonaws.com/awx-public-ci-files/awx/devel/schema.json
     source_type: download
     description: AWX/Ansible Tower automation
     style: rest
   github:
-    schema: specs/github-openapi.json
+    schema: specs/openapi/github-openapi.json
     output: catalog/skills/openapi/github/
     url: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
     source_type: download
     description: GitHub API for repos, issues, PRs, actions
     style: rest
   tf-cloud:
-    schema: specs/tf-cloud-openapi.json
+    schema: specs/openapi/tf-cloud-openapi.json
     output: catalog/skills/openapi/tf-cloud/
     url: https://raw.githubusercontent.com/glennsarti/openapi-terraform-cloud/main/specifications/openapi-terraform-cloud.json
     source_type: download
@@ -94,49 +94,49 @@ services:
     description: Terraform Cloud workspaces and runs
     style: rest
   bws:
-    schema: specs/bws-openapi.json
+    schema: specs/openapi/bws-openapi.json
     output: catalog/skills/openapi/bws/
     url: https://raw.githubusercontent.com/bitwarden/docs/master/api/specs/public/swagger.json
     source_type: download
     description: Bitwarden Secrets Manager
     style: rest
   sonarr:
-    schema: specs/sonarr-openapi.json
+    schema: specs/openapi/sonarr-openapi.json
     output: catalog/skills/openapi/sonarr/
     url: https://raw.githubusercontent.com/Sonarr/Sonarr/develop/src/Sonarr.Api.V3/openapi.json
     source_type: download
     description: Sonarr TV series management
     style: rest
   radarr:
-    schema: specs/radarr-openapi.json
+    schema: specs/openapi/radarr-openapi.json
     output: catalog/skills/openapi/radarr/
     url: https://raw.githubusercontent.com/Radarr/Radarr/develop/src/Radarr.Api.V3/openapi.json
     source_type: download
     description: Radarr movie management
     style: rest
   prowlarr:
-    schema: specs/prowlarr-openapi.json
+    schema: specs/openapi/prowlarr-openapi.json
     output: catalog/skills/openapi/prowlarr/
     url: https://raw.githubusercontent.com/Prowlarr/Prowlarr/develop/src/Prowlarr.Api.V1/openapi.json
     source_type: download
     description: Prowlarr indexer management
     style: rest
   langfuse:
-    schema: specs/langfuse-openapi.json
+    schema: specs/openapi/langfuse-openapi.json
     output: catalog/skills/openapi/langfuse/
     url: https://raw.githubusercontent.com/langfuse/langfuse/main/web/public/generated/api/openapi.yml
     source_type: download
     description: Langfuse LLM observability, traces, scores, evaluations
     style: rest
   netbox:
-    schema: specs/netbox-openapi.yaml
+    schema: specs/openapi/netbox-openapi.yaml
     output: catalog/skills/openapi/netbox/
     url: https://raw.githubusercontent.com/netbox-community/go-netbox/master/api/openapi.yaml
     source_type: download
     description: NetBox network/datacenter management (sites, racks, devices, IPs)
     style: rest
   neo4j:
-    schema: specs/neo4j-openapi.json
+    schema: specs/openapi/neo4j-openapi.json
     output: catalog/skills/openapi/neo4j/
     source_type: manual
     notes: No public OpenAPI spec. REST API documented at https://neo4j.com/docs/http-api/current/
@@ -145,21 +145,21 @@ services:
 
   # ── Enterprise stress-test REST APIs ───────────────────────────────
   keycloak:
-    schema: specs/keycloak-openapi.json
+    schema: specs/openapi/keycloak-openapi.json
     output: catalog/skills/openapi/keycloak/
     url: https://raw.githubusercontent.com/ccouzens/keycloak-openapi/main/keycloak/23.0.7.json
     source_type: download
     description: Keycloak identity provider (OAuth2, OIDC, SAML, LDAP federation, token exchange)
     style: rest
   harbor:
-    schema: specs/harbor-openapi.yaml
+    schema: specs/openapi/harbor-openapi.yaml
     output: catalog/skills/openapi/harbor/
     url: https://raw.githubusercontent.com/goharbor/harbor/main/api/v2.0/swagger.yaml
     source_type: download
     description: Harbor container registry (projects, repos, artifacts, replication, RBAC)
     style: rest
   gitea:
-    schema: specs/gitea-openapi.json
+    schema: specs/openapi/gitea-openapi.json
     output: catalog/skills/openapi/gitea/
     url: https://raw.githubusercontent.com/go-gitea/gitea/main/templates/swagger/v1_json.tmpl
     source_type: download
@@ -168,7 +168,7 @@ services:
 
   # ── Kubernetes / CRD services ────────────────────────────────────────
   traefik:
-    schema: specs/traefik-openapi.json
+    schema: specs/crd/traefik-openapi.json
     output: catalog/skills/crd/traefik/
     source_type: crd
     description: Traefik reverse proxy and ingress controller (traefik.io CRDs)
@@ -218,14 +218,14 @@ services:
         plural: traefikservices
         namespaced: true
   traefik-hub:
-    schema: specs/traefik-hub-openapi.json
+    schema: specs/crd/traefik-hub-openapi.json
     output: catalog/skills/crd/traefik-hub/
     source_type: instance
     notes: Extracted from cluster /openapi/v2 (hub.traefik.io CRDs)
     description: Traefik Hub CRDs (API, APIAccess, APIPortal, etc.)
     style: kubernetes
   cert-manager:
-    schema: specs/cert-manager-openapi.json
+    schema: specs/crd/cert-manager-openapi.json
     output: catalog/skills/crd/cert-manager/
     source_type: crd
     description: Kubernetes certificate management (Let's Encrypt, self-signed, Cloudflare
@@ -263,21 +263,21 @@ services:
         plural: challenges
         namespaced: true
   argocd-crd:
-    schema: specs/argocd-crd-openapi.json
+    schema: specs/crd/argocd-crd-openapi.json
     output: catalog/skills/crd/argocd-crd/
     source_type: instance
     notes: Extracted from cluster /openapi/v2 (io.argoproj CRDs)
     description: ArgoCD CRDs (Application, AppProject, ApplicationSet)
     style: kubernetes
   awx-crd:
-    schema: specs/awx-crd-openapi.json
+    schema: specs/crd/awx-crd-openapi.json
     output: catalog/skills/crd/awx-crd/
     source_type: instance
     notes: Extracted from cluster /openapi/v2 (com.ansible CRDs)
     description: AWX Operator CRDs (AWX, AWXBackup, AWXRestore)
     style: kubernetes
   k8s:
-    schema: specs/k8s-openapi.json
+    schema: specs/crd/k8s-openapi.json
     output: catalog/skills/crd/k8s/
     url: https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json
     source_type: download
@@ -285,7 +285,7 @@ services:
     style: kubernetes
     enabled: true
   kube-prometheus-stack:
-    schema: specs/kube-prometheus-stack-openapi.json
+    schema: specs/crd/kube-prometheus-stack-openapi.json
     output: catalog/skills/crd/kube-prometheus-stack/
     source_type: artifacthub
     description: Prometheus Operator CRDs (Prometheus, Alertmanager, ServiceMonitor,
@@ -332,7 +332,7 @@ services:
         plural: scrapeconfigs
         namespaced: true
   external-secrets:
-    schema: specs/external-secrets-openapi.json
+    schema: specs/crd/external-secrets-openapi.json
     output: catalog/skills/crd/external-secrets/
     source_type: crd
     description: External Secrets Operator CRDs (ExternalSecret, SecretStore, ClusterSecretStore)
@@ -362,7 +362,7 @@ services:
         plural: pushsecrets
         namespaced: true
   longhorn:
-    schema: specs/longhorn-openapi.json
+    schema: specs/crd/longhorn-openapi.json
     output: catalog/skills/crd/longhorn/
     source_type: crd
     description: Longhorn distributed block storage CRDs (Volume, Backup, Replica,
@@ -457,7 +457,7 @@ services:
         plural: volumeattachments
         namespaced: true
   teleport:
-    schema: specs/teleport-openapi.json
+    schema: specs/crd/teleport-openapi.json
     output: catalog/skills/crd/teleport/
     source_type: crd
     description: Teleport access platform CRDs (roles, users, apps, databases, connectors)
