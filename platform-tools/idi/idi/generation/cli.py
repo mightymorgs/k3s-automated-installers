@@ -242,6 +242,8 @@ def _generate_json_v2(
                     "fact_ref": d.fact_ref,
                     "lineage_type": d.lineage_type,
                     "discriminator_value": d.discriminator_value,
+                    "detection_source": d.detection_source.value if hasattr(d.detection_source, "value") else str(d.detection_source),
+                    "confidence": d.confidence,
                 })
 
             # Build field_refs_map and all_field_refs from validated deps only.
