@@ -93,3 +93,37 @@ def gate_crd4_not_discriminator(
     if "list_map" in source_cf.detection_source:
         return CrdGateResult("G-CRD4", False, "list-map key")
     return CrdGateResult("G-CRD4", True, "not discriminator")
+
+
+# ── Gate G-CRD5: Depth Sanity Check ─────────────────────────
+
+_MAX_PROMOTION_DEPTH = 4
+
+
+def gate_crd5_depth(
+    edge: DependencyEdge,
+    source_cf: ClassifiedField,
+    graph: DependencyGraph,
+) -> CrdGateResult:
+    """G-CRD5: Reject edges from deeply nested fields (depth > 4 under spec)."""
+    parts = source_cf.field.split(".")
+    depth = len(parts) - 1 if parts[0] == "spec" else len(parts)
+    if depth > _MAX_PROMOTION_DEPTH:
+        return CrdGateResult("G-CRD5", False, f"depth={depth} > {_MAX_PROMOTION_DEPTH}")
+    return CrdGateResult("G-CRD5", True, f"depth={depth}")
+
+
+# ── Gate G-CRD6: Confidence Floor ───────────────────────────
+
+_PROMOTION_CONFIDENCE_FLOOR = 0.75
+
+
+def gate_crd6_confidence(
+    edge: DependencyEdge,
+    source_cf: ClassifiedField,
+    graph: DependencyGraph,
+) -> CrdGateResult:
+    """G-CRD6: Reject edges below minimum confidence threshold."""
+    if edge.confidence < _PROMOTION_CONFIDENCE_FLOOR:
+        return CrdGateResult("G-CRD6", False, f"conf={edge.confidence} < {_PROMOTION_CONFIDENCE_FLOOR}")
+    return CrdGateResult("G-CRD6", True, f"conf={edge.confidence}")

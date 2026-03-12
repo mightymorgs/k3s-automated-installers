@@ -7,6 +7,8 @@ from idi.generation.crd.edge_promotion import (
     gate_crd2_field_type,
     gate_crd3_ref_shape,
     gate_crd4_not_discriminator,
+    gate_crd5_depth,
+    gate_crd6_confidence,
 )
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.topo_sort import (
@@ -239,3 +241,62 @@ class TestGateCrd4:
     def test_structural_ref_passes(self):
         r = gate_crd4_not_discriminator(_make_edge(), _make_cf(detection_source="structural_ref"), _make_graph())
         assert r.keep is True
+
+
+# ── G-CRD5 tests ────────────────────────────────────────────
+
+
+class TestGateCrd5:
+    """Tests for G-CRD5: Depth Sanity Check."""
+
+    def test_shallow_path_passes(self):
+        r = gate_crd5_depth(_make_edge(), _make_cf(field="spec.cluster.name"), _make_graph())
+        assert r.keep is True
+        assert "depth=2" in r.reason
+
+    def test_medium_path_passes(self):
+        r = gate_crd5_depth(_make_edge(), _make_cf(field="spec.routes.middlewares.name"), _make_graph())
+        assert r.keep is True
+        assert "depth=3" in r.reason
+
+    def test_boundary_depth_passes(self):
+        r = gate_crd5_depth(_make_edge(), _make_cf(field="spec.a.b.c.d"), _make_graph())
+        assert r.keep is True
+        assert "depth=4" in r.reason
+
+    def test_one_over_boundary_fails(self):
+        r = gate_crd5_depth(_make_edge(), _make_cf(field="spec.a.b.c.d.e"), _make_graph())
+        assert r.keep is False
+        assert "depth=5" in r.reason
+
+    def test_deep_k8s_envelope_fails(self):
+        deep_path = "spec.template.pod.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaces"
+        r = gate_crd5_depth(_make_edge(), _make_cf(field=deep_path), _make_graph())
+        assert r.keep is False
+
+    def test_non_spec_prefix_counts_all(self):
+        r = gate_crd5_depth(_make_edge(), _make_cf(field="status.a.b.c.d.e"), _make_graph())
+        assert r.keep is False
+
+
+# ── G-CRD6 tests ────────────────────────────────────────────
+
+
+class TestGateCrd6:
+    """Tests for G-CRD6: Confidence Floor."""
+
+    def test_above_floor_passes(self):
+        r = gate_crd6_confidence(_make_edge(confidence=0.8), _make_cf(), _make_graph())
+        assert r.keep is True
+
+    def test_exactly_at_floor_passes(self):
+        r = gate_crd6_confidence(_make_edge(confidence=0.75), _make_cf(), _make_graph())
+        assert r.keep is True
+
+    def test_below_floor_fails(self):
+        r = gate_crd6_confidence(_make_edge(confidence=0.7), _make_cf(), _make_graph())
+        assert r.keep is False
+
+    def test_low_confidence_fails(self):
+        r = gate_crd6_confidence(_make_edge(confidence=0.5), _make_cf(), _make_graph())
+        assert r.keep is False
