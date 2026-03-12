@@ -43,12 +43,16 @@ def build_identifier_index(
     spec: dict[str, Any],
     skill_paths: dict[str, dict],
     fk_suffixes: tuple[str, ...] | None = None,
+    canonical_map: object | None = None,
 ) -> dict[str, set[str]]:
     """Build a map of resource -> set of identifier field names.
 
     Extracts identifiers from:
     1. Path parameters adjacent to the resource segment (ground truth)
     2. Response schemas of GET/LIST operations (confirmed by format/readOnly)
+
+    When ``canonical_map`` is provided, post-processes the index to merge
+    identifiers from aliased resource names under canonical keys.
 
     All signals are spec-derived — no hardcoded identifier lists.
     """
@@ -115,6 +119,28 @@ def build_identifier_index(
                         )
                         if is_known_stem or has_id_suffix or has_id_format or is_integer or is_readonly_scalar:
                             index[resource].add(fname_lower)
+
+    # Post-process: merge identifiers from aliased resource names under
+    # canonical keys so that lookups by any alias succeed.
+    if canonical_map is not None and hasattr(canonical_map, "canonicalize"):
+        merged: dict[str, set[str]] = {}
+        for raw_key, id_set in index.items():
+            canonical = canonical_map.canonicalize(raw_key)
+            if canonical not in merged:
+                merged[canonical] = set()
+            merged[canonical] |= id_set
+            # Also keep the raw key pointing to the same set
+            if raw_key != canonical:
+                if raw_key not in merged:
+                    merged[raw_key] = set()
+                merged[raw_key] |= id_set
+        # Ensure all aliases have the full merged set
+        for raw_key in index:
+            canonical = canonical_map.canonicalize(raw_key)
+            full_set = merged.get(canonical, set())
+            merged[raw_key] = full_set
+            merged[canonical] = full_set
+        return merged
 
     return index
 
@@ -570,20 +596,28 @@ _FAN_OUT_THRESHOLD = 3
 def suppress_fan_out(
     deps: list[Dependency],
     fk_suffixes: tuple[str, ...] | None = None,
+    canonical_map: object | None = None,
 ) -> list[Dependency]:
     """Penalize non-FK-suffixed fields in high-fan-out target groups.
 
     When 3+ body FK edges point to the same target and strictly >50% lack
     FK suffixes, apply a penalty to all non-FK-suffixed fields in the group.
     FK-suffixed fields are preserved. Non-body sources are excluded.
+
+    When ``canonical_map`` is provided, groups are formed by canonical
+    resource name so that aliased targets (e.g., "instance-groups" and
+    "instance_groups") are combined.
     """
     from idi.generation.dep_adapters.target_inference import _has_fk_suffix
 
-    # Group body deps by target_resource.
+    # Group body deps by canonical target_resource.
     body_groups: dict[str, list[int]] = {}
     for i, dep in enumerate(deps):
         if dep.source == "generic_odg:body":
-            body_groups.setdefault(dep.target_resource, []).append(i)
+            key = dep.target_resource
+            if canonical_map is not None and hasattr(canonical_map, "canonicalize"):
+                key = canonical_map.canonicalize(key)
+            body_groups.setdefault(key, []).append(i)
 
     # Identify indices to penalize.
     penalize: set[int] = set()
@@ -756,7 +790,7 @@ def apply_gates(
             survivors.append(dep)
 
     # Batch post-processing: fan-out suppression, then identifier validation.
-    survivors = suppress_fan_out(survivors, fk_suffixes=fk_suffixes)
+    survivors = suppress_fan_out(survivors, fk_suffixes=fk_suffixes, canonical_map=canonical_map)
     survivors = apply_identifier_validation(survivors, identifier_index, fk_suffixes=fk_suffixes)
 
     return survivors

@@ -175,7 +175,10 @@ def _generate_json_v2(
 
     # Pre-compute identifier index for identifier reference validation.
     from idi.generation.dep_adapters.verify import build_identifier_index
-    identifier_index = build_identifier_index(ctx.schema, ctx.generated_skill_paths, fk_suffixes=fk_suffixes)
+    identifier_index = build_identifier_index(
+        ctx.schema, ctx.generated_skill_paths,
+        fk_suffixes=fk_suffixes, canonical_map=canonical_map,
+    )
 
     for resource, operations in resources.items():
         seen: set = set()
