@@ -67,3 +67,29 @@ def gate_crd2_field_type(
     if ft in _PROMOTABLE_FIELD_TYPES:
         return CrdGateResult("G-CRD2", True, f"type={ft}")
     return CrdGateResult("G-CRD2", False, f"non-ref type: {ft}")
+
+
+# ── Gate G-CRD3: Ref-Shape Sibling Evidence (Non-Blocking) ──
+
+
+def gate_crd3_ref_shape(
+    edge: DependencyEdge,
+    source_cf: ClassifiedField,
+    graph: DependencyGraph,
+) -> CrdGateResult:
+    """G-CRD3: Informational gate — always passes (non-blocking)."""
+    return CrdGateResult("G-CRD3", True, "ref-shape sibling check (non-blocking)")
+
+
+# ── Gate G-CRD4: Discriminator / List-Map Key Exclusion ─────
+
+
+def gate_crd4_not_discriminator(
+    edge: DependencyEdge,
+    source_cf: ClassifiedField,
+    graph: DependencyGraph,
+) -> CrdGateResult:
+    """G-CRD4: Reject edges from list-map key fields."""
+    if "list_map" in source_cf.detection_source:
+        return CrdGateResult("G-CRD4", False, "list-map key")
+    return CrdGateResult("G-CRD4", True, "not discriminator")

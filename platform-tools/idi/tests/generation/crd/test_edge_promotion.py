@@ -5,6 +5,8 @@ from idi.generation.crd.edge_promotion import (
     CrdGateResult,
     gate_crd1_intra_service,
     gate_crd2_field_type,
+    gate_crd3_ref_shape,
+    gate_crd4_not_discriminator,
 )
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.topo_sort import (
@@ -195,3 +197,45 @@ class TestGateCrd2:
     def test_empty_type_fails(self):
         r = gate_crd2_field_type(_make_edge(), _make_cf(field_type=""), _make_graph())
         assert r.keep is False
+
+
+# ── G-CRD3 tests ────────────────────────────────────────────
+
+
+class TestGateCrd3:
+    """Tests for G-CRD3: Ref-Shape Sibling Evidence (non-blocking)."""
+
+    def test_always_passes(self):
+        r = gate_crd3_ref_shape(_make_edge(), _make_cf(), _make_graph())
+        assert r.keep is True
+
+    def test_reason_indicates_non_blocking(self):
+        r = gate_crd3_ref_shape(_make_edge(), _make_cf(), _make_graph())
+        assert "non-blocking" in r.reason
+
+
+# ── G-CRD4 tests ────────────────────────────────────────────
+
+
+class TestGateCrd4:
+    """Tests for G-CRD4: Discriminator / List-Map Key Exclusion."""
+
+    def test_parent_kind_name_passes(self):
+        r = gate_crd4_not_discriminator(_make_edge(), _make_cf(detection_source="parent_kind_name"), _make_graph())
+        assert r.keep is True
+
+    def test_enum_kind_passes(self):
+        r = gate_crd4_not_discriminator(_make_edge(), _make_cf(detection_source="enum_kind"), _make_graph())
+        assert r.keep is True
+
+    def test_list_map_fails(self):
+        r = gate_crd4_not_discriminator(_make_edge(), _make_cf(detection_source="kubernetes_ext_list_map"), _make_graph())
+        assert r.keep is False
+
+    def test_list_map_substring_fails(self):
+        r = gate_crd4_not_discriminator(_make_edge(), _make_cf(detection_source="some_list_map_variant"), _make_graph())
+        assert r.keep is False
+
+    def test_structural_ref_passes(self):
+        r = gate_crd4_not_discriminator(_make_edge(), _make_cf(detection_source="structural_ref"), _make_graph())
+        assert r.keep is True
