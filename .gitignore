@@ -13,18 +13,30 @@ secrets/
 .mcp.json
 
 # Generated catalog artifacts (specs downloaded, skills generated)
-catalog/specs/*.json
-catalog/specs/*.yaml
-catalog/specs/openapi/*.json
-catalog/specs/openapi/*.yaml
-catalog/specs/crd/
-catalog/specs/helm/
-catalog/skills/openapi/
-catalog/skills/crd/
-catalog/skills/helm/
+catalog/specs/
+catalog/skills/
+catalog/catalog/
 
-# Research source repos (cloned for analysis, not committed)
-docs/research/sources/
+# IDI local catalog (generated skills/specs under platform-tools)
+platform-tools/idi/catalog/
+
+# Plans and design docs (local working docs, not committed)
+docs/plans/
+docs/cfm/
+docs/logs/
+docs/research/
+
+# IDI archived code
+platform-tools/idi/idi/generation/_archived/
+
+# IDI lock file (environment-specific)
+platform-tools/idi/uv.lock
+
+# Local scripts (one-off audit/analysis, root-level only)
+/scripts/
+
+# Neo4j experiment
+/idi-neo4j/
 
 # Git worktrees
 .worktrees/

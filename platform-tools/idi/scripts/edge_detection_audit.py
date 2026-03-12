@@ -94,7 +94,7 @@ PIPELINE_EXCLUDED = frozenset({
     "deletionGracePeriodSeconds", "generation", "finalizers",
     "ownerReferences", "managedFields", "annotations", "labels",
 })
-PIPELINE_MAX_DEPTH = 8
+PIPELINE_MAX_DEPTH = 12
 
 # Known side-effect outputs (correctly classified as output, not input ref)
 SIDE_EFFECT_OUTPUTS = {

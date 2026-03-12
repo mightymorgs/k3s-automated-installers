@@ -242,11 +242,16 @@ def download_all(
             results[name] = download_spec(url, output_path, force=force)
 
         elif source_type in ("crd", "artifacthub"):
+            if config.get("chart"):
+                # ArtifactHub chart path — skip download, generate_all handles it
+                logger.info("Skipping %s (chart-based, handled by generate_all)", name)
+                results[name] = True
+                continue
             if output_path.exists() and not force:
                 logger.info("Skipping %s (already exists)", name)
                 results[name] = True
                 continue
-            from idi.generation.crd_schemas import convert_crd_service
+            from idi.generation._archived.crd_schemas_datreeio import convert_crd_service
 
             results[name] = convert_crd_service(name, config, output_path)
 

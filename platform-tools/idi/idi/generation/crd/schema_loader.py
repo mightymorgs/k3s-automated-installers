@@ -106,17 +106,21 @@ def _fetch_chart_artifacts(
     with tarfile.open(fileobj=io.BytesIO(tgz_data), mode="r:gz") as tar:
         for member in tar.getmembers():
             name = member.name
-            # Extract CRDs from templates/crds.yaml or crds/ directory
-            if name.endswith("crds.yaml") or "/crds/" in name and name.endswith(".yaml"):
-                f = tar.extractfile(member)
-                if f:
-                    crds.extend(extract_crds_from_chart(f.read().decode()))
+            if not name.endswith(".yaml"):
+                continue
+            f = tar.extractfile(member)
+            if not f:
+                continue
+            content = f.read().decode()
 
-            # Extract values.yaml
-            if name.endswith("values.yaml") and name.count("/") == 1:
-                f = tar.extractfile(member)
-                if f:
-                    values = yaml.safe_load(f.read().decode()) or {}
+            # Fast pre-filter: only parse files that mention CRDs
+            if "CustomResourceDefinition" not in content:
+                # Still extract values.yaml
+                if name.endswith("values.yaml") and name.count("/") == 1:
+                    values = yaml.safe_load(content) or {}
+                continue
+
+            crds.extend(extract_crds_from_chart(content))
 
     return crds, values
 

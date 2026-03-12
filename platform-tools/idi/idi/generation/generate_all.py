@@ -285,14 +285,17 @@ def _generate_crd_service(
                 "message": f"No CRD schemas loaded for {name}",
             }
 
-        # Ensure registry exists (fallback for direct calls outside generate_all).
+        # Ensure registry exists and contains this service's kinds.
+        # Chart-based services (ArtifactHub) are not loaded in Pass 1 of
+        # generate_all because they require downloading charts. Always merge
+        # the current service's kinds so intra-service refs resolve.
         if registry is None:
             registry = KindRegistry()
-            for schema in schemas:
-                registry.register(
-                    schema["kind"], schema["plural"], schema.get("group", ""),
-                    service=name,
-                )
+        for schema in schemas:
+            registry.register(
+                schema["kind"], schema["plural"], schema.get("group", ""),
+                service=name,
+            )
 
         # Classify fields for each CRD kind.
         all_kinds: Dict[str, Any] = {}
