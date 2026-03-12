@@ -122,6 +122,7 @@ def _infer_resource_hint(operation: OperationInfo) -> str | None:
 def detect_body_deps(
     operation: OperationInfo,
     known_resources: set[str],
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> list[Dependency]:
     """Detect FK dependencies from the full body schema tree.
 
@@ -150,6 +151,7 @@ def detect_body_deps(
         depth=0,
         results=results,
         resource_hint=resource_hint,
+        fk_suffixes=fk_suffixes,
     )
     return results
 
@@ -165,6 +167,7 @@ def _walk_body(
     results: list[Dependency],
     visited: set[int] | None = None,
     resource_hint: str | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> None:
     """Recursive body tree walker (RESTler Tree.iterCtx equivalent)."""
     if depth > _MAX_DEPTH or not isinstance(schema, dict):
@@ -198,15 +201,17 @@ def _walk_body(
                 field_info, known_resources, service, resource,
                 response_fields, current_path, depth, results, visited,
                 resource_hint=resource_hint,
+                fk_suffixes=fk_suffixes,
             )
             continue
 
         # Credential exclusion: skip credential-like fields at any depth.
-        if not _has_fk_suffix(fn_lower) and _CREDENTIAL_PARAMS.match(fn_lower):
+        if not _has_fk_suffix(fn_lower, fk_suffixes) and _CREDENTIAL_PARAMS.match(fn_lower):
             _recurse_nested(
                 field_info, known_resources, service, resource,
                 response_fields, current_path, depth, results, visited,
                 resource_hint=resource_hint,
+                fk_suffixes=fk_suffixes,
             )
             continue
 
@@ -238,7 +243,7 @@ def _walk_body(
         # Precondition gate: only call infer_target() for fields with FK
         # suffix evidence or strong type signal (uuid format, integer type).
         # This fences the fuzzy body matcher to ~30% of its activation surface.
-        has_fk_suffix = _has_fk_suffix(fn_lower)
+        has_fk_suffix = _has_fk_suffix(fn_lower, fk_suffixes)
         items = field_info.get("items", {}) if field_info.get("type") == "array" else {}
         is_strong_type = (
             field_info.get("format") == "uuid"
@@ -251,6 +256,7 @@ def _walk_body(
                 field_info, known_resources, service, resource,
                 response_fields, current_path, depth, results, visited,
                 resource_hint=resource_hint,
+                fk_suffixes=fk_suffixes,
             )
             continue
 
@@ -258,6 +264,7 @@ def _walk_body(
         target, confidence = infer_target(
             field_name, field_info, known_resources,
             container=container, json_path=current_path,
+            fk_suffixes=fk_suffixes,
         )
 
         if target is not None:
@@ -296,6 +303,7 @@ def _recurse_nested(
     results: list[Dependency],
     visited: set[int] | None = None,
     resource_hint: str | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> None:
     """Recurse into nested objects and array items."""
     # Nested object.
@@ -304,6 +312,7 @@ def _recurse_nested(
             field_info, known_resources, service, resource,
             response_fields, current_path, depth + 1, results, visited,
             resource_hint=resource_hint,
+            fk_suffixes=fk_suffixes,
         )
 
     # Array items with properties.
@@ -317,6 +326,7 @@ def _recurse_nested(
             items, known_resources, service, resource,
             response_fields, current_path + ["[0]"], depth + 1, results, visited,
             resource_hint=resource_hint,
+            fk_suffixes=fk_suffixes,
         )
 
     # allOf composition — merge and recurse.
@@ -330,6 +340,7 @@ def _recurse_nested(
                 merged, known_resources, service, resource,
                 response_fields, current_path, depth + 1, results, visited,
                 resource_hint=resource_hint,
+                fk_suffixes=fk_suffixes,
             )
 
     # oneOf / anyOf composition — merge and recurse (same as allOf).
@@ -344,6 +355,7 @@ def _recurse_nested(
                     merged_variant, known_resources, service, resource,
                     response_fields, current_path, depth + 1, results, visited,
                     resource_hint=resource_hint,
+                    fk_suffixes=fk_suffixes,
                 )
 
 

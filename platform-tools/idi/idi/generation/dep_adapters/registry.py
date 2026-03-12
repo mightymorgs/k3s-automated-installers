@@ -83,6 +83,7 @@ class DepAdapterRegistry:
         skill_paths: dict[str, dict] | None = None,
         identifier_index: dict[str, set[str]] | None = None,
         canonical_map: object | None = None,
+        fk_suffixes: tuple[str, ...] | None = None,
     ) -> tuple[list[Dependency], list[Output]]:
         adapters = self.get_adapters_for(spec, operation.service)
         all_deps: list[Dependency] = []
@@ -101,7 +102,7 @@ class DepAdapterRegistry:
         deps = filter_by_confidence(deps)
         # Apply programmatic gates (spec-derived FP filters).
         from idi.generation.dep_adapters.verify import apply_gates
-        deps = apply_gates(deps, operation, spec, skill_paths, identifier_index, canonical_map)
+        deps = apply_gates(deps, operation, spec, skill_paths, identifier_index, canonical_map, fk_suffixes)
         # Suppress body/operationid deps whose target is already covered by a
         # path dep. Path skeleton is authoritative; weaker sources are fenced.
         _FENCED_SOURCES = {"generic_odg:body", "generic_odg:operationid"}

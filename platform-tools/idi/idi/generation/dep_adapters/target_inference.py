@@ -30,7 +30,10 @@ from idi.generation.dep_adapters.naming import (
 )
 from idi.generation.resource_namer import strip_api_version_prefix
 
-_COMMON_FK_SUFFIXES: tuple[str, ...] = (
+# Default FK suffixes used when learned suffixes are not available.
+# This fallback is only used during testing or when the pipeline hasn't
+# computed spec-derived suffixes yet.
+_DEFAULT_FK_SUFFIXES: tuple[str, ...] = (
     "_id", "_pk", "_uuid", "_guid", "_key", "_ref",
     "_ids", "_uuids", "_guids",
     "_number", "_name", "_slug", "_flow",
@@ -68,15 +71,6 @@ _AMBIGUITY_PENALTY = 0.15
 # the field name shares zero stemmed word tokens with the target resource.
 _LEXICAL_COHESION_PENALTY = 0.15
 
-_NEVER_FK_FIELDS: frozenset[str] = frozenset({
-    "name", "slug", "url", "path", "type", "kind", "mode", "format",
-    "description", "summary", "title", "label", "comment",
-    "message", "reason", "error", "help_text", "verbose_name",
-    "content", "body", "text", "notes", "detail",
-    "created", "modified", "updated", "deleted",
-    "enabled", "disabled", "active", "is_active",
-})
-
 _NON_FK_FORMATS: frozenset[str] = frozenset({
     "date-time", "date", "time", "duration",
     "email", "idn-email", "uri", "uri-reference",
@@ -92,6 +86,7 @@ def infer_target(
     *,
     container: str | None = None,
     json_path: list[str] | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> tuple[str | None, float]:
     """Infer target resource from a field name using RESTler-style matching.
 
@@ -107,11 +102,11 @@ def infer_target(
     # Credential exclusion (#1): skip credential-like params unless they
     # have an FK suffix (e.g. token_id, secret_id are legitimate FKs).
     fn_lower = field_name.lower()
-    if not _has_fk_suffix(fn_lower) and _CREDENTIAL_PARAMS.match(fn_lower):
+    if not _has_fk_suffix(fn_lower, fk_suffixes) and _CREDENTIAL_PARAMS.match(fn_lower):
         return None, 0.0
 
     # Compute type-based confidence factor.
-    type_factor = _type_factor(field_name, field_info)
+    type_factor = _type_factor(field_name, field_info, fk_suffixes=fk_suffixes)
     if type_factor <= 0.0:
         return None, 0.0
 
@@ -119,8 +114,8 @@ def infer_target(
     frozen_resources = _freeze(known_resources)
 
     # Generate candidates: field-derived and container-derived separately.
-    field_candidates = _build_candidates(field_name, None)
-    all_candidates = _build_candidates(field_name, container)
+    field_candidates = _build_candidates(field_name, None, fk_suffixes=fk_suffixes)
+    all_candidates = _build_candidates(field_name, container, fk_suffixes=fk_suffixes)
 
     # Score all candidates grouped by resource, tracking origin.
     # Value: (confidence, origin) — 'field' origin wins ties over 'container'.
@@ -176,17 +171,16 @@ def infer_target(
     return top1_resource, round(top1_score, 3)
 
 
-def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
+def _type_factor(
+    field_name: str, field_info: dict[str, Any],
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> float:
     """Compute a confidence multiplier based on field type.
 
     RESTler has no type gate.  We use a soft gate because we lack
     endpoint-based disambiguation.
     """
     fn_lower = field_name.lower()
-
-    # Known non-FK fields.
-    if fn_lower in _NEVER_FK_FIELDS:
-        return 0.0
 
     # --- Schema signal gates (section-03) ---
     # Enum fields are categorical, never FKs.
@@ -219,21 +213,21 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
 
     # String fields — accept with reduced confidence.
     if ftype == "string":
-        if _has_fk_suffix(fn_lower):
+        if _has_fk_suffix(fn_lower, fk_suffixes):
             return 0.8
         # Plain string: only accept if it has a reasonable name.
         return 0.5
 
     # Number type — some APIs use number instead of integer for FK IDs.
     if ftype == "number":
-        if _has_fk_suffix(fn_lower):
+        if _has_fk_suffix(fn_lower, fk_suffixes):
             return 0.5
         return 0.0
 
     # Missing type — possibly unresolved $ref.  Accept with low confidence
     # when the field name is FK-like.
     if not ftype:
-        if _has_fk_suffix(fn_lower):
+        if _has_fk_suffix(fn_lower, fk_suffixes):
             return 0.4
         return 0.2
 
@@ -241,14 +235,20 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
     return 0.0
 
 
-def _has_fk_suffix(fn_lower: str) -> bool:
+def _has_fk_suffix(
+    fn_lower: str,
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> bool:
     """Check if a field name has a common FK suffix."""
-    return any(fn_lower.endswith(s) for s in _COMMON_FK_SUFFIXES)
+    suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
+    return any(fn_lower.endswith(s) for s in suffixes)
 
 
 def _build_candidates(
     field_name: str,
     container: str | None,
+    *,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> list[tuple[str, float, str]]:
     """Generate candidate resource names with base confidence and origin.
 
@@ -283,8 +283,9 @@ def _build_candidates(
     candidates.append((full_normalized, 0.7, "field"))
 
     # --- FK suffix stripping ---
+    _suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
     fn_lower = field_name.lower()
-    for suffix in _COMMON_FK_SUFFIXES:
+    for suffix in _suffixes:
         stripped = fn_lower.removesuffix(suffix)
         if stripped != fn_lower and stripped:
             candidates.append((normalize(stripped), 0.5, "field"))
@@ -295,7 +296,7 @@ def _build_candidates(
     if normalized != field_name:
         # Re-run suffix stripping on the normalized form (e.g. user_uuid → user_id → user)
         norm_lower = normalized.lower()
-        for suffix in _COMMON_FK_SUFFIXES:
+        for suffix in _suffixes:
             stripped = norm_lower.removesuffix(suffix)
             if stripped != norm_lower and stripped:
                 candidates.append((normalize(stripped), 0.48, "field"))

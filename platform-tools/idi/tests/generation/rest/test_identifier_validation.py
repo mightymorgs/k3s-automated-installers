@@ -103,44 +103,52 @@ class TestIdentifierValidationConservative:
 
 
 class TestIdentifierValidationGenericIds:
-    """Generic identifiers always pass regardless of target."""
+    """Spec-derived generic identifiers pass when stem appears in 2+ resources."""
 
     def test_generic_id_passes(self):
-        """'id' is a generic identifier -> always passes."""
+        """'id' appears in 2+ resources -> treated as generic -> passes."""
         deps = [_dep("id", "users")]
-        index = {"users": {"slug"}}  # 'id' not in identifiers, but is generic
+        # 'id' stem appears in both resources -> generic
+        index = {"users": {"slug"}, "orders": {"id"}, "items": {"id"}}
         result = apply_identifier_validation(deps, index)
         assert result[0].confidence == 0.5
 
     def test_generic_uuid_passes(self):
         deps = [_dep("uuid", "users")]
-        index = {"users": {"slug"}}
+        index = {"users": {"slug"}, "orgs": {"uuid"}, "items": {"uuid"}}
         result = apply_identifier_validation(deps, index)
         assert result[0].confidence == 0.5
 
     def test_generic_slug_passes(self):
         deps = [_dep("slug", "items")]
-        index = {"items": {"id"}}
+        index = {"items": {"id"}, "users": {"slug"}, "orgs": {"slug"}}
         result = apply_identifier_validation(deps, index)
         assert result[0].confidence == 0.5
 
     def test_generic_name_passes(self):
         deps = [_dep("name", "resources")]
-        index = {"resources": {"id"}}
+        index = {"resources": {"id"}, "users": {"name"}, "groups": {"name"}}
         result = apply_identifier_validation(deps, index)
         assert result[0].confidence == 0.5
 
     def test_generic_pk_passes(self):
         deps = [_dep("pk", "items")]
-        index = {"items": {"id"}}
+        index = {"items": {"id"}, "users": {"pk"}, "orders": {"pk"}}
         result = apply_identifier_validation(deps, index)
         assert result[0].confidence == 0.5
 
     def test_generic_key_passes(self):
         deps = [_dep("key", "items")]
-        index = {"items": {"id"}}
+        index = {"items": {"id"}, "configs": {"key"}, "settings": {"key"}}
         result = apply_identifier_validation(deps, index)
         assert result[0].confidence == 0.5
+
+    def test_single_resource_stem_not_generic(self):
+        """Stem only in 1 resource is NOT generic -> requires matching."""
+        deps = [_dep("slug", "items")]
+        index = {"items": {"id"}, "users": {"user_id"}}  # slug only in 0 resources
+        result = apply_identifier_validation(deps, index)
+        assert result[0].confidence == 0.05  # Penalized
 
 
 class TestIdentifierValidationSourceFiltering:

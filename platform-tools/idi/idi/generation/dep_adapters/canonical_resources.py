@@ -258,3 +258,82 @@ def _all_forms(normalized: str) -> list[str]:
         forms.append(plural.replace("-", "_"))
 
     return forms
+
+
+# ── FK suffix learning ─────────────────────────────────────────────────
+
+
+def learn_fk_suffixes(
+    spec: dict[str, Any],
+    canonical_map: CanonicalResourceMap,
+) -> tuple[str, ...]:
+    """Learn FK suffix conventions from the spec's path parameters.
+
+    Examines all path parameter names across the spec, strips resource-name
+    prefixes to extract suffixes (e.g., ``user_id`` -> ``_id``), and returns
+    suffixes that appear frequently enough to be conventions.
+
+    Threshold: suffix appears in >30% of path params OR in 2+ distinct params.
+    For specs with <3 path params, returns bare stem-based suffixes only.
+    """
+    paths = spec.get("paths", {})
+    if not paths:
+        return ()
+
+    # Collect (param_name, adjacent_resource) pairs.
+    param_resource_pairs: list[tuple[str, str | None]] = []
+
+    for path_template in paths:
+        segments = _split_path(path_template)
+        prev_resource: str | None = None
+        for seg in segments:
+            m = _PATH_PARAM_RE.match(seg)
+            if m:
+                param_resource_pairs.append((m.group(1), prev_resource))
+            elif seg.lower() not in _SKIP_SEGMENTS and not _VERSION_SEGMENT_RE.match(seg):
+                prev_resource = _normalize(seg)
+
+    if not param_resource_pairs:
+        return ()
+
+    # Extract suffixes.
+    suffix_counts: dict[str, int] = {}
+    for param_name, resource in param_resource_pairs:
+        param_lower = param_name.lower()
+
+        # Try stripping the resource name prefix.
+        suffix = None
+        if resource:
+            # Try singular form of resource as prefix.
+            res_singular = _singularize(resource).replace("-", "_")
+            res_norm = resource.replace("-", "_")
+            for prefix in (res_singular, res_norm, resource):
+                if param_lower.startswith(prefix) and len(param_lower) > len(prefix):
+                    suffix = param_lower[len(prefix):]
+                    if not suffix.startswith("_"):
+                        suffix = "_" + suffix
+                    break
+
+        # Handle bare stems: if param IS a bare word (no underscore, short),
+        # treat "_" + param as a suffix.
+        if suffix is None and "_" not in param_lower and len(param_lower) <= 8:
+            suffix = "_" + param_lower
+
+        if suffix:
+            suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
+
+    if not suffix_counts:
+        return ()
+
+    total_params = len(param_resource_pairs)
+
+    # Apply threshold: >30% of params OR 2+ distinct occurrences.
+    learned: list[tuple[str, int]] = []
+    for suffix, count in suffix_counts.items():
+        proportion = count / total_params if total_params > 0 else 0
+        if count >= 2 or proportion > 0.3:
+            learned.append((suffix, count))
+
+    # Sort by frequency (most common first).
+    learned.sort(key=lambda x: -x[1])
+    return tuple(s for s, _ in learned)

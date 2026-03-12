@@ -78,11 +78,11 @@ class TestIdentifierIndexFromResponseSchemas:
         assert "id" in ids
         assert "series_id" in ids
 
-    def test_extracts_slug_and_name(self):
-        """Standard identifier fields: slug, name, key, pk."""
+    def test_extracts_slug_and_name_with_spec_signals(self):
+        """readOnly string fields are detected as server-generated identifiers."""
         spec = _spec_with_response("/resources", "get", {
-            "slug": {"type": "string"},
-            "name": {"type": "string"},
+            "slug": {"type": "string", "readOnly": True},
+            "name": {"type": "string", "readOnly": True},
             "description": {"type": "string"},
         })
         skill_paths = {
@@ -95,7 +95,7 @@ class TestIdentifierIndexFromResponseSchemas:
         ids = index.get("resources", set())
         assert "slug" in ids
         assert "name" in ids
-        # description is NOT an identifier
+        # description is NOT an identifier (not readOnly, not integer, no format)
         assert "description" not in ids
 
     def test_missing_response_schema_empty_set(self):
@@ -195,7 +195,7 @@ class TestIdentifierIndexEdgeCases:
                     "get": {"responses": {"200": {"content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}}}}},
                 },
                 "/items/{item_id}": {
-                    "get": {"responses": {"200": {"content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}, "slug": {"type": "string"}}}}}}}},
+                    "get": {"responses": {"200": {"content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}, "slug": {"type": "string", "readOnly": True}}}}}}}},
                 },
             },
         }

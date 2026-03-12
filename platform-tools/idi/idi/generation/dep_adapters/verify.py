@@ -33,10 +33,6 @@ _NON_ID_FORMATS: frozenset[str] = frozenset({
     "byte", "binary", "password",
 })
 
-_ID_FIELD_NAMES: frozenset[str] = frozenset({
-    "id", "uuid", "slug", "key", "name", "pk", "uid", "identifier",
-})
-
 _PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
 
 
@@ -46,15 +42,21 @@ _PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
 def build_identifier_index(
     spec: dict[str, Any],
     skill_paths: dict[str, dict],
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> dict[str, set[str]]:
     """Build a map of resource -> set of identifier field names.
 
     Extracts identifiers from:
-    1. Response schemas of GET/LIST operations (id, uuid, pk, key, slug,
-       name fields, and fields ending with ``_id``)
-    2. Path parameters adjacent to the resource segment
+    1. Path parameters adjacent to the resource segment (ground truth)
+    2. Response schemas of GET/LIST operations (confirmed by format/readOnly)
+
+    All signals are spec-derived — no hardcoded identifier lists.
     """
-    from idi.generation.dep_adapters.target_inference import _COMMON_FK_SUFFIXES
+    from idi.generation.dep_adapters.target_inference import _DEFAULT_FK_SUFFIXES
+    suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
+
+    # Collect all path param stems across the spec to use as identifier signals.
+    all_param_stems: set[str] = set()
 
     index: dict[str, set[str]] = {}
 
@@ -67,6 +69,27 @@ def build_identifier_index(
         if resource not in index:
             index[resource] = set()
 
+        # --- Path parameter identifiers (ground truth) ---
+        endpoint = sp_val.get("endpoint", "")
+        if endpoint:
+            segments = endpoint.strip("/").split("/")
+            for i, seg in enumerate(segments):
+                seg_lower = seg.lower().rstrip("/")
+                if seg_lower == resource or seg_lower == resource.replace("-", ""):
+                    if i + 1 < len(segments):
+                        param_match = _PATH_PARAM_RE.match(segments[i + 1])
+                        if param_match:
+                            param_name = param_match.group(1).lower()
+                            index[resource].add(param_name)
+                            all_param_stems.add(param_name)
+                            # Strip resource prefix to learn stem
+                            for suffix in suffixes:
+                                stripped = param_name.removesuffix(suffix)
+                                if stripped != param_name and stripped:
+                                    index[resource].add(stripped)
+                                    all_param_stems.add(stripped)
+                                    break
+
         # --- Response schema identifiers ---
         if op_type in ("list", "retrieve"):
             endpoint = sp_val.get("endpoint", "")
@@ -78,34 +101,20 @@ def build_identifier_index(
                     for fname, fschema in resp_schema.get("properties", {}).items():
                         resolved = _resolve_schema(spec, fschema) if isinstance(fschema, dict) else {}
                         fname_lower = fname.lower()
-                        is_id_name = (
-                            fname_lower in _ID_FIELD_NAMES
-                            or fname_lower.endswith("_id")
-                        )
+                        ftype = resolved.get("type", "")
+                        # Spec-derived signals for identifier detection:
+                        is_known_stem = fname_lower in all_param_stems
+                        has_id_suffix = any(fname_lower.endswith(s) for s in suffixes)
                         has_id_format = resolved.get("format") in ("uuid", "int64", "int32")
-                        if is_id_name or has_id_format:
+                        # Integer fields in responses are strong ID signals
+                        is_integer = ftype == "integer"
+                        # readOnly scalar fields are server-generated identifiers
+                        is_readonly_scalar = (
+                            resolved.get("readOnly") is True
+                            and ftype in ("string", "integer", "number")
+                        )
+                        if is_known_stem or has_id_suffix or has_id_format or is_integer or is_readonly_scalar:
                             index[resource].add(fname_lower)
-
-        # --- Path parameter identifiers ---
-        endpoint = sp_val.get("endpoint", "")
-        if endpoint:
-            segments = endpoint.strip("/").split("/")
-            for i, seg in enumerate(segments):
-                # Check if this segment is the resource name or a variant
-                seg_lower = seg.lower().rstrip("/")
-                if seg_lower == resource or seg_lower == resource.replace("-", ""):
-                    # Next segment is the resource's path param
-                    if i + 1 < len(segments):
-                        param_match = _PATH_PARAM_RE.match(segments[i + 1])
-                        if param_match:
-                            param_name = param_match.group(1).lower()
-                            index[resource].add(param_name)
-                            # Also add stripped form
-                            for suffix in _COMMON_FK_SUFFIXES:
-                                stripped = param_name.removesuffix(suffix)
-                                if stripped != param_name and stripped:
-                                    index[resource].add(stripped)
-                                    break
 
     return index
 
@@ -399,9 +408,10 @@ def _extract_response_id_types(
     for fname, fschema in props.items():
         resolved = _resolve_schema(spec, fschema)
         fname_lower = fname.lower()
-        is_id_name = fname_lower in _ID_FIELD_NAMES or fname_lower.endswith("_id")
+        # Spec-derived: match fields ending with _id or having ID-like format.
+        has_id_suffix = fname_lower.endswith("_id") or fname_lower == "id"
         has_id_format = resolved.get("format") in ("uuid", "int64", "int32")
-        if is_id_name or has_id_format:
+        if has_id_suffix or has_id_format:
             t = resolved.get("type", "")
             if t:
                 types.add(t)
@@ -557,7 +567,10 @@ _FAN_OUT_PENALTY = 0.2
 _FAN_OUT_THRESHOLD = 3
 
 
-def suppress_fan_out(deps: list[Dependency]) -> list[Dependency]:
+def suppress_fan_out(
+    deps: list[Dependency],
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> list[Dependency]:
     """Penalize non-FK-suffixed fields in high-fan-out target groups.
 
     When 3+ body FK edges point to the same target and strictly >50% lack
@@ -578,12 +591,12 @@ def suppress_fan_out(deps: list[Dependency]) -> list[Dependency]:
         if len(indices) < _FAN_OUT_THRESHOLD:
             continue
         fk_count = sum(
-            1 for i in indices if _has_fk_suffix(deps[i].field.lower())
+            1 for i in indices if _has_fk_suffix(deps[i].field.lower(), fk_suffixes)
         )
         non_fk_count = len(indices) - fk_count
         if non_fk_count > fk_count:  # Strictly >50% lack FK suffix
             for i in indices:
-                if not _has_fk_suffix(deps[i].field.lower()):
+                if not _has_fk_suffix(deps[i].field.lower(), fk_suffixes):
                     penalize.add(i)
 
     if not penalize:
@@ -605,16 +618,20 @@ def suppress_fan_out(deps: list[Dependency]) -> list[Dependency]:
 
 _IDENTIFIER_VALIDATION_PENALTY = 0.1
 
-_GENERIC_IDENTIFIERS: frozenset[str] = frozenset({
-    "id", "ids", "uuid", "pk", "key", "slug", "name",
-})
 
+def _strip_fk_suffix(
+    name: str,
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> str:
+    """Strip FK suffixes from a field name.
 
-def _strip_fk_suffix(name: str) -> str:
-    """Strip common FK suffixes from a field name."""
-    from idi.generation.dep_adapters.target_inference import _COMMON_FK_SUFFIXES
+    Uses spec-derived suffixes when available, otherwise falls back to
+    the default suffix list.
+    """
+    from idi.generation.dep_adapters.target_inference import _DEFAULT_FK_SUFFIXES
+    suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
     lower = name.lower()
-    for suffix in _COMMON_FK_SUFFIXES:
+    for suffix in suffixes:
         stripped = lower.removesuffix(suffix)
         if stripped != lower and stripped:
             return stripped
@@ -624,17 +641,35 @@ def _strip_fk_suffix(name: str) -> str:
 def apply_identifier_validation(
     deps: list[Dependency],
     identifier_index: dict[str, set[str]] | None,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> list[Dependency]:
     """Penalize body FK edges where field doesn't match target identifiers.
 
     For each body FK edge, checks if the field name (or its normalized form)
     matches any identifier the target resource produces. Conservative: passes
     edges when no identifier data is available for the target.
+
+    Generic identifier pass-through is derived from the identifier_index
+    itself: if a field stem appears across multiple resources' identifiers,
+    it is treated as a generic identifier (like "id", "name") and always
+    passes validation.
     """
     from idi.generation.dep_adapters.naming import stem_token
 
     if identifier_index is None:
         return deps
+
+    # Derive generic identifiers from the index: stems that appear in 2+
+    # resources are considered universally-valid identifier tokens.
+    stem_resource_count: dict[str, int] = {}
+    for _res, id_fields in identifier_index.items():
+        seen_stems: set[str] = set()
+        for f in id_fields:
+            s = _strip_fk_suffix(f, fk_suffixes)
+            if s not in seen_stems:
+                seen_stems.add(s)
+                stem_resource_count[s] = stem_resource_count.get(s, 0) + 1
+    generic_stems = {s for s, count in stem_resource_count.items() if count >= 2}
 
     result: list[Dependency] = []
     for dep in deps:
@@ -643,9 +678,10 @@ def apply_identifier_validation(
             continue
 
         field_lower = dep.field.lower()
+        field_stripped = _strip_fk_suffix(field_lower, fk_suffixes)
 
-        # Generic identifiers always pass.
-        if field_lower in _GENERIC_IDENTIFIERS:
+        # Spec-derived generic identifiers always pass.
+        if field_stripped in generic_stems:
             result.append(dep)
             continue
 
@@ -665,8 +701,7 @@ def apply_identifier_validation(
 
         # 2. Normalized match: strip FK suffixes and compare.
         if not matched:
-            field_stripped = _strip_fk_suffix(field_lower)
-            id_stripped = {_strip_fk_suffix(i) for i in identifiers}
+            id_stripped = {_strip_fk_suffix(i, fk_suffixes) for i in identifiers}
             if field_stripped in id_stripped:
                 matched = True
 
@@ -697,6 +732,7 @@ def apply_gates(
     skill_paths: dict[str, dict] | None = None,
     identifier_index: dict[str, set[str]] | None = None,
     canonical_map: object | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> list[Dependency]:
     """Apply all gates to a list of dependencies, returning survivors."""
     if not deps:
@@ -720,7 +756,7 @@ def apply_gates(
             survivors.append(dep)
 
     # Batch post-processing: fan-out suppression, then identifier validation.
-    survivors = suppress_fan_out(survivors)
-    survivors = apply_identifier_validation(survivors, identifier_index)
+    survivors = suppress_fan_out(survivors, fk_suffixes=fk_suffixes)
+    survivors = apply_identifier_validation(survivors, identifier_index, fk_suffixes=fk_suffixes)
 
     return survivors
