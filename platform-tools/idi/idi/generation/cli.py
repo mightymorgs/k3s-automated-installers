@@ -238,6 +238,8 @@ def _generate_json_v2(
                     "fact_ref": d.fact_ref,
                     "lineage_type": d.lineage_type,
                     "discriminator_value": d.discriminator_value,
+                    "detection_source": d.detection_source.value,
+                    "confidence": d.confidence,
                 })
 
             # Build field_refs_map and all_field_refs from validated deps only.

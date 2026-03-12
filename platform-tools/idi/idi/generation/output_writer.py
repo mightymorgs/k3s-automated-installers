@@ -218,6 +218,10 @@ def emit_resource(
                     d["lineage_type"] = dep["lineage_type"]
                 if dep.get("discriminator_value"):
                     d["discriminator_value"] = dep["discriminator_value"]
+                if dep.get("detection_source"):
+                    d["detection_source"] = dep["detection_source"]
+                if dep.get("confidence") is not None:
+                    d["confidence"] = dep["confidence"]
                 clean_deps.append(d)
             op_doc["depends_on"] = clean_deps
         else:
