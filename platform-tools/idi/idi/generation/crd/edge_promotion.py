@@ -127,3 +127,79 @@ def gate_crd6_confidence(
     if edge.confidence < _PROMOTION_CONFIDENCE_FLOOR:
         return CrdGateResult("G-CRD6", False, f"conf={edge.confidence} < {_PROMOTION_CONFIDENCE_FLOOR}")
     return CrdGateResult("G-CRD6", True, f"conf={edge.confidence}")
+
+
+# ── Gate registry ────────────────────────────────────────────
+
+_CRD_PROMOTION_GATES = [
+    gate_crd1_intra_service,
+    gate_crd2_field_type,
+    gate_crd3_ref_shape,
+    gate_crd4_not_discriminator,
+    gate_crd5_depth,
+    gate_crd6_confidence,
+]
+
+
+# ── Promotion runner ─────────────────────────────────────────
+
+
+def promote_soft_edges(
+    edges: list[DependencyEdge],
+    classified_fields_index: dict[tuple[str, str, str], ClassifiedField],
+    graph: DependencyGraph,
+) -> list[DependencyEdge]:
+    """Promote qualified soft/optional intra-service edges to hard.
+
+    For each non-hard edge, looks up its ClassifiedField and runs all
+    6 gates. If ALL gates pass, the edge is promoted to hard. Otherwise
+    the original edge is kept unchanged.
+
+    Args:
+        edges: Raw dependency edges from Step 4.
+        classified_fields_index: Keyed by (source_gk, field_path, target_gk).
+        graph: Partially-built graph with nodes populated.
+
+    Returns:
+        New list with promoted edges.
+    """
+    promoted: list[DependencyEdge] = []
+    for edge in edges:
+        if edge.edge_type == "hard":
+            promoted.append(edge)
+            continue
+
+        cf = classified_fields_index.get(
+            (edge.source_gk, edge.source_field, edge.target_gk),
+        )
+        if cf is None:
+            promoted.append(edge)
+            continue
+
+        results = [gate(edge, cf, graph) for gate in _CRD_PROMOTION_GATES]
+        all_pass = all(r.keep for r in results)
+
+        if all_pass:
+            promoted.append(DependencyEdge(
+                source_gk=edge.source_gk,
+                target_gk=edge.target_gk,
+                edge_type="hard",
+                source_field=edge.source_field,
+                detection_source=edge.detection_source,
+                confidence=edge.confidence,
+            ))
+            logger.info(
+                "PROMOTED %s -> %s [%s] gates=%s",
+                edge.source_gk, edge.target_gk, edge.detection_source,
+                " ".join(f"{r.gate}:OK" for r in results),
+            )
+        else:
+            promoted.append(edge)
+            failed = [r for r in results if not r.keep]
+            logger.debug(
+                "KEPT-SOFT %s -> %s [%s] failed=%s",
+                edge.source_gk, edge.target_gk, edge.detection_source,
+                " ".join(f"{r.gate}:{r.reason}" for r in failed),
+            )
+
+    return promoted

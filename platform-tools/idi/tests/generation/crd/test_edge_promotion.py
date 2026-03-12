@@ -9,6 +9,7 @@ from idi.generation.crd.edge_promotion import (
     gate_crd4_not_discriminator,
     gate_crd5_depth,
     gate_crd6_confidence,
+    promote_soft_edges,
 )
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.topo_sort import (
@@ -300,3 +301,112 @@ class TestGateCrd6:
     def test_low_confidence_fails(self):
         r = gate_crd6_confidence(_make_edge(confidence=0.5), _make_cf(), _make_graph())
         assert r.keep is False
+
+
+# ── promote_soft_edges() tests ───────────────────────────────
+
+
+class TestPromoteSoftEdges:
+    """Tests for promote_soft_edges() runner."""
+
+    def _build_index(self, cf, edge):
+        """Build a CF index entry matching an edge."""
+        return {(edge.source_gk, edge.source_field, edge.target_gk): cf}
+
+    def test_hard_edge_passthrough(self):
+        edge = _make_edge(edge_type="hard")
+        result = promote_soft_edges([edge], {}, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+        assert result[0] is edge  # same object
+
+    def test_soft_edge_promoted_all_gates_pass(self):
+        edge = _make_edge(edge_type="soft")
+        cf = _make_cf()
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+
+    def test_optional_edge_promoted_all_gates_pass(self):
+        edge = _make_edge(edge_type="optional")
+        cf = _make_cf()
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+
+    def test_soft_edge_kept_external_target(self):
+        edge = _make_edge(edge_type="soft", target_gk="/StorageClass")
+        cf = _make_cf()
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "soft"
+
+    def test_soft_edge_kept_boolean_type(self):
+        edge = _make_edge(edge_type="soft")
+        cf = _make_cf(field_type="boolean")
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "soft"
+
+    def test_soft_edge_kept_too_deep(self):
+        edge = _make_edge(edge_type="soft", source_field="spec.a.b.c.d.e")
+        cf = _make_cf(field="spec.a.b.c.d.e")
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "soft"
+
+    def test_soft_edge_kept_low_confidence(self):
+        edge = _make_edge(edge_type="soft", confidence=0.5)
+        cf = _make_cf(confidence=0.5)
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "soft"
+
+    def test_cf_not_found_preserves_edge(self):
+        edge = _make_edge(edge_type="soft")
+        result = promote_soft_edges([edge], {}, _make_graph())
+        assert len(result) == 1
+        assert result[0].edge_type == "soft"
+        assert result[0] is edge
+
+    def test_promoted_edge_preserves_fields(self):
+        edge = _make_edge(
+            edge_type="soft",
+            source_gk="postgresql.cnpg.io/Backup",
+            target_gk="postgresql.cnpg.io/Cluster",
+            source_field="spec.cluster.name",
+            detection_source="parent_kind_name",
+            confidence=0.8,
+        )
+        cf = _make_cf()
+        idx = self._build_index(cf, edge)
+        result = promote_soft_edges([edge], idx, _make_graph())
+        promoted = result[0]
+        assert promoted.edge_type == "hard"
+        assert promoted.source_gk == edge.source_gk
+        assert promoted.target_gk == edge.target_gk
+        assert promoted.source_field == edge.source_field
+        assert promoted.detection_source == edge.detection_source
+        assert promoted.confidence == edge.confidence
+
+    def test_multiple_edges_mixed_outcomes(self):
+        graph = _make_graph()
+        hard_edge = _make_edge(edge_type="hard")
+        soft_promotable = _make_edge(edge_type="soft")
+        soft_external = _make_edge(edge_type="soft", target_gk="/StorageClass")
+        cf = _make_cf()
+        idx = {
+            (soft_promotable.source_gk, soft_promotable.source_field, soft_promotable.target_gk): cf,
+            (soft_external.source_gk, soft_external.source_field, soft_external.target_gk): cf,
+        }
+        result = promote_soft_edges([hard_edge, soft_promotable, soft_external], idx, graph)
+        assert len(result) == 3
+        assert result[0].edge_type == "hard"  # passthrough
+        assert result[1].edge_type == "hard"  # promoted
+        assert result[2].edge_type == "soft"  # kept (external)
