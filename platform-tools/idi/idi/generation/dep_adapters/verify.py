@@ -573,6 +573,30 @@ def gate_g7_crud_signature(
     return GateResult("G7", False, f"POST-only, no IDs: {ops_list}")
 
 
+# ── Gate G8: readOnly Consumer Exclusion ──────────────────────────────
+
+
+def gate_g8_readonly(
+    dep: Dependency,
+    field_schema: dict[str, Any] | None,
+    spec: dict[str, Any],
+    operation: OperationInfo,
+    skill_paths: dict[str, dict] | None,
+) -> GateResult:
+    """G8: readOnly Consumer Exclusion — kill readOnly fields.
+
+    Server-generated fields (readOnly: true) cannot be FK consumer inputs.
+    Defense-in-depth: _type_factor() already checks readOnly, but G8 catches
+    edges from adapters that bypass _type_factor().
+    """
+    if field_schema is None:
+        return GateResult("G8", True, "no schema")
+
+    if field_schema.get("readOnly", False) is True:
+        return GateResult("G8", False, "readOnly field")
+    return GateResult("G8", True, "not readOnly")
+
+
 # ── Gate registry ────────────────────────────────────────────────────
 
 _GATES = [
@@ -583,6 +607,7 @@ _GATES = [
     gate_g5_producer_consumer,
     gate_g6_query_filter,
     gate_g7_crud_signature,
+    gate_g8_readonly,
 ]
 
 
@@ -756,6 +781,113 @@ def apply_identifier_validation(
     return result
 
 
+# ── Self-reference config downweight ──────────────────────────────────
+
+_SELF_REF_DOWNWEIGHT = 0.3
+
+
+def apply_self_reference_downweight(
+    deps: list[Dependency],
+    identifier_index: dict[str, set[str]] | None,
+    spec: dict[str, Any],
+    skill_paths: dict[str, dict] | None,
+    canonical_map: object | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> list[Dependency]:
+    """Downweight body FK edges where field is a non-identifier response property.
+
+    When a consumer field name matches a property in the target resource's
+    response schema but does NOT match any known identifier for that resource,
+    it's likely a config value (e.g., ``cache_ttl`` on ``gateway``). Apply
+    a 0.3 multiplier to reduce confidence without killing.
+
+    Fields with FK suffixes or that match identifiers are exempt.
+    """
+    from idi.generation.dep_adapters.target_inference import _has_fk_suffix
+
+    if skill_paths is None or identifier_index is None:
+        return deps
+
+    from idi.generation.dep_adapters.target_inference import _DEFAULT_FK_SUFFIXES
+    suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
+
+    result: list[Dependency] = []
+    for dep in deps:
+        if dep.source != "generic_odg:body":
+            result.append(dep)
+            continue
+
+        field_lower = dep.field.lower()
+
+        # FK-suffixed fields are exempt
+        if _has_fk_suffix(field_lower, fk_suffixes):
+            result.append(dep)
+            continue
+
+        # Resolve target resource name
+        target = dep.target_resource
+        if canonical_map is not None and hasattr(canonical_map, "canonicalize"):
+            target = canonical_map.canonicalize(target)
+
+        # Find target's response schema
+        target_service = dep.target_service or "svc"
+        resp_props: set[str] | None = None
+        for op_name in ("list", "retrieve"):
+            for sp_key, sp_val in skill_paths.items():
+                parts = sp_key.split("/")
+                if len(parts) != 3:
+                    continue
+                _svc, res, op = parts
+                res_canonical = res
+                if canonical_map is not None and hasattr(canonical_map, "canonicalize"):
+                    res_canonical = canonical_map.canonicalize(res)
+                if res_canonical == target and op == op_name:
+                    endpoint = sp_val.get("endpoint", "")
+                    method = sp_val.get("method", "")
+                    if endpoint and method:
+                        resp_schema = _get_target_response_schema(spec, endpoint, method)
+                        if resp_schema:
+                            resp_schema = _resolve_schema(spec, resp_schema)
+                            props = resp_schema.get("properties", {})
+                            resp_props = {k.lower() for k in props}
+                            break
+            if resp_props is not None:
+                break
+
+        if resp_props is None:
+            result.append(dep)
+            continue
+
+        # Check if field is a response property
+        if field_lower not in resp_props:
+            result.append(dep)
+            continue
+
+        # Check if field matches an identifier (exempt if so)
+        identifiers = identifier_index.get(target, set())
+        if not identifiers:
+            identifiers = identifier_index.get(dep.target_resource, set())
+
+        if field_lower in identifiers:
+            result.append(dep)
+            continue
+
+        # Check stripped form against identifiers
+        field_stripped = _strip_fk_suffix(field_lower, fk_suffixes)
+        id_stripped = {_strip_fk_suffix(i, fk_suffixes) for i in identifiers}
+        if field_stripped in id_stripped:
+            result.append(dep)
+            continue
+
+        # Field is a response property but NOT an identifier -> downweight
+        result.append(Dependency(
+            **{**dep.__dict__,
+               "confidence": round(dep.confidence * _SELF_REF_DOWNWEIGHT, 3)},
+        ))
+
+    return result
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 
@@ -789,8 +921,13 @@ def apply_gates(
         if not killed:
             survivors.append(dep)
 
-    # Batch post-processing: fan-out suppression, then identifier validation.
+    # Batch post-processing: fan-out suppression, identifier validation,
+    # then self-reference config downweight.
     survivors = suppress_fan_out(survivors, fk_suffixes=fk_suffixes, canonical_map=canonical_map)
     survivors = apply_identifier_validation(survivors, identifier_index, fk_suffixes=fk_suffixes)
+    survivors = apply_self_reference_downweight(
+        survivors, identifier_index, spec, skill_paths,
+        canonical_map=canonical_map, fk_suffixes=fk_suffixes,
+    )
 
     return survivors
