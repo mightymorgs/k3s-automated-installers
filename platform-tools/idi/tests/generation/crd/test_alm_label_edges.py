@@ -457,3 +457,87 @@ class TestIntegration:
 
         assert len(edges) == 1
         assert isinstance(edges[0], DependencyEdge)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end tests (Section 04)
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEnd:
+    """End-to-end: ALM examples → topo sort → correct tiers."""
+
+    def test_strimzi_tiers(self):
+        """Strimzi ecosystem: Kafka/KafkaConnect at Tier 0, children at Tier 1."""
+        from idi.generation.crd.topo_sort import build_dependency_graph, topological_sort
+
+        reg = _make_registry_with_strimzi()
+        classified_fields = {
+            ("kafka.strimzi.io", k): []
+            for k in ("Kafka", "KafkaTopic", "KafkaUser", "KafkaConnect", "KafkaConnector")
+        }
+        olm_owned = {"strimzi": _make_strimzi_owned()}
+
+        adapter = OlmDepAdapter(registry=reg)
+        examples = [
+            {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "Kafka",
+             "metadata": {"name": "production-cluster"}, "spec": {}},
+            {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+             "metadata": {"name": "orders-topic",
+                          "labels": {"strimzi.io/cluster": "production-cluster"}},
+             "spec": {}},
+            {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaUser",
+             "metadata": {"name": "orders-user",
+                          "labels": {"strimzi.io/cluster": "production-cluster"}},
+             "spec": {}},
+            {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaConnect",
+             "metadata": {"name": "debezium-connect"}, "spec": {}},
+            {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaConnector",
+             "metadata": {"name": "pg-connector",
+                          "labels": {"strimzi.io/cluster": "debezium-connect"}},
+             "spec": {}},
+        ]
+        alm_edges = adapter._extract_alm_label_edges(examples, _make_strimzi_owned(), reg)
+
+        graph = build_dependency_graph(classified_fields, {}, olm_owned, {}, reg, alm_edges=alm_edges)
+        tiers = topological_sort(graph)
+
+        tier_map = {}
+        for t in tiers:
+            for gk in t.kinds:
+                tier_map[gk] = t.tier
+
+        assert tier_map["kafka.strimzi.io/Kafka"] == 0
+        assert tier_map["kafka.strimzi.io/KafkaConnect"] == 0
+        assert tier_map["kafka.strimzi.io/KafkaTopic"] == 1
+        assert tier_map["kafka.strimzi.io/KafkaUser"] == 1
+        assert tier_map["kafka.strimzi.io/KafkaConnector"] == 1
+
+    def test_no_olm_data_all_tier_zero(self):
+        """Service without OLM data → all Kinds at Tier 0 (flat)."""
+        from idi.generation.crd.topo_sort import build_dependency_graph, topological_sort
+
+        reg = _make_registry_with_strimzi()
+        classified_fields = {
+            ("kafka.strimzi.io", k): []
+            for k in ("Kafka", "KafkaTopic", "KafkaUser")
+        }
+        olm_owned = {"strimzi": _make_strimzi_owned()}
+
+        graph = build_dependency_graph(classified_fields, {}, olm_owned, {}, reg)
+        tiers = topological_sort(graph)
+
+        assert len(tiers) == 1
+        assert set(tiers[0].kinds) == {
+            "kafka.strimzi.io/Kafka",
+            "kafka.strimzi.io/KafkaTopic",
+            "kafka.strimzi.io/KafkaUser",
+        }
+
+    def test_olm_data_no_alm_examples(self):
+        """Service with OLM data but no alm-examples → no ALM edges."""
+        from idi.generation.crd.olm_loader import extract_alm_examples
+
+        csv = {"metadata": {"annotations": {}}, "spec": {}}
+        examples = extract_alm_examples(csv)
+        assert examples == []

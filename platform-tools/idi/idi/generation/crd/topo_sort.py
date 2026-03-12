@@ -1303,12 +1303,22 @@ def _cli_main(
 
     # Build graph and sort.
     registry = KindRegistry()
+
+    # Collect ALM label edges from OLM CSV data.
+    from idi.generation.dep_adapters.olm_deps import OlmDepAdapter
+
+    olm_adapter = OlmDepAdapter(registry=registry)
+    alm_edges: list[DependencyEdge] = []
+    for service in catalog_data["olm_owned"]:
+        alm_edges.extend(olm_adapter.detect_alm_label_edges(service, registry))
+
     graph = build_dependency_graph(
         classified_fields=catalog_data["classified_fields"],
         rbac_outputs=catalog_data["rbac_outputs"],
         olm_owned=catalog_data["olm_owned"],
         side_effect_dict=catalog_data["side_effect_dict"],
         registry=registry,
+        alm_edges=alm_edges,
     )
     tiers = topological_sort(graph)
 
