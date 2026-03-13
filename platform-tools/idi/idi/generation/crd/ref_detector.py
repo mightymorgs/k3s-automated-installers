@@ -932,6 +932,92 @@ def _parse_api_version(value: str) -> tuple[str, str] | None:
     return None
 
 
+def detect_label_selector_ref(
+    field: WalkedField,
+    registry: KindRegistry,
+    source_service: str,
+) -> ClassifiedField | None:
+    """Detect label selector fields that reference a target Kind.
+
+    Pattern: field name ends in 'Selector', schema is LabelSelector shape
+    (matchLabels/matchExpressions), stripped suffix resolves to a registered
+    Kind in the same service.
+
+    Example: podMonitorSelector -> PodMonitor (kube-prometheus).
+    """
+    name = field.name
+
+    # Guard: bare "selector" / "Selector" -> empty base.
+    if name.lower() == "selector":
+        return None
+
+    # Strip Selector/Selectors suffix.
+    if name.endswith("Selectors"):
+        base = name[: -len("Selectors")]
+    elif name.endswith("Selector"):
+        base = name[: -len("Selector")]
+    else:
+        return None
+
+    if not base:
+        return None
+
+    # Validate LabelSelector schema shape.
+    schema = field.schema
+    if schema.get("type") != "object":
+        return None
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return None
+    if "matchLabels" not in properties and "matchExpressions" not in properties:
+        return None
+
+    # Convert camelCase base to PascalCase.
+    pascal_base = base[0].upper() + base[1:]
+
+    # Case-insensitive exact match in KindRegistry (try first).
+    pascal_lower = pascal_base.lower()
+    matched_entry = None
+    for kind_name, entries in registry._kind_to_entries.items():
+        if kind_name.lower() != pascal_lower:
+            continue
+        for entry in entries:
+            if entry.is_core:
+                continue  # Skip core K8s types (e.g., Node)
+            if entry.service == source_service:
+                matched_entry = entry
+                break
+        if matched_entry:
+            break
+
+    # Fallback: suffix match (e.g., "rule" -> "PrometheusRule").
+    # Only if exact match failed and base is >= 4 chars (avoid short matches).
+    if matched_entry is None and len(pascal_base) >= 4:
+        candidates = registry.suffix_match(pascal_base, scope_service=source_service)
+        non_core = [e for e in candidates if not e.is_core]
+        if len(non_core) == 1:
+            matched_entry = non_core[0]
+        # Multiple matches = ambiguous, skip (precision > recall).
+
+    if matched_entry is None:
+        return None
+
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=0.85,
+        field_type="object",
+        target_kind=matched_entry.kind,
+        target_group=matched_entry.group,
+        required=field.required,
+        cross_namespace=False,
+        description=schema.get("description", ""),
+        detection_source="ref_detector:label_selector_ref",
+        fact_shape="identity",
+        blocks_descendants=False,
+    )
+
+
 def detect_ref_tuple(
     field: WalkedField,
     registry: KindRegistry,
@@ -1939,6 +2025,11 @@ def _classify_walked_field_inner(
     tuple_results = detect_ref_tuple(field, registry)
     if tuple_results:
         return tuple_results
+
+    # Step 4.1: Label selector ref detection (exclusive).
+    label_sel_result = detect_label_selector_ref(field, registry, current_service)
+    if label_sel_result is not None:
+        return [label_sel_result]
 
     # --- Additive detectors (steps 5-12): results accumulate ---
     additive_results: list[ClassifiedField] = []
