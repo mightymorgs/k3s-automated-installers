@@ -611,6 +611,80 @@ _GATES = [
 ]
 
 
+# ── Association shape detector ─────────────────────────────────────────
+
+
+def detect_association_indices(
+    deps: list[Dependency],
+    operation: OperationInfo,
+    identifier_index: dict[str, set[str]] | None,
+    canonical_map: object | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> set[int]:
+    """Detect edges from association-shaped operations; return indices to protect.
+
+    An association schema has 2+ fields matching identifiers of 2+ DIFFERENT
+    target resources. These are legitimate multi-FK schemas (e.g., memberships,
+    bindings) that should not be penalized by fan-out suppression.
+    """
+    from idi.generation.dep_adapters.target_inference import _has_fk_suffix
+
+    if identifier_index is None:
+        return set()
+
+    body = operation.body_schema
+    if not body or "properties" not in body:
+        return set()
+
+    # Collect body FK edge indices
+    body_indices: list[int] = []
+    for i, dep in enumerate(deps):
+        if dep.source == "generic_odg:body":
+            body_indices.append(i)
+
+    if len(body_indices) < 2:
+        return set()
+
+    # For each body FK field, check if it matches an identifier of its target
+    # Track which distinct target resources are matched
+    matched_targets: dict[str, list[int]] = {}  # target -> [dep_indices]
+    for i in body_indices:
+        dep = deps[i]
+        field_lower = dep.field.lower()
+
+        # Only consider FK-suffixed fields as association candidates
+        if not _has_fk_suffix(field_lower, fk_suffixes):
+            continue
+
+        target = dep.target_resource
+        if canonical_map is not None and hasattr(canonical_map, "canonicalize"):
+            target = canonical_map.canonicalize(target)
+
+        # Check if field matches target's identifiers
+        identifiers = identifier_index.get(target, set())
+        if not identifiers:
+            identifiers = identifier_index.get(dep.target_resource, set())
+
+        if field_lower in identifiers:
+            matched_targets.setdefault(target, []).append(i)
+            continue
+
+        # Stripped form match
+        field_stripped = _strip_fk_suffix(field_lower, fk_suffixes)
+        id_stripped = {_strip_fk_suffix(f, fk_suffixes) for f in identifiers}
+        if field_stripped in id_stripped:
+            matched_targets.setdefault(target, []).append(i)
+
+    # Association shape: 2+ fields match 2+ DIFFERENT target resources
+    if len(matched_targets) >= 2:
+        protected: set[int] = set()
+        for indices in matched_targets.values():
+            protected.update(indices)
+        return protected
+
+    return set()
+
+
 # ── Fan-out suppression ──────────────────────────────────────────────
 
 # Penalty multiplier for non-FK-suffixed fields in high-fan-out groups.
@@ -622,12 +696,14 @@ def suppress_fan_out(
     deps: list[Dependency],
     fk_suffixes: tuple[str, ...] | None = None,
     canonical_map: object | None = None,
+    protected_indices: set[int] | None = None,
 ) -> list[Dependency]:
     """Penalize non-FK-suffixed fields in high-fan-out target groups.
 
     When 3+ body FK edges point to the same target and strictly >50% lack
     FK suffixes, apply a penalty to all non-FK-suffixed fields in the group.
     FK-suffixed fields are preserved. Non-body sources are excluded.
+    Indices in ``protected_indices`` (from association detection) are never penalized.
 
     When ``canonical_map`` is provided, groups are formed by canonical
     resource name so that aliased targets (e.g., "instance-groups" and
@@ -657,6 +733,10 @@ def suppress_fan_out(
             for i in indices:
                 if not _has_fk_suffix(deps[i].field.lower(), fk_suffixes):
                     penalize.add(i)
+
+    # Remove protected indices (association detection)
+    if protected_indices:
+        penalize -= protected_indices
 
     if not penalize:
         return deps
@@ -888,6 +968,108 @@ def apply_self_reference_downweight(
     return result
 
 
+# ── Type/format compatibility check ──────────────────────────────────
+
+_TYPE_COMPAT_PENALTY = 0.2
+
+# Type groups for compatibility: integer/number are interchangeable,
+# string types are interchangeable.
+_NUMERIC_TYPES = frozenset({"integer", "number"})
+_STRING_TYPES = frozenset({"string"})
+
+
+def apply_type_compatibility_check(
+    deps: list[Dependency],
+    identifier_type_index: dict[str, dict[str, tuple[str, str]]] | None,
+    operation: OperationInfo,
+    spec: dict[str, Any],
+    canonical_map: object | None = None,
+) -> list[Dependency]:
+    """Penalize body FK edges with type/format incompatibility.
+
+    Compares the consumer field's type/format against the target resource's
+    identifier types. Incompatible pairs (e.g., string(uuid) consumer vs
+    integer-only target) receive a 0.2 multiplier.
+
+    The ``identifier_type_index`` maps resource -> {field: (type, format)}.
+    """
+    if identifier_type_index is None:
+        return deps
+
+    body_props = operation.body_schema.get("properties", {}) if operation.body_schema else {}
+
+    result: list[Dependency] = []
+    for dep in deps:
+        if dep.source != "generic_odg:body":
+            result.append(dep)
+            continue
+
+        # Get consumer field schema
+        field_schema = body_props.get(dep.field, {})
+        if not field_schema:
+            result.append(dep)
+            continue
+
+        consumer_type = field_schema.get("type", "")
+        consumer_format = field_schema.get("format", "")
+
+        # Array unwrapping
+        if consumer_type == "array":
+            items = field_schema.get("items", {})
+            consumer_type = items.get("type", "")
+            consumer_format = items.get("format", "")
+
+        if not consumer_type:
+            result.append(dep)
+            continue
+
+        # Look up target's identifier types
+        target = dep.target_resource
+        if canonical_map is not None and hasattr(canonical_map, "canonicalize"):
+            target = canonical_map.canonicalize(target)
+
+        target_types = identifier_type_index.get(target)
+        if not target_types:
+            target_types = identifier_type_index.get(dep.target_resource)
+        if not target_types:
+            result.append(dep)
+            continue
+
+        # Check compatibility against ALL target identifier types
+        compatible = False
+        for _field, (t_type, t_fmt) in target_types.items():
+            if _types_compatible(consumer_type, consumer_format, t_type, t_fmt):
+                compatible = True
+                break
+
+        if compatible:
+            result.append(dep)
+        else:
+            result.append(Dependency(
+                **{**dep.__dict__,
+                   "confidence": round(dep.confidence * _TYPE_COMPAT_PENALTY, 3)},
+            ))
+
+    return result
+
+
+def _types_compatible(
+    consumer_type: str, consumer_format: str,
+    target_type: str, target_format: str,
+) -> bool:
+    """Check if consumer and target types are compatible for FK references."""
+    # Same type -> compatible
+    if consumer_type == target_type:
+        return True
+    # Numeric types are interchangeable
+    if consumer_type in _NUMERIC_TYPES and target_type in _NUMERIC_TYPES:
+        return True
+    # String types are interchangeable (with or without uuid format)
+    if consumer_type in _STRING_TYPES and target_type in _STRING_TYPES:
+        return True
+    return False
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 
@@ -921,9 +1103,18 @@ def apply_gates(
         if not killed:
             survivors.append(dep)
 
+    # Detect association shapes to protect from fan-out.
+    association_protected = detect_association_indices(
+        survivors, operation, identifier_index,
+        canonical_map=canonical_map, fk_suffixes=fk_suffixes,
+    )
+
     # Batch post-processing: fan-out suppression, identifier validation,
-    # then self-reference config downweight.
-    survivors = suppress_fan_out(survivors, fk_suffixes=fk_suffixes, canonical_map=canonical_map)
+    # self-reference downweight, then type compatibility.
+    survivors = suppress_fan_out(
+        survivors, fk_suffixes=fk_suffixes,
+        canonical_map=canonical_map, protected_indices=association_protected,
+    )
     survivors = apply_identifier_validation(survivors, identifier_index, fk_suffixes=fk_suffixes)
     survivors = apply_self_reference_downweight(
         survivors, identifier_index, spec, skill_paths,
