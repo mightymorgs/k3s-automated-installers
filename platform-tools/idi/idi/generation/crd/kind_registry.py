@@ -400,6 +400,45 @@ class KindRegistry:
 
         return candidates
 
+    # ------------------------------------------------------------------
+    # Suffix matching (false-negative detectors)
+    # ------------------------------------------------------------------
+
+    def suffix_match(
+        self,
+        suffix: str,
+        scope_service: str | None = None,
+    ) -> list[KindEntry]:
+        """Return all registered Kinds whose name ends with the given suffix.
+
+        Case-insensitive matching to handle K8s acronyms (e.g., TLSOption
+        matches suffix "option"). Deduplicates by Kind name — returns one
+        entry per unique Kind, preferring same-service entries.
+
+        Args:
+            suffix: The suffix to match against Kind names.
+            scope_service: If provided, only return Kinds from this service.
+
+        Returns:
+            List of matching KindEntry objects, deduplicated by Kind name.
+        """
+        if not suffix:
+            return []
+
+        suffix_lower = suffix.lower()
+        # Collect matches, deduplicating by Kind name.
+        seen_kinds: dict[str, KindEntry] = {}
+        for entry in self._sorted_entries:
+            if not entry.kind.lower().endswith(suffix_lower):
+                continue
+            if scope_service is not None and entry.service != scope_service:
+                continue
+            # Deduplicate: keep first (longest Kind name due to sort order).
+            if entry.kind not in seen_kinds:
+                seen_kinds[entry.kind] = entry
+
+        return list(seen_kinds.values())
+
     def _fuzzy_try_plural(
         self,
         normalized: str,
