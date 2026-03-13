@@ -11,6 +11,11 @@ from idi.generation.crd.ref_detector import (
     detect_label_selector_ref,
     detect_suffix_ref_tuple,
 )
+from idi.generation.crd.topo_sort import (
+    DependencyEdge,
+    KindNode,
+    _filter_cross_service_cross_group_edges,
+)
 from idi.generation.crd.schema_walker import WalkedField
 
 
@@ -674,3 +679,118 @@ class TestAugmentPolymorphicRefs:
         augmented = [r for r in results if r.target_kind == "ClusterIssuer"]
         assert len(augmented) == 1
         assert augmented[0].confidence == 0.6
+
+
+# ---------------------------------------------------------------------------
+# _filter_cross_service_cross_group_edges tests
+# ---------------------------------------------------------------------------
+
+
+def _make_edge(
+    source_gk: str, target_gk: str,
+    edge_type: str = "hard",
+    source_field: str = "spec.ref",
+    detection_source: str = "ref_detector:ref_tuple",
+    confidence: float = 0.85,
+) -> DependencyEdge:
+    return DependencyEdge(
+        source_gk=source_gk, target_gk=target_gk,
+        edge_type=edge_type, source_field=source_field,
+        detection_source=detection_source, confidence=confidence,
+    )
+
+
+@pytest.fixture
+def cross_service_nodes() -> dict[str, KindNode]:
+    return {
+        "networking.istio.io/EnvoyFilter": KindNode(kind="EnvoyFilter", group="networking.istio.io", service="istio"),
+        "postgresql.cnpg.io/Cluster": KindNode(kind="Cluster", group="postgresql.cnpg.io", service="cnpg"),
+        "monitoring.coreos.com/AlertmanagerConfig": KindNode(kind="AlertmanagerConfig", group="monitoring.coreos.com", service="kube-prometheus"),
+        "notification.toolkit.fluxcd.io/Receiver": KindNode(kind="Receiver", group="notification.toolkit.fluxcd.io", service="flux"),
+        "helm.toolkit.fluxcd.io/HelmRelease": KindNode(kind="HelmRelease", group="helm.toolkit.fluxcd.io", service="flux"),
+        "source.toolkit.fluxcd.io/GitRepository": KindNode(kind="GitRepository", group="source.toolkit.fluxcd.io", service="flux"),
+        "cert-manager.io/Certificate": KindNode(kind="Certificate", group="cert-manager.io", service="cert-manager"),
+        "cert-manager.io/Issuer": KindNode(kind="Issuer", group="cert-manager.io", service="cert-manager"),
+    }
+
+
+class TestFilterCrossServiceCrossGroupEdges:
+    def test_same_group_unchanged(self, cross_service_nodes: dict[str, KindNode]):
+        """Same group edge (cert-manager -> cert-manager) -> unchanged."""
+        edge = _make_edge("cert-manager.io/Certificate", "cert-manager.io/Issuer")
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+
+    def test_different_group_same_service_unchanged(self, cross_service_nodes: dict[str, KindNode]):
+        """Different group, same service (flux helm -> flux source) -> unchanged."""
+        edge = _make_edge("helm.toolkit.fluxcd.io/HelmRelease", "source.toolkit.fluxcd.io/GitRepository")
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+
+    def test_different_group_different_service_heuristic_demoted(self, cross_service_nodes: dict[str, KindNode]):
+        """Different group and service with new FN detector source -> demoted."""
+        edge = _make_edge(
+            "networking.istio.io/EnvoyFilter", "postgresql.cnpg.io/Cluster",
+            edge_type="hard", detection_source="ref_detector:suffix_ref_tuple",
+        )
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "optional"
+
+    def test_different_group_different_service_soft_heuristic_demoted(self, cross_service_nodes: dict[str, KindNode]):
+        """Different group and service (prom -> flux) with soft heuristic -> demoted."""
+        edge = _make_edge(
+            "monitoring.coreos.com/AlertmanagerConfig",
+            "notification.toolkit.fluxcd.io/Receiver",
+            edge_type="soft",
+            detection_source="ref_detector:suffix_ref_tuple",
+        )
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "optional"
+
+    def test_different_group_different_service_strong_source_unchanged(self, cross_service_nodes: dict[str, KindNode]):
+        """Different group and service with strong source (ref_tuple) -> unchanged."""
+        edge = _make_edge(
+            "networking.istio.io/EnvoyFilter", "postgresql.cnpg.io/Cluster",
+            edge_type="hard", detection_source="ref_detector:ref_tuple",
+        )
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+
+    def test_already_optional_stays_optional(self, cross_service_nodes: dict[str, KindNode]):
+        """Already optional cross-group cross-service edge -> stays optional."""
+        edge = _make_edge(
+            "networking.istio.io/EnvoyFilter",
+            "postgresql.cnpg.io/Cluster",
+            edge_type="optional",
+            detection_source="ref_detector:suffix_ref_tuple",
+        )
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "optional"
+
+    def test_missing_node_unchanged(self, cross_service_nodes: dict[str, KindNode]):
+        """Edge with node not in nodes dict -> unchanged (safety)."""
+        edge = _make_edge("unknown.io/Foo", "postgresql.cnpg.io/Cluster", edge_type="hard")
+        result = _filter_cross_service_cross_group_edges([edge], cross_service_nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "hard"
+
+    def test_external_node_unchanged(self, cross_service_nodes: dict[str, KindNode]):
+        """Edge to external node -> unchanged (don't demote core K8s refs)."""
+        nodes = dict(cross_service_nodes)
+        nodes["/Secret"] = KindNode(kind="Secret", group="", service="core", is_external=True)
+        edge = _make_edge(
+            "cert-manager.io/Certificate", "/Secret",
+            edge_type="soft", detection_source="ref_detector:suffix_ref_tuple",
+        )
+        nodes["cert-manager.io/Certificate"] = KindNode(
+            kind="Certificate", group="cert-manager.io", service="cert-manager",
+        )
+        result = _filter_cross_service_cross_group_edges([edge], nodes)
+        assert len(result) == 1
+        assert result[0].edge_type == "soft"

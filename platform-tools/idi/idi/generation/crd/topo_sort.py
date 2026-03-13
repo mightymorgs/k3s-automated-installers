@@ -211,6 +211,71 @@ def _filter_cross_ecosystem_edges(
             result.append(e)
     return result
 
+
+_CROSS_SERVICE_DEMOTABLE_SOURCES = frozenset({
+    "ref_detector:suffix_ref_tuple",
+    "ref_detector:label_selector_ref",
+    "ref_detector:polymorphic_ref",
+})
+
+
+def _filter_cross_service_cross_group_edges(
+    edges: list[DependencyEdge],
+    nodes: dict[str, KindNode],
+) -> list[DependencyEdge]:
+    """Demote weak/heuristic edges that cross both API group and service boundaries.
+
+    Only demotes edges from heuristic detection sources (suffix_ref_tuple,
+    label_selector_ref, polymorphic_ref, parent_kind_name, fuzzy_kind_name,
+    enum_kind). Strong structural detectors (ref_tuple, ref, structural_ref)
+    are left unchanged.
+
+    Allows same-service cross-group edges (e.g., Flux's multiple API groups).
+    Skips external nodes (core K8s resources).
+    """
+    result: list[DependencyEdge] = []
+    for e in edges:
+        src_group = e.source_gk.split("/")[0]
+        tgt_group = e.target_gk.split("/")[0]
+
+        if src_group == tgt_group:
+            result.append(e)
+            continue
+
+        src_node = nodes.get(e.source_gk)
+        tgt_node = nodes.get(e.target_gk)
+
+        if src_node is None or tgt_node is None:
+            result.append(e)
+            continue
+
+        # Don't demote edges involving external nodes (core K8s types).
+        if src_node.is_external or tgt_node.is_external:
+            result.append(e)
+            continue
+
+        if src_node.service == tgt_node.service:
+            result.append(e)
+            continue
+
+        # Only demote heuristic detection sources.
+        if e.detection_source not in _CROSS_SERVICE_DEMOTABLE_SOURCES:
+            result.append(e)
+            continue
+
+        # Different group AND different service AND heuristic source -> demote.
+        if e.edge_type == "optional":
+            result.append(e)
+        else:
+            result.append(DependencyEdge(
+                source_gk=e.source_gk, target_gk=e.target_gk,
+                edge_type="optional", source_field=e.source_field,
+                detection_source=e.detection_source, confidence=e.confidence,
+            ))
+
+    return result
+
+
 # Regex to strip TLD from API group for service derivation.
 _TLD_RE = re.compile(r"\.(io|dev|com|org|net|k8s\.io)$")
 
@@ -356,6 +421,9 @@ def build_dependency_graph(
         external_kinds=external_kinds,
     )
     raw_dep_edges = _promote(raw_dep_edges, cf_index, graph_stub)
+
+    # Step 4c: Cross-service cross-group filter (runs AFTER promotion).
+    raw_dep_edges = _filter_cross_service_cross_group_edges(raw_dep_edges, nodes)
 
     # Step 5: RBAC production edges.
     for service, outputs in rbac_outputs.items():
