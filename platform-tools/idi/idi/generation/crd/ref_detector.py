@@ -932,6 +932,91 @@ def _parse_api_version(value: str) -> tuple[str, str] | None:
     return None
 
 
+def _augment_polymorphic_refs(
+    results: list[ClassifiedField],
+    field: WalkedField,
+    registry: KindRegistry,
+    source_service: str,
+    source_kind: str,
+) -> list[ClassifiedField]:
+    """Add polymorphic alternatives for ref_tuple/kind_registry results with unconstrained kind fields.
+
+    For each result from ref_tuple or kind_registry detection sources:
+    1. Check if the field schema has a 'kind' property without enum constraint
+    2. Find same-group siblings in KindRegistry
+    3. Apply substring name affinity filter
+    4. Emit additional ClassifiedField entries for matching siblings
+    """
+    schema = field.schema
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return results
+
+    kind_prop = properties.get("kind")
+    if kind_prop is None:
+        return results
+
+    # If kind has enum constraint, it's already handled by ref_tuple.
+    if isinstance(kind_prop.get("enum"), list):
+        return results
+
+    augmented: list[ClassifiedField] = []
+    for result in results:
+        # Only augment ref_tuple or kind_registry detection sources.
+        src = result.detection_source
+        if "ref_tuple" not in src and "kind_registry" not in src:
+            continue
+
+        # Find same-group siblings.
+        api_group = registry.group_for_kind(result.target_kind)
+        if api_group is None:
+            continue
+        siblings = registry.kinds_for_group(api_group)
+
+        # Remove primary target and source Kind.
+        siblings = siblings - {result.target_kind, source_kind}
+
+        # Substring name affinity filter.
+        target_lower = result.target_kind.lower()
+        affine = []
+        for sib in siblings:
+            sib_lower = sib.lower()
+            if target_lower in sib_lower or sib_lower in target_lower:
+                affine.append(sib)
+
+        # Filter to same service.
+        same_service = []
+        for sib in affine:
+            entries = registry._kind_to_entries.get(sib, [])
+            for entry in entries:
+                if entry.service == source_service:
+                    same_service.append(entry)
+                    break
+
+        # Safety valve: too many siblings = ambiguous.
+        if len(same_service) > 5:
+            continue
+
+        for entry in same_service:
+            augmented.append(ClassifiedField(
+                field=result.field,
+                role="input_ref",
+                confidence=result.confidence,
+                field_type=result.field_type,
+                target_kind=entry.kind,
+                target_group=entry.group,
+                required=result.required,
+                cross_namespace=result.cross_namespace,
+                description=result.description,
+                detection_source="ref_detector:polymorphic_ref",
+                fact_shape="identity",
+                target_field=result.target_field,
+                blocks_descendants=result.blocks_descendants,
+            ))
+
+    return results + augmented
+
+
 def _singularize(word: str) -> str:
     """Simple English singularization for K8s property names.
 
@@ -2024,6 +2109,10 @@ def classify_walked_field(
     if field.depth_confidence < 1.0:
         for classified in results:
             classified.confidence *= field.depth_confidence
+
+    # Polymorphic augmentation: add same-group siblings for unconstrained kind fields.
+    if results:
+        results = _augment_polymorphic_refs(results, field, registry, current_service, kind)
 
     return results
 

@@ -6,6 +6,7 @@ import pytest
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.kind_registry import KindEntry, KindRegistry
 from idi.generation.crd.ref_detector import (
+    _augment_polymorphic_refs,
     _singularize,
     detect_label_selector_ref,
     detect_suffix_ref_tuple,
@@ -457,3 +458,219 @@ class TestDetectSuffixRefTuple:
         results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
         assert len(results) == 1
         assert results[0].cross_namespace is False
+
+
+# ---------------------------------------------------------------------------
+# _augment_polymorphic_refs tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def certmanager_registry() -> KindRegistry:
+    """KindRegistry with cert-manager Kinds."""
+    reg = KindRegistry()
+    reg.register("Issuer", "issuers", "cert-manager.io", service="cert-manager")
+    reg.register("ClusterIssuer", "clusterissuers", "cert-manager.io", service="cert-manager")
+    reg.register("Certificate", "certificates", "cert-manager.io", service="cert-manager")
+    reg.register("CertificateRequest", "certificaterequests", "cert-manager.io", service="cert-manager")
+    return reg
+
+
+def _issuer_ref_schema(*, has_kind: bool = True, kind_enum: list[str] | None = None) -> dict:
+    """Build issuerRef-like schema."""
+    props: dict = {
+        "name": {"type": "string"},
+        "group": {"type": "string"},
+    }
+    if has_kind:
+        kind_prop: dict = {"type": "string"}
+        if kind_enum is not None:
+            kind_prop["enum"] = kind_enum
+        props["kind"] = kind_prop
+    return {"type": "object", "properties": props, "required": ["name"]}
+
+
+def _make_primary_result(
+    field_path: str = "spec.issuerRef",
+    target_kind: str = "Issuer",
+    target_group: str = "cert-manager.io",
+    confidence: float = 0.85,
+    detection_source: str = "ref_detector:ref_tuple",
+) -> ClassifiedField:
+    """Create a primary ClassifiedField as if from detect_ref_tuple."""
+    return ClassifiedField(
+        field=field_path,
+        role="input_ref",
+        confidence=confidence,
+        field_type="object",
+        target_kind=target_kind,
+        target_group=target_group,
+        required=True,
+        cross_namespace=False,
+        description="",
+        detection_source=detection_source,
+        fact_shape="identity",
+        blocks_descendants=True,
+    )
+
+
+class TestAugmentPolymorphicRefs:
+    def test_adds_cluster_issuer(self, certmanager_registry: KindRegistry):
+        """Primary Issuer -> adds ClusterIssuer (substring match)."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        kinds = {r.target_kind for r in results}
+        assert "Issuer" in kinds
+        assert "ClusterIssuer" in kinds
+
+    def test_does_not_add_certificate(self, certmanager_registry: KindRegistry):
+        """'Issuer' not in 'Certificate' -> Certificate not added."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        kinds = {r.target_kind for r in results}
+        assert "Certificate" not in kinds
+        assert "CertificateRequest" not in kinds
+
+    def test_inherits_primary_confidence(self, certmanager_registry: KindRegistry):
+        """Augmented result inherits primary's confidence."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result(confidence=0.85)
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        augmented = [r for r in results if r.target_kind == "ClusterIssuer"]
+        assert len(augmented) == 1
+        assert augmented[0].confidence == 0.85
+
+    def test_detection_source(self, certmanager_registry: KindRegistry):
+        """Augmented result has detection_source='ref_detector:polymorphic_ref'."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        augmented = [r for r in results if r.target_kind == "ClusterIssuer"]
+        assert augmented[0].detection_source == "ref_detector:polymorphic_ref"
+
+    def test_same_field_path(self, certmanager_registry: KindRegistry):
+        """Augmented result has same field path as primary."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result(field_path="spec.issuerRef")
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        augmented = [r for r in results if r.target_kind == "ClusterIssuer"]
+        assert augmented[0].field == "spec.issuerRef"
+
+    def test_target_group_from_registry(self, certmanager_registry: KindRegistry):
+        """Augmented result has target_group from KindRegistry."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        augmented = [r for r in results if r.target_kind == "ClusterIssuer"]
+        assert augmented[0].target_group == "cert-manager.io"
+
+    def test_kind_with_enum_no_augmentation(self, certmanager_registry: KindRegistry):
+        """kind field has enum -> no augmentation (already constrained)."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema(kind_enum=["Issuer"]))
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1  # Only original
+        assert results[0].target_kind == "Issuer"
+
+    def test_kind_with_multi_enum_no_augmentation(self, certmanager_registry: KindRegistry):
+        """kind field with multi-value enum -> no augmentation."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema(
+            kind_enum=["Issuer", "ClusterIssuer"],
+        ))
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1
+
+    def test_no_kind_property_no_augmentation(self, certmanager_registry: KindRegistry):
+        """Schema has no kind property -> no augmentation."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema(has_kind=False))
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1
+
+    def test_no_same_group_siblings(self):
+        """Primary target has no same-group siblings -> empty additions."""
+        reg = KindRegistry()
+        reg.register("Issuer", "issuers", "cert-manager.io", service="cert-manager")
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, reg, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1  # Only original
+
+    def test_safety_valve_too_many_siblings(self):
+        """More than 5 surviving siblings -> no augmentation."""
+        reg = KindRegistry()
+        reg.register("Issuer", "issuers", "cert-manager.io", service="cert-manager")
+        for i in range(7):
+            reg.register(f"ClusterIssuer{i}", f"clusterissuer{i}s", "cert-manager.io", service="cert-manager")
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, reg, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1  # Only original
+
+    def test_sibling_different_service_filtered(self):
+        """Sibling in different service -> filtered out."""
+        reg = KindRegistry()
+        reg.register("Issuer", "issuers", "cert-manager.io", service="cert-manager")
+        reg.register("ClusterIssuer", "clusterissuers", "cert-manager.io", service="other-service")
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        results = _augment_polymorphic_refs(
+            [primary], field, reg, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1
+
+    def test_source_kind_excluded(self, certmanager_registry: KindRegistry):
+        """Source Kind excluded from siblings."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result()
+        # Source is "Certificate" — shouldn't appear in augmented results
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        kinds = {r.target_kind for r in results}
+        assert "Certificate" not in kinds
+
+    def test_wrong_detection_source_no_augmentation(self, certmanager_registry: KindRegistry):
+        """detection_source not containing 'ref_tuple' or 'kind_registry' -> no augmentation."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result(detection_source="ref_detector:label_selector_ref")
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        assert len(results) == 1
+
+    def test_depth_decayed_confidence_inherited(self, certmanager_registry: KindRegistry):
+        """Depth-decayed primary (confidence 0.6) -> augmented also has 0.6."""
+        field = _make_field("issuerRef", schema=_issuer_ref_schema())
+        primary = _make_primary_result(confidence=0.6)
+        results = _augment_polymorphic_refs(
+            [primary], field, certmanager_registry, "cert-manager", "Certificate",
+        )
+        augmented = [r for r in results if r.target_kind == "ClusterIssuer"]
+        assert len(augmented) == 1
+        assert augmented[0].confidence == 0.6
