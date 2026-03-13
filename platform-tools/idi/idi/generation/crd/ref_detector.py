@@ -932,6 +932,104 @@ def _parse_api_version(value: str) -> tuple[str, str] | None:
     return None
 
 
+def _singularize(word: str) -> str:
+    """Simple English singularization for K8s property names.
+
+    Handles: options->option, stores->store, policies->policy,
+    addresses->address, classes->class.
+    Preserves words that don't end in standard plural suffixes.
+    """
+    # ies -> y  (policies -> policy)
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    # ses, xes, zes, shes, ches -> strip es
+    if word.endswith(("ses", "xes", "zes")):
+        return word[:-2]
+    if word.endswith(("shes", "ches")):
+        return word[:-2]
+    # s but not ss, not us, and word long enough
+    if word.endswith("s") and not word.endswith("ss") and not word.endswith("us") and len(word) > 3:
+        return word[:-1]
+    return word
+
+
+def detect_suffix_ref_tuple(
+    field: WalkedField,
+    registry: KindRegistry,
+    source_service: str,
+) -> list[ClassifiedField]:
+    """Detect {name, namespace} reference objects via property name suffix matching.
+
+    Identifies object fields with required 'name' and optional 'namespace'
+    but NO kind/apiGroup/apiVersion. Resolves target Kind by matching the
+    field name (singularized) as a suffix of registered Kind names.
+    """
+    schema = field.schema
+    if schema.get("type") != "object":
+        return []
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return []
+
+    # Must have 'name' as a required string property.
+    if "name" not in properties:
+        return []
+    required = schema.get("required", [])
+    if "name" not in required:
+        return []
+
+    # Must NOT have kind/apiGroup/apiVersion (defer to detect_ref_tuple).
+    if "kind" in properties or "apiGroup" in properties or "apiVersion" in properties:
+        return []
+
+    # Generate suffix candidates.
+    raw_name = field.name
+    singular = _singularize(raw_name)
+    candidates = [raw_name]
+    if singular != raw_name:
+        candidates.append(singular)
+
+    # Collect unique Kind matches across all candidates.
+    seen_kinds: dict[str, KindEntry] = {}
+    for candidate in candidates:
+        if len(candidate) < 4:
+            continue
+        # Title-case for suffix_match.
+        titled = candidate[0].upper() + candidate[1:]
+        matches = registry.suffix_match(titled, scope_service=source_service)
+        for entry in matches:
+            if entry.is_core:
+                continue
+            if entry.kind not in seen_kinds:
+                seen_kinds[entry.kind] = entry
+
+    if not seen_kinds:
+        return []
+
+    cross_namespace = "namespace" in properties
+    confidence = 0.80 if len(seen_kinds) == 1 else 0.65
+
+    results = []
+    for entry in seen_kinds.values():
+        results.append(ClassifiedField(
+            field=field.path,
+            role="input_ref",
+            confidence=confidence,
+            field_type="object",
+            target_kind=entry.kind,
+            target_group=entry.group,
+            required=field.required,
+            cross_namespace=cross_namespace,
+            description=schema.get("description", ""),
+            detection_source="ref_detector:suffix_ref_tuple",
+            fact_shape="identity",
+            target_field="name",
+            blocks_descendants=True,
+        ))
+
+    return results
+
+
 def detect_label_selector_ref(
     field: WalkedField,
     registry: KindRegistry,
@@ -2030,6 +2128,11 @@ def _classify_walked_field_inner(
     label_sel_result = detect_label_selector_ref(field, registry, current_service)
     if label_sel_result is not None:
         return [label_sel_result]
+
+    # Step 4.2: Suffix ref tuple detection (exclusive).
+    suffix_results = detect_suffix_ref_tuple(field, registry, current_service)
+    if suffix_results:
+        return suffix_results
 
     # --- Additive detectors (steps 5-12): results accumulate ---
     additive_results: list[ClassifiedField] = []

@@ -5,7 +5,11 @@ import pytest
 
 from idi.generation.crd.field_classifier import ClassifiedField
 from idi.generation.crd.kind_registry import KindEntry, KindRegistry
-from idi.generation.crd.ref_detector import detect_label_selector_ref
+from idi.generation.crd.ref_detector import (
+    _singularize,
+    detect_label_selector_ref,
+    detect_suffix_ref_tuple,
+)
 from idi.generation.crd.schema_walker import WalkedField
 
 
@@ -255,3 +259,201 @@ class TestDetectLabelSelectorRef:
         assert result.fact_shape == "identity"
         assert result.blocks_descendants is False
         assert result.target_group == "monitoring.coreos.com"
+
+
+# ---------------------------------------------------------------------------
+# _singularize tests
+# ---------------------------------------------------------------------------
+
+
+class TestSingularize:
+    def test_options(self):
+        assert _singularize("options") == "option"
+
+    def test_stores(self):
+        assert _singularize("stores") == "store"
+
+    def test_policies(self):
+        assert _singularize("policies") == "policy"
+
+    def test_addresses(self):
+        assert _singularize("addresses") == "address"
+
+    def test_ingress_preserved(self):
+        """ingress does not end in a standard plural suffix."""
+        assert _singularize("ingress") == "ingress"
+
+    def test_tls_preserved(self):
+        assert _singularize("tls") == "tls"
+
+    def test_status_preserved(self):
+        """status ends in 'us' — should not be mangled."""
+        assert _singularize("status") == "status"
+
+    def test_classes(self):
+        assert _singularize("classes") == "class"
+
+    def test_proxy_preserved(self):
+        """proxy doesn't end in 's'."""
+        assert _singularize("proxy") == "proxy"
+
+    def test_bus_preserved(self):
+        """bus is too short after removing 's'."""
+        assert _singularize("bus") == "bus"
+
+
+# ---------------------------------------------------------------------------
+# detect_suffix_ref_tuple tests
+# ---------------------------------------------------------------------------
+
+
+def _ref_tuple_schema(
+    *, has_name: bool = True, has_namespace: bool = True,
+    has_kind: bool = False, has_api_group: bool = False,
+    has_api_version: bool = False, name_required: bool = True,
+) -> dict:
+    """Build a reference tuple object schema."""
+    props = {}
+    required = []
+    if has_name:
+        props["name"] = {"type": "string"}
+        if name_required:
+            required.append("name")
+    if has_namespace:
+        props["namespace"] = {"type": "string"}
+    if has_kind:
+        props["kind"] = {"type": "string"}
+    if has_api_group:
+        props["apiGroup"] = {"type": "string"}
+    if has_api_version:
+        props["apiVersion"] = {"type": "string"}
+    schema: dict = {"type": "object", "properties": props}
+    if required:
+        schema["required"] = required
+    return schema
+
+
+@pytest.fixture
+def traefik_ref_registry() -> KindRegistry:
+    """KindRegistry with traefik Kinds + a core Secret."""
+    reg = KindRegistry()
+    reg.register("TLSOption", "tlsoptions", "traefik.io", service="traefik")
+    reg.register("TLSStore", "tlsstores", "traefik.io", service="traefik")
+    reg.register("IngressRoute", "ingressroutes", "traefik.io", service="traefik")
+    return reg
+
+
+class TestDetectSuffixRefTuple:
+    def test_options_matches_tls_option(self, traefik_ref_registry: KindRegistry):
+        """'options' with {name, namespace} -> TLSOption at 0.80."""
+        field = _make_field("options", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert len(results) == 1
+        assert results[0].target_kind == "TLSOption"
+        assert results[0].confidence == 0.80
+        assert results[0].detection_source == "ref_detector:suffix_ref_tuple"
+
+    def test_store_matches_tls_store(self, traefik_ref_registry: KindRegistry):
+        """'store' with {name, namespace} -> TLSStore at 0.80."""
+        field = _make_field("store", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert len(results) == 1
+        assert results[0].target_kind == "TLSStore"
+        assert results[0].confidence == 0.80
+
+    def test_option_singular_matches(self, traefik_ref_registry: KindRegistry):
+        """'option' (already singular) -> TLSOption at 0.80."""
+        field = _make_field("option", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert len(results) == 1
+        assert results[0].target_kind == "TLSOption"
+
+    def test_missing_name_property(self, traefik_ref_registry: KindRegistry):
+        """Schema missing 'name' property -> []."""
+        field = _make_field("options", schema=_ref_tuple_schema(has_name=False))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results == []
+
+    def test_name_not_required(self, traefik_ref_registry: KindRegistry):
+        """'name' not in required list -> []."""
+        field = _make_field("options", schema=_ref_tuple_schema(name_required=False))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results == []
+
+    def test_has_kind_defers(self, traefik_ref_registry: KindRegistry):
+        """Schema has 'kind' property -> [] (defer to detect_ref_tuple)."""
+        field = _make_field("options", schema=_ref_tuple_schema(has_kind=True))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results == []
+
+    def test_has_api_group_defers(self, traefik_ref_registry: KindRegistry):
+        """Schema has 'apiGroup' property -> [] (defer to detect_ref_tuple)."""
+        field = _make_field("options", schema=_ref_tuple_schema(has_api_group=True))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results == []
+
+    def test_has_api_version_defers(self, traefik_ref_registry: KindRegistry):
+        """Schema has 'apiVersion' property -> [] (defer to detect_ref_tuple)."""
+        field = _make_field("options", schema=_ref_tuple_schema(has_api_version=True))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results == []
+
+    def test_short_candidate_rejected(self, traefik_ref_registry: KindRegistry):
+        """Field name candidate < 4 chars (e.g., 'ref') -> []."""
+        field = _make_field("ref", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results == []
+
+    def test_core_kind_filtered(self):
+        """Resolved Kind is core (is_core=True) -> filtered out."""
+        reg = KindRegistry()
+        reg.register("TLSOption", "tlsoptions", "traefik.io", service="traefik")
+        # Secret is core
+        field = _make_field("secrets", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, reg, "traefik")
+        assert results == []
+
+    def test_wrong_service_filtered(self, traefik_ref_registry: KindRegistry):
+        """Resolved Kind in different service -> filtered out."""
+        field = _make_field("options", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "other-service")
+        assert results == []
+
+    def test_multiple_matches_lower_confidence(self):
+        """Multiple Kind matches -> all emitted at confidence 0.65."""
+        reg = KindRegistry()
+        reg.register("TLSStore", "tlsstores", "traefik.io", service="traefik")
+        reg.register("SecretStore", "secretstores", "traefik.io", service="traefik")
+        field = _make_field("stores", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, reg, "traefik")
+        assert len(results) == 2
+        kinds = {r.target_kind for r in results}
+        assert "TLSStore" in kinds
+        assert "SecretStore" in kinds
+        assert all(r.confidence == 0.65 for r in results)
+
+    def test_blocks_descendants(self, traefik_ref_registry: KindRegistry):
+        """blocks_descendants is True (children are ref components)."""
+        field = _make_field("options", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert len(results) == 1
+        assert results[0].blocks_descendants is True
+
+    def test_field_type_is_object(self, traefik_ref_registry: KindRegistry):
+        """field_type is 'object'."""
+        field = _make_field("options", schema=_ref_tuple_schema())
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results[0].field_type == "object"
+
+    def test_cross_namespace_when_namespace_present(self, traefik_ref_registry: KindRegistry):
+        """cross_namespace is True when namespace property exists."""
+        field = _make_field("options", schema=_ref_tuple_schema(has_namespace=True))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert results[0].cross_namespace is True
+
+    def test_cross_namespace_false_without_namespace(self, traefik_ref_registry: KindRegistry):
+        """cross_namespace is False when namespace property absent."""
+        field = _make_field("options", schema=_ref_tuple_schema(has_namespace=False))
+        results = detect_suffix_ref_tuple(field, traefik_ref_registry, "traefik")
+        assert len(results) == 1
+        assert results[0].cross_namespace is False
