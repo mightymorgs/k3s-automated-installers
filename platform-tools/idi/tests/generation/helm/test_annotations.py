@@ -1,4 +1,4 @@
-"""Tests for helm annotation parser (Stage 1 partial — Slice 1)."""
+"""Tests for helm annotation parser (Stage 1 — Slices 1 & 2)."""
 from __future__ import annotations
 
 import pytest
@@ -133,7 +133,7 @@ class TestFindNextYamlKey:
         assert key is None
 
     def test_returns_none_when_key_too_far(self):
-        lines = ["# c1", "# c2", "# c3", "# c4", "# c5", "# c6", "key: val"]
+        lines = [f"# c{i}" for i in range(11)] + ["key: val"]
         key = find_next_yaml_key(lines, 0, 0)
         assert key is None
 
@@ -141,3 +141,107 @@ class TestFindNextYamlKey:
         lines = ["  key: value"]
         key = find_next_yaml_key(lines, 0, 2)
         assert key == "key"
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: Enhanced annotations
+# ---------------------------------------------------------------------------
+
+class TestMultiLineParam:
+    def test_continuation_lines(self):
+        text = (
+            "## @param auth.password [string] Password for the database\n"
+            "## This is a longer description\n"
+            "## that continues\n"
+            "auth:\n"
+            "  password: \"\"\n"
+        )
+        result, _ = parse_annotations(text, {("auth", "password")})
+        assert ("auth", "password") in result
+        desc = result[("auth", "password")].description
+        assert "Password for the database" in desc
+        assert "longer description" in desc
+
+    def test_continuation_stops_at_next_param(self):
+        text = (
+            "## @param auth.user [string] Username\n"
+            "## @param auth.password [string] Password\n"
+            "auth:\n"
+            "  user: admin\n"
+            "  password: \"\"\n"
+        )
+        result, _ = parse_annotations(text, {("auth", "user"), ("auth", "password")})
+        assert result[("auth", "user")].description == "Username"
+        assert result[("auth", "password")].description == "Password"
+
+    def test_single_line_still_works(self):
+        text = "## @param name [string] Simple\nname: val\n"
+        result, _ = parse_annotations(text, {("name",)})
+        assert result[("name",)].description == "Simple"
+
+
+class TestHelmDocsTypeExpansion:
+    def test_string_array(self):
+        text = "# -- (string[]) List of names\nnames: []\n"
+        result, _ = parse_annotations(text, {("names",)})
+        assert result[("names",)].type == "array"
+
+    def test_int_or_string(self):
+        text = "# -- (int|string) Port or name\nport: 8080\n"
+        result, _ = parse_annotations(text, {("port",)})
+        assert result[("port",)].type == "string"
+
+    def test_bool(self):
+        text = "# -- (bool) Enable feature\nenabled: true\n"
+        result, _ = parse_annotations(text, {("enabled",)})
+        assert result[("enabled",)].type == "boolean"
+
+    def test_list(self):
+        text = "# -- (list) Items\nitems: []\n"
+        result, _ = parse_annotations(text, {("items",)})
+        assert result[("items",)].type == "array"
+
+    def test_object(self):
+        text = "# -- (object) Config map\nconfig: {}\n"
+        result, _ = parse_annotations(text, {("config",)})
+        assert result[("config",)].type == "object"
+
+    def test_int_normalized(self):
+        text = "# -- (int) Replica count\nreplicas: 1\n"
+        result, _ = parse_annotations(text, {("replicas",)})
+        assert result[("replicas",)].type == "integer"
+
+
+class TestFindNextYamlKeyEnhanced:
+    def test_key_3_lines_after_with_comments(self):
+        lines = ["# comment 1", "# comment 2", "# comment 3", "mykey: value"]
+        key = find_next_yaml_key(lines, 0, 0)
+        assert key == "mykey"
+
+    def test_key_beyond_max_distance_returns_none(self):
+        # 11 comment lines then a key => should be beyond max lookahead (10)
+        lines = [f"# comment {i}" for i in range(11)] + ["key: val"]
+        key = find_next_yaml_key(lines, 0, 0)
+        assert key is None
+
+
+class TestNLPPatterns:
+    def test_password_credential(self):
+        from idi.generation.helm.classifier import match_description_patterns
+        assert match_description_patterns("The password for the database") == "credential"
+
+    def test_reference_identity(self):
+        from idi.generation.helm.classifier import match_description_patterns
+        assert match_description_patterns("Reference to an existing ConfigMap") == "identity"
+
+    def test_url_addressability(self):
+        from idi.generation.helm.classifier import match_description_patterns
+        assert match_description_patterns("The URL of the service endpoint") == "addressability"
+
+    def test_no_match_returns_none(self):
+        from idi.generation.helm.classifier import match_description_patterns
+        assert match_description_patterns("Number of replicas") is None
+
+    def test_case_insensitive(self):
+        from idi.generation.helm.classifier import match_description_patterns
+        assert match_description_patterns("THE PASSWORD") == "credential"

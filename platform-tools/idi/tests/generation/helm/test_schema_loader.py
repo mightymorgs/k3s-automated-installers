@@ -1,4 +1,4 @@
-"""Tests for helm schema loader (Stage 1 partial — Slice 1)."""
+"""Tests for helm schema loader (Stage 1 — Slices 1 & 2)."""
 from __future__ import annotations
 
 import json
@@ -232,3 +232,126 @@ class TestSchemaLoaderDiagnostics:
         }
         _, diag = load_schema(str(tmp_schema(schema)))
         assert "oneOf" in diag["unsupported_keywords"]
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: $ref Resolution
+# ---------------------------------------------------------------------------
+
+class TestSchemaLoaderRefResolution:
+    def test_ref_defs_resolved(self, tmp_schema):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "port": {"type": "integer", "description": "A port number"}
+            },
+            "properties": {
+                "serverPort": {"$ref": "#/$defs/port"}
+            }
+        }
+        overrides, diag = load_schema(str(tmp_schema(schema)))
+        assert ("serverPort",) in overrides
+        info = overrides[("serverPort",)]
+        assert info.type == "integer"
+        assert info.description == "A port number"
+        assert diag["ref_unresolved_count"] == 0
+
+    def test_ref_definitions_resolved(self, tmp_schema):
+        schema = {
+            "type": "object",
+            "definitions": {
+                "common": {"type": "string", "format": "hostname"}
+            },
+            "properties": {
+                "host": {"$ref": "#/definitions/common"}
+            }
+        }
+        overrides, diag = load_schema(str(tmp_schema(schema)))
+        assert ("host",) in overrides
+        assert overrides[("host",)].format == "hostname"
+        assert diag["ref_unresolved_count"] == 0
+
+    def test_circular_ref_no_crash(self, tmp_schema):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "a": {"$ref": "#/$defs/b"},
+                "b": {"$ref": "#/$defs/a"},
+            },
+            "properties": {
+                "x": {"$ref": "#/$defs/a"}
+            }
+        }
+        # Should not raise RecursionError
+        overrides, diag = load_schema(str(tmp_schema(schema)))
+        # Circular ref is unresolvable
+        assert diag["ref_unresolved_count"] >= 1
+
+    def test_circular_ref_logs_warning(self, tmp_schema, caplog):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "loop": {"$ref": "#/$defs/loop"}
+            },
+            "properties": {
+                "val": {"$ref": "#/$defs/loop"}
+            }
+        }
+        with caplog.at_level(logging.WARNING):
+            load_schema(str(tmp_schema(schema)))
+        assert any("circular" in r.message.lower() or "cycle" in r.message.lower()
+                    for r in caplog.records)
+
+    def test_external_ref_rejected(self, tmp_schema, caplog):
+        schema = {
+            "type": "object",
+            "properties": {
+                "ext": {"$ref": "https://example.com/schema.json#/port"}
+            }
+        }
+        with caplog.at_level(logging.WARNING):
+            overrides, diag = load_schema(str(tmp_schema(schema)))
+        assert ("ext",) not in overrides
+        assert diag["ref_unresolved_count"] >= 1
+        assert any("external" in r.message.lower() or "rejected" in r.message.lower()
+                    for r in caplog.records)
+
+    def test_file_ref_rejected(self, tmp_schema, caplog):
+        schema = {
+            "type": "object",
+            "properties": {
+                "local": {"$ref": "file:///etc/schema.json"}
+            }
+        }
+        with caplog.at_level(logging.WARNING):
+            overrides, diag = load_schema(str(tmp_schema(schema)))
+        assert ("local",) not in overrides
+        assert diag["ref_unresolved_count"] >= 1
+
+    def test_missing_ref_target(self, tmp_schema, caplog):
+        schema = {
+            "type": "object",
+            "properties": {
+                "missing": {"$ref": "#/$defs/doesNotExist"}
+            }
+        }
+        with caplog.at_level(logging.WARNING):
+            overrides, diag = load_schema(str(tmp_schema(schema)))
+        assert ("missing",) not in overrides
+        assert diag["ref_unresolved_count"] >= 1
+
+    def test_resolved_ref_reduces_unresolved_count(self, tmp_schema):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "port": {"type": "integer"}
+            },
+            "properties": {
+                "resolved": {"$ref": "#/$defs/port"},
+                "unresolved": {"$ref": "#/$defs/missing"},
+            }
+        }
+        overrides, diag = load_schema(str(tmp_schema(schema)))
+        assert ("resolved",) in overrides
+        assert ("unresolved",) not in overrides
+        assert diag["ref_unresolved_count"] == 1

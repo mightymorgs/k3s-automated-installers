@@ -1,7 +1,7 @@
-"""Stage 1 (partial): Load values.schema.json into SchemaInfo map.
+"""Stage 1: Load values.schema.json into SchemaInfo map.
 
-Slice 1 scope: walk ``properties`` recursively, no ``$ref`` resolution.
-$ref resolution is added in section-12 (Slice 2).
+Walks ``properties`` recursively with local ``$ref`` resolution.
+External refs and circular refs are rejected with warnings.
 """
 from __future__ import annotations
 
@@ -47,8 +47,58 @@ def load_schema(
         return {}, diag
 
     overrides: dict[tuple[str, ...], SchemaInfo] = {}
-    _walk_schema(schema, (), overrides, diag)
+    _walk_schema(schema, (), overrides, diag, schema)
     return overrides, diag
+
+
+def _resolve_ref(
+    ref_value: str,
+    root: dict[str, Any],
+    seen_refs: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a local $ref to its target schema dict.
+
+    Returns the resolved schema dict, or None if unresolvable.
+    """
+    if seen_refs is None:
+        seen_refs = set()
+
+    # Reject external refs
+    if ref_value.startswith(("http://", "https://", "file://", "/")):
+        logger.warning("External $ref rejected: %s", ref_value)
+        return None
+
+    # Only handle local refs: #/$defs/... or #/definitions/...
+    if not ref_value.startswith("#/"):
+        logger.warning("Unsupported $ref format: %s", ref_value)
+        return None
+
+    # Cycle detection
+    if ref_value in seen_refs:
+        logger.warning("Circular $ref detected: %s", ref_value)
+        return None
+    seen_refs.add(ref_value)
+
+    # Parse the JSON Pointer
+    pointer = ref_value[2:]  # Remove "#/"
+    parts = pointer.split("/")
+
+    target = root
+    for part in parts:
+        if isinstance(target, dict) and part in target:
+            target = target[part]
+        else:
+            logger.warning("Missing $ref target: %s (part '%s' not found)", ref_value, part)
+            return None
+
+    if not isinstance(target, dict):
+        return None
+
+    # If target itself has a $ref, resolve recursively
+    if "$ref" in target:
+        return _resolve_ref(target["$ref"], root, seen_refs)
+
+    return target
 
 
 def _walk_schema(
@@ -56,6 +106,7 @@ def _walk_schema(
     prefix: tuple[str, ...],
     overrides: dict[tuple[str, ...], SchemaInfo],
     diag: dict[str, Any],
+    root: dict[str, Any],
 ) -> None:
     """Recursively walk a JSON Schema node, extracting SchemaInfo entries."""
     # Check for unsupported keywords at this level
@@ -83,12 +134,15 @@ def _walk_schema(
 
         key = prefix + (prop_name,)
 
-        # Handle $ref — log and skip (Slice 1)
+        # Handle $ref — attempt resolution
         if "$ref" in prop_schema:
             ref_value = prop_schema["$ref"]
-            logger.warning("Unresolved $ref: %s at %s", ref_value, ".".join(key))
-            diag["ref_unresolved_count"] += 1
-            continue
+            resolved = _resolve_ref(ref_value, root)
+            if resolved is not None:
+                prop_schema = resolved
+            else:
+                diag["ref_unresolved_count"] += 1
+                continue
 
         # Check for unsupported keywords within property
         for kw in _UNSUPPORTED_KEYWORDS:
@@ -112,4 +166,4 @@ def _walk_schema(
 
         # Recurse into nested objects (but NOT arrays)
         if prop_type == "object" and "properties" in prop_schema:
-            _walk_schema(prop_schema, key, overrides, diag)
+            _walk_schema(prop_schema, key, overrides, diag, root)

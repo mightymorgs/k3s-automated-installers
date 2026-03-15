@@ -1,12 +1,11 @@
-"""Stage 1 (partial): Parse structured annotations from values.yaml text.
+"""Stage 1: Parse structured annotations from values.yaml text.
 
 Supports three annotation formats:
 - Bitnami @param: ``## @param dotted.path [type] description``
+  (with multi-line continuation)
 - dadav @schema: ``# @schema key: value`` blocks
 - helm-docs: ``# -- (type) description``
-
-Slice 1 scope: single-line regex with indentation-aware next-line lookahead.
-Slice 2 (section-12) adds robust find_next_yaml_key and multi-line support.
+  (with compound type expansion)
 """
 from __future__ import annotations
 
@@ -20,15 +19,44 @@ from idi.generation.helm.models import AnnotationInfo
 logger = logging.getLogger(__name__)
 
 # Max lines to scan forward from annotation to find the associated YAML key
-_MAX_LOOKAHEAD = 5
+_MAX_LOOKAHEAD = 10
 
 # Patterns
 _PARAM_RE = re.compile(r"^##\s+@param\s+(\S+)\s+\[([^\]]*)\]\s+(.*)$")
+_PARAM_CONTINUATION_RE = re.compile(r"^##\s+(?!@param\s)(.*)$")
 _SCHEMA_RE = re.compile(r"^#\s+@schema\s+(\w+):\s*(.*)$")
 _HELMDOCS_RE = re.compile(r"^#\s+--\s+(?:\(([^)]*)\)\s+)?(.*)$")
 _YAML_KEY_RE = re.compile(r"^(\s*)(\S+)\s*:")
 _ARRAY_ITEM_RE = re.compile(r"^\s*-\s")
 _COMMENT_OR_BLANK_RE = re.compile(r"^\s*(#|$)")
+
+# helm-docs type normalization map
+_TYPE_NORMALIZE: dict[str, str] = {
+    "int": "integer",
+    "bool": "boolean",
+    "list": "array",
+    "object": "object",
+    "string": "string",
+    "number": "number",
+    "float": "number",
+}
+
+
+def _normalize_helmdocs_type(raw_type: str | None) -> str | None:
+    """Normalize helm-docs type strings to JSON Schema types."""
+    if raw_type is None:
+        return None
+    t = raw_type.strip()
+    if not t:
+        return None
+    # Array types: string[], int[], etc.
+    if t.endswith("[]"):
+        return "array"
+    # Union types: int|string — default to string
+    if "|" in t:
+        return "string"
+    # Direct mapping
+    return _TYPE_NORMALIZE.get(t.lower(), t)
 
 
 def parse_annotations(
@@ -60,17 +88,27 @@ def parse_annotations(
         m = _PARAM_RE.match(line)
         if m:
             path_str, type_str, desc = m.group(1), m.group(2), m.group(3)
+            desc_parts = [desc.strip()]
+            i += 1
+            # Collect continuation lines
+            while i < len(lines):
+                cm = _PARAM_CONTINUATION_RE.match(lines[i])
+                if cm:
+                    desc_parts.append(cm.group(1).strip())
+                    i += 1
+                else:
+                    break
+            full_desc = " ".join(p for p in desc_parts if p) or None
             key = tuple(path_str.split("."))
             if key in valid_paths:
                 annotations[key] = AnnotationInfo(
                     type=type_str.strip() or None,
-                    description=desc.strip() or None,
+                    description=full_desc,
                     enum=None,
                     source="bitnami_param",
                 )
             else:
                 skipped += 1
-            i += 1
             continue
 
         # --- dadav @schema block ---
@@ -124,7 +162,7 @@ def parse_annotations(
                 key = (yaml_key,)
                 if key in valid_paths:
                     annotations[key] = AnnotationInfo(
-                        type=type_str.strip() if type_str else None,
+                        type=_normalize_helmdocs_type(type_str.strip() if type_str else None),
                         description=desc.strip() or None,
                         enum=None,
                         source="helm_docs",
