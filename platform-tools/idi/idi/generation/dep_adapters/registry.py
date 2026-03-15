@@ -103,6 +103,10 @@ class DepAdapterRegistry:
         # Apply programmatic gates (spec-derived FP filters).
         from idi.generation.dep_adapters.verify import apply_gates
         deps = apply_gates(deps, operation, spec, skill_paths, identifier_index, canonical_map, fk_suffixes)
+        # Re-apply confidence threshold after gates — gates that downweight
+        # confidence (identifier validation, fan-out, self-ref, type compat)
+        # can push edges below threshold.
+        deps = filter_by_confidence(deps)
         # Suppress body/operationid deps whose target is already covered by a
         # path dep. Path skeleton is authoritative; weaker sources are fenced.
         _FENCED_SOURCES = {"generic_odg:body", "generic_odg:operationid"}

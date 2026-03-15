@@ -117,7 +117,11 @@ def build_canonical_resource_map(spec: dict[str, Any]) -> CanonicalResourceMap:
                 i += 1
                 continue
 
-            # Static segment: this is a resource name
+            # Static segment: this is a resource name.
+            # Skip bare hyphens/underscores that normalize to empty.
+            if not _normalize(seg):
+                i += 1
+                continue
             resource_chain.append((seg, None))
             i += 1
 
@@ -194,6 +198,8 @@ def _normalize(name: str) -> str:
 
 def _singularize(name: str) -> str:
     """Singularize a resource name."""
+    if not name:
+        return name
     result = _engine.singular_noun(name)
     return result if result else name
 
@@ -205,6 +211,8 @@ def _build_composite_name(parent: str, child: str) -> str:
 
 def _find_canonical(name: str, resources: dict[str, _ResourceInfo]) -> str | None:
     """Find the canonical name for a resource, checking exact and variations."""
+    if not name:
+        return None
     if name in resources:
         return name
     # Try singular/plural
@@ -238,6 +246,8 @@ def _register_variations(
 
 def _all_forms(normalized: str) -> list[str]:
     """Generate all form variations: as-is, singular, plural, underscore."""
+    if not normalized:
+        return []
     forms = [normalized]
 
     # Underscore variant
