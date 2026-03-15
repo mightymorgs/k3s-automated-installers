@@ -252,17 +252,24 @@ class TestSlice1Integration:
                 )
 
     @pytest.mark.parametrize("chart_name", _CHART_NAMES)
-    def test_install_json_slice1_empty_fields(self, chart_name, tmp_path):
+    def test_install_json_has_required_fields(self, chart_name, tmp_path):
         values, chart, schema = _chart_paths(chart_name)
         if not values.exists() or not chart.exists():
             pytest.skip(f"Fixture not found for {chart_name}")
         ctx = run_helm_pipeline(values, chart, schema, output_dir=tmp_path)
         chart_slug = ctx.chart_name
         install = json.loads((tmp_path / chart_slug / "install.json").read_text())
-        assert install["consumes"] == []
-        assert install["conditional_produces"] == {}
-        assert install["conditional_consumes"] == {}
-        assert install["intra_edges"] == []
+        # All required fields present
+        assert "produces" in install
+        assert "conditional_produces" in install
+        assert "consumes" in install
+        assert "conditional_consumes" in install
+        assert "intra_edges" in install
+        assert isinstance(install["produces"], list)
+        assert isinstance(install["conditional_produces"], dict)
+        assert isinstance(install["consumes"], list)
+        assert isinstance(install["conditional_consumes"], dict)
+        assert isinstance(install["intra_edges"], list)
 
     def test_manifest_hash_reproducible(self, tmp_path):
         values, chart, schema = _chart_paths("vault")

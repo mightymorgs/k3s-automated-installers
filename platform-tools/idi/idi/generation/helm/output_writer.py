@@ -1,7 +1,7 @@
 """Stage 7: Write decomposed skill JSON to disk.
 
-Slice 1 scope: manifest.json, install.json, facts/*.json.
-Features and signals directories are created empty.
+Writes manifest.json, install.json, facts/*.json, features/*.json, signals/*.json.
+Features and signals are populated when ctx.edges / ctx.signals are non-empty.
 """
 from __future__ import annotations
 
@@ -72,6 +72,8 @@ def write_skill_output(ctx: HelmContext, output_dir: str | Path) -> None:
     _write_manifest(ctx, sorted_facts, chart_dir)
     _write_install(ctx, sorted_facts, chart_dir)
     _write_facts(sorted_facts, facts_dir)
+    _write_features(ctx, features_dir)
+    _write_signals(ctx, signals_dir)
 
 
 def _write_manifest(ctx: HelmContext, sorted_facts: list, chart_dir: Path) -> None:
@@ -84,6 +86,9 @@ def _write_manifest(ctx: HelmContext, sorted_facts: list, chart_dir: Path) -> No
 
     content_hash = _compute_content_hash(sorted_facts, ctx.signals)
 
+    # Collect unique feature names
+    features = sorted({f.feature for f in sorted_facts if f.feature is not None})
+
     manifest = {
         "schema_version": "2.0",
         "artifact_type": "helm",
@@ -93,7 +98,7 @@ def _write_manifest(ctx: HelmContext, sorted_facts: list, chart_dir: Path) -> No
         "repository": ctx.repository,
         "service": ctx.chart_name,
         "enrichment_sources": enrichment_sources,
-        "features": [],
+        "features": features,
         "fact_count": len(sorted_facts),
         "signal_count": len(ctx.signals),
         "library_deps": ctx.library_deps,
@@ -113,8 +118,42 @@ def _write_manifest(ctx: HelmContext, sorted_facts: list, chart_dir: Path) -> No
 
 
 def _write_install(ctx: HelmContext, sorted_facts: list, chart_dir: Path) -> None:
-    """Write install.json."""
-    produces = sorted(f.uri for f in sorted_facts)
+    """Write install.json with full edge/signal data."""
+    from idi.generation.helm.edges import build_consumes, build_conditional_produces
+
+    toggle_facts = [f for f in sorted_facts if f.is_toggle]
+
+    # Unconditional produces: facts without conditional_on
+    produces = sorted(f.uri for f in sorted_facts if f.conditional_on is None)
+
+    # Conditional produces: facts grouped by their gating toggle
+    conditional_produces = build_conditional_produces(sorted_facts, toggle_facts)
+    # Sort keys for determinism
+    conditional_produces = dict(sorted(conditional_produces.items()))
+
+    # Consumes from signals
+    consumes, conditional_consumes = build_consumes(
+        ctx.signals, sorted_facts, toggle_facts,
+    )
+    consumes = sorted(consumes, key=lambda c: (c.get("signal_type", ""), c.get("uri", "")))
+    conditional_consumes = dict(sorted(conditional_consumes.items()))
+
+    # Intra-edges
+    intra_edges = sorted(
+        [
+            {
+                "source": e.source,
+                "target": e.target,
+                "type": e.type,
+                "method": e.method,
+                "confidence": e.confidence,
+                "evidence": e.evidence,
+                "needs_review": e.needs_review,
+            }
+            for e in ctx.edges
+        ],
+        key=lambda e: (e["source"], e["target"]),
+    )
 
     install = {
         "schema_version": "2.0",
@@ -128,10 +167,10 @@ def _write_install(ctx: HelmContext, sorted_facts: list, chart_dir: Path) -> Non
             "repository": ctx.repository,
         },
         "produces": produces,
-        "conditional_produces": {},
-        "consumes": [],
-        "conditional_consumes": {},
-        "intra_edges": [],
+        "conditional_produces": conditional_produces,
+        "consumes": consumes,
+        "conditional_consumes": conditional_consumes,
+        "intra_edges": intra_edges,
     }
     _write_json(chart_dir / "install.json", install)
 
@@ -177,6 +216,110 @@ def _write_facts(sorted_facts: list, facts_dir: Path) -> None:
             _write_json(facts_dir / filename, fact_data)
         except (OSError, TypeError) as exc:
             logger.error("Failed to write fact %s: %s", fact.path, exc)
+
+
+def _write_features(ctx: HelmContext, features_dir: Path) -> None:
+    """Write one JSON file per feature (toggle-gated section)."""
+    # Group facts by feature
+    feature_groups: dict[str, list] = {}
+    for fact in ctx.facts:
+        if fact.feature is not None:
+            feature_groups.setdefault(fact.feature, []).append(fact)
+
+    # Find toggle fact for each feature
+    toggle_by_feature: dict[str, Any] = {}
+    for fact in ctx.facts:
+        if fact.is_toggle and fact.feature is not None:
+            # The toggle for this feature is the one with the shortest path
+            key = fact.feature
+            if key not in toggle_by_feature or len(fact.path_segments) < len(toggle_by_feature[key].path_segments):
+                toggle_by_feature[key] = fact
+
+    # Also look for X.enabled pattern
+    for fact in ctx.facts:
+        if fact.is_toggle and len(fact.path_segments) >= 2:
+            feature_name = fact.path_segments[0]
+            if feature_name not in toggle_by_feature:
+                toggle_by_feature[feature_name] = fact
+
+    for feature_name, facts in sorted(feature_groups.items()):
+        toggle = toggle_by_feature.get(feature_name)
+
+        # Get toggle classification info
+        toggle_method = "unknown"
+        toggle_confidence = 0.50
+        if toggle:
+            for cls in toggle.classifications:
+                if cls.field == "is_toggle":
+                    toggle_method = cls.method
+                    toggle_confidence = cls.confidence
+                    break
+
+        # Find intra-edges within this feature
+        feature_uris = {f.uri for f in facts}
+        feature_edges = [
+            {
+                "source": e.source,
+                "target": e.target,
+                "type": e.type,
+                "method": e.method,
+                "confidence": e.confidence,
+                "evidence": e.evidence,
+                "needs_review": e.needs_review,
+            }
+            for e in ctx.edges
+            if e.source in feature_uris or e.target in feature_uris
+        ]
+        feature_edges.sort(key=lambda e: (e["source"], e["target"]))
+
+        feature_data = {
+            "schema_version": "2.0",
+            "feature": feature_name,
+            "toggle_uri": toggle.uri if toggle else None,
+            "toggle_path": toggle.path if toggle else None,
+            "toggle_default": toggle.default_value if toggle else None,
+            "toggle_method": toggle_method,
+            "toggle_confidence": toggle_confidence,
+            "fact_count": len(facts),
+            "facts": sorted(f.path for f in facts),
+            "intra_edges": feature_edges,
+        }
+
+        filename = f"{feature_name}.json"
+        try:
+            _write_json(features_dir / filename, feature_data)
+        except (OSError, TypeError) as exc:
+            logger.error("Failed to write feature %s: %s", feature_name, exc)
+
+
+def _write_signals(ctx: HelmContext, signals_dir: Path) -> None:
+    """Write one JSON file per cross-app signal."""
+    for signal in ctx.signals:
+        errors = validate_signal(signal)
+        for err in errors:
+            logger.error("Signal validation error: %s", err)
+
+        signal_data = {
+            "uri": signal.uri,
+            "path": signal.path,
+            "signal_type": signal.signal_type,
+            "resource_type": signal.resource_type,
+            "method": signal.method,
+            "confidence": signal.confidence,
+            "evidence": signal.evidence,
+            "related_facts": sorted(signal.related_facts),
+        }
+
+        path_parts = signal.path.split(".") if signal.path else [signal.signal_type]
+        try:
+            filename = safe_filename([signal.signal_type] + path_parts)
+        except ValueError:
+            filename = f"{signal.signal_type}.json"
+
+        try:
+            _write_json(signals_dir / filename, signal_data)
+        except (OSError, TypeError) as exc:
+            logger.error("Failed to write signal %s: %s", signal.path, exc)
 
 
 def _compute_content_hash(sorted_facts: list, signals: list) -> str:
