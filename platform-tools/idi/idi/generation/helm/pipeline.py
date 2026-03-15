@@ -14,6 +14,7 @@ from ruamel.yaml import YAML
 from idi.generation.helm.annotations import parse_annotations
 from idi.generation.helm.classifier import classify_facts
 from idi.generation.helm.context import HelmContext
+from idi.generation.helm.edges import detect_edges_and_signals
 from idi.generation.helm.enrichment import enrich_facts
 from idi.generation.helm.output_writer import sanitize_chart_name, write_skill_output
 from idi.generation.helm.schema_loader import load_schema
@@ -231,6 +232,12 @@ def run_helm_pipeline(
 
     # ── Stage 5: URI ─────────────────────────────────────────────────────
     generate_uris(ctx.facts, ctx.chart_name)
+
+    # ── Stage 6: Edges and Signals ───────────────────────────────────────
+    try:
+        detect_edges_and_signals(ctx)
+    except Exception as exc:
+        logger.warning("Edge detection failed for %s: %s", meta["chart_name"], exc)
 
     # ── Stage 7: Output ──────────────────────────────────────────────────
     try:
