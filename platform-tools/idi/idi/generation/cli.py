@@ -111,6 +111,7 @@ def generate(ctx: GeneratorContext) -> Dict[str, int]:
                 "resource": resource,
                 "operation": op_type,
                 "method": op_data["op_info"]["method"],
+                "endpoint": op_data["op_info"].get("endpoint", op_data["op_info"].get("path", "")),
             }
 
     # -- Pass 2: emit JSON artefacts ---------------------------------------
@@ -161,6 +162,23 @@ def _generate_json_v2(
     dep_registry = DepAdapterRegistry()
     known_resources = get_all_resource_names(ctx, include_non_post=True)
     namespace_params = detect_namespace_params(ctx.schema)
+
+    # Pre-compute canonical resource map for consistent name resolution.
+    from idi.generation.dep_adapters.canonical_resources import (
+        build_canonical_resource_map,
+        learn_fk_suffixes,
+    )
+    canonical_map = build_canonical_resource_map(ctx.schema)
+
+    # Learn FK suffix conventions from the spec's path parameters.
+    fk_suffixes = learn_fk_suffixes(ctx.schema, canonical_map)
+
+    # Pre-compute identifier index for identifier reference validation.
+    from idi.generation.dep_adapters.verify import build_identifier_index
+    identifier_index = build_identifier_index(
+        ctx.schema, ctx.generated_skill_paths,
+        fk_suffixes=fk_suffixes, canonical_map=canonical_map,
+    )
 
     for resource, operations in resources.items():
         seen: set = set()
@@ -219,6 +237,10 @@ def _generate_json_v2(
 
             deps_detected, outputs_detected = dep_registry.detect(
                 dep_op, ctx.schema, known_resources,
+                skill_paths=ctx.generated_skill_paths,
+                identifier_index=identifier_index,
+                canonical_map=canonical_map,
+                fk_suffixes=fk_suffixes,
             )
 
             depends_on: List[Dict[str, Any]] = []
@@ -238,6 +260,8 @@ def _generate_json_v2(
                     "fact_ref": d.fact_ref,
                     "lineage_type": d.lineage_type,
                     "discriminator_value": d.discriminator_value,
+                    "detection_source": d.detection_source.value,
+                    "confidence": d.confidence,
                 })
 
             # Build field_refs_map and all_field_refs from validated deps only.

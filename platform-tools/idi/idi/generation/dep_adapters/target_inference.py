@@ -26,10 +26,14 @@ from idi.generation.dep_adapters.naming import (
     singularize,
     split_words,
     stem,
+    stem_token,
 )
 from idi.generation.resource_namer import strip_api_version_prefix
 
-_COMMON_FK_SUFFIXES: tuple[str, ...] = (
+# Default FK suffixes used when learned suffixes are not available.
+# This fallback is only used during testing or when the pipeline hasn't
+# computed spec-derived suffixes yet.
+_DEFAULT_FK_SUFFIXES: tuple[str, ...] = (
     "_id", "_pk", "_uuid", "_guid", "_key", "_ref",
     "_ids", "_uuids", "_guids",
     "_number", "_name", "_slug", "_flow",
@@ -59,14 +63,13 @@ _QUALIFIABLE_TOKENS: frozenset[str] = frozenset({
     "id", "ids", "pk", "uuid", "name", "key", "ref", "slug",
 })
 
-_NEVER_FK_FIELDS: frozenset[str] = frozenset({
-    "name", "slug", "url", "path", "type", "kind", "mode", "format",
-    "description", "summary", "title", "label", "comment",
-    "message", "reason", "error", "help_text", "verbose_name",
-    "content", "body", "text", "notes", "detail",
-    "created", "modified", "updated", "deleted",
-    "enabled", "disabled", "active", "is_active",
-})
+# Match-margin ambiguity suppression constants.
+_MARGIN_THRESHOLD = 0.10
+_AMBIGUITY_PENALTY = 0.15
+
+# Lexical cohesion penalty: applied to container-derived matches where
+# the field name shares zero stemmed word tokens with the target resource.
+_LEXICAL_COHESION_PENALTY = 0.15
 
 _NON_FK_FORMATS: frozenset[str] = frozenset({
     "date-time", "date", "time", "duration",
@@ -83,6 +86,7 @@ def infer_target(
     *,
     container: str | None = None,
     json_path: list[str] | None = None,
+    fk_suffixes: tuple[str, ...] | None = None,
 ) -> tuple[str | None, float]:
     """Infer target resource from a field name using RESTler-style matching.
 
@@ -98,46 +102,85 @@ def infer_target(
     # Credential exclusion (#1): skip credential-like params unless they
     # have an FK suffix (e.g. token_id, secret_id are legitimate FKs).
     fn_lower = field_name.lower()
-    if not _has_fk_suffix(fn_lower) and _CREDENTIAL_PARAMS.match(fn_lower):
+    if not _has_fk_suffix(fn_lower, fk_suffixes) and _CREDENTIAL_PARAMS.match(fn_lower):
         return None, 0.0
 
     # Compute type-based confidence factor.
-    type_factor = _type_factor(field_name, field_info)
+    type_factor = _type_factor(field_name, field_info, fk_suffixes=fk_suffixes)
     if type_factor <= 0.0:
         return None, 0.0
 
     # Freeze for hashing in lru_cache.
     frozen_resources = _freeze(known_resources)
 
-    # Generate all candidate names with base confidence.
-    candidates = _build_candidates(field_name, container)
+    # Generate candidates: field-derived and container-derived separately.
+    field_candidates = _build_candidates(field_name, None, fk_suffixes=fk_suffixes)
+    all_candidates = _build_candidates(field_name, container, fk_suffixes=fk_suffixes)
 
-    # Try ALL candidates and keep the best match.
-    best: tuple[str | None, float] = (None, 0.0)
-    for candidate, base_confidence in candidates:
+    # Score all candidates grouped by resource, tracking origin.
+    # Value: (confidence, origin) — 'field' origin wins ties over 'container'.
+    resource_scores: dict[str, tuple[float, str]] = {}
+    for candidate, base_confidence, origin in all_candidates:
         match = _match_resource(candidate, frozen_resources)
         if match is not None:
             resource, match_confidence = match
             confidence = base_confidence * match_confidence * type_factor
-            if confidence > best[1]:
-                best = (resource, confidence)
-    if best[0] is not None:
-        return best[0], round(best[1], 3)
+            current = resource_scores.get(resource)
+            if current is None or confidence > current[0]:
+                resource_scores[resource] = (confidence, origin)
+            elif confidence == current[0] and origin == "field":
+                # Field origin takes precedence on ties
+                resource_scores[resource] = (confidence, origin)
 
-    return None, 0.0
+    if not resource_scores:
+        return None, 0.0
+
+    # Sort by score descending to get top-2 distinct resources.
+    sorted_resources = sorted(resource_scores.items(), key=lambda x: -x[1][0])
+    top1_resource, (top1_score, top1_origin) = sorted_resources[0]
+
+    # Match-margin ambiguity suppression: if top-2 distinct resources from
+    # field-derived candidates are within _MARGIN_THRESHOLD, apply a flat
+    # confidence penalty. Container-derived candidates are excluded from
+    # margin calculation to avoid penalizing fields whose parent resource
+    # name happens to match a different resource.
+    if len(sorted_resources) >= 2:
+        field_scores: dict[str, float] = {}
+        for candidate, base_confidence, _origin in field_candidates:
+            match = _match_resource(candidate, frozen_resources)
+            if match is not None:
+                resource, match_confidence = match
+                confidence = base_confidence * match_confidence * type_factor
+                if resource not in field_scores or confidence > field_scores[resource]:
+                    field_scores[resource] = confidence
+        sorted_field = sorted(field_scores.items(), key=lambda x: -x[1])
+        if len(sorted_field) >= 2:
+            margin = sorted_field[0][1] - sorted_field[1][1]
+            if margin < _MARGIN_THRESHOLD:
+                top1_score = max(0.0, top1_score - _AMBIGUITY_PENALTY)
+
+    # Lexical cohesion penalty: container-derived matches with zero
+    # field↔target token overlap are almost always false positives
+    # (config values sitting on a sub-resource endpoint).
+    if top1_origin == "container":
+        field_tokens = {stem_token(w.lower()) for w in split_words(field_name)}
+        target_tokens = {stem_token(w.lower()) for w in split_words(top1_resource)}
+        if field_tokens and target_tokens and not (field_tokens & target_tokens):
+            top1_score *= _LEXICAL_COHESION_PENALTY
+
+    return top1_resource, round(top1_score, 3)
 
 
-def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
+def _type_factor(
+    field_name: str, field_info: dict[str, Any],
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> float:
     """Compute a confidence multiplier based on field type.
 
     RESTler has no type gate.  We use a soft gate because we lack
     endpoint-based disambiguation.
     """
     fn_lower = field_name.lower()
-
-    # Known non-FK fields.
-    if fn_lower in _NEVER_FK_FIELDS:
-        return 0.0
 
     # --- Schema signal gates (section-03) ---
     # Enum fields are categorical, never FKs.
@@ -170,21 +213,21 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
 
     # String fields — accept with reduced confidence.
     if ftype == "string":
-        if _has_fk_suffix(fn_lower):
+        if _has_fk_suffix(fn_lower, fk_suffixes):
             return 0.8
         # Plain string: only accept if it has a reasonable name.
         return 0.5
 
     # Number type — some APIs use number instead of integer for FK IDs.
     if ftype == "number":
-        if _has_fk_suffix(fn_lower):
+        if _has_fk_suffix(fn_lower, fk_suffixes):
             return 0.5
         return 0.0
 
     # Missing type — possibly unresolved $ref.  Accept with low confidence
     # when the field name is FK-like.
     if not ftype:
-        if _has_fk_suffix(fn_lower):
+        if _has_fk_suffix(fn_lower, fk_suffixes):
             return 0.4
         return 0.2
 
@@ -192,21 +235,31 @@ def _type_factor(field_name: str, field_info: dict[str, Any]) -> float:
     return 0.0
 
 
-def _has_fk_suffix(fn_lower: str) -> bool:
+def _has_fk_suffix(
+    fn_lower: str,
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> bool:
     """Check if a field name has a common FK suffix."""
-    return any(fn_lower.endswith(s) for s in _COMMON_FK_SUFFIXES)
+    suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
+    return any(fn_lower.endswith(s) for s in suffixes)
 
 
 def _build_candidates(
     field_name: str,
     container: str | None,
-) -> list[tuple[str, float]]:
-    """Generate candidate resource names with base confidence.
+    *,
+    fk_suffixes: tuple[str, ...] | None = None,
+) -> list[tuple[str, float, str]]:
+    """Generate candidate resource names with base confidence and origin.
 
     RESTler two-name search: ProducerParameterName (last word) and
     ResourceName (full name minus last word).
+
+    Returns list of ``(candidate_name, base_confidence, origin)`` where
+    origin is ``'field'`` for field-name-derived candidates or
+    ``'container'`` for container/path-derived candidates.
     """
-    candidates: list[tuple[str, float]] = []
+    candidates: list[tuple[str, float, str]] = []
     words = split_words(field_name)
 
     if not words:
@@ -217,24 +270,25 @@ def _build_candidates(
     # Low confidence — just the suffix.
     producer_param = words[-1].lower()
     if len(words) > 1:
-        candidates.append((producer_param, 0.3))
+        candidates.append((producer_param, 0.3, "field"))
 
     # --- RESTler ResourceName: full name minus last word ---
     # accountId → "account", credential_type_id → "credential__type"
     if len(words) > 1:
         resource_name = "__".join(w.lower() for w in words[:-1])
-        candidates.append((resource_name, 0.6))
+        candidates.append((resource_name, 0.6, "field"))
 
     # --- Full normalized name ---
     full_normalized = normalize(field_name)
-    candidates.append((full_normalized, 0.7))
+    candidates.append((full_normalized, 0.7, "field"))
 
     # --- FK suffix stripping ---
+    _suffixes = fk_suffixes if fk_suffixes is not None else _DEFAULT_FK_SUFFIXES
     fn_lower = field_name.lower()
-    for suffix in _COMMON_FK_SUFFIXES:
+    for suffix in _suffixes:
         stripped = fn_lower.removesuffix(suffix)
         if stripped != fn_lower and stripped:
-            candidates.append((normalize(stripped), 0.5))
+            candidates.append((normalize(stripped), 0.5, "field"))
 
     # --- ID synonym normalization (#8) ---
     # Normalize _uuid/_guid/_uid to _id for cross-convention matching.
@@ -242,21 +296,23 @@ def _build_candidates(
     if normalized != field_name:
         # Re-run suffix stripping on the normalized form (e.g. user_uuid → user_id → user)
         norm_lower = normalized.lower()
-        for suffix in _COMMON_FK_SUFFIXES:
+        for suffix in _suffixes:
             stripped = norm_lower.removesuffix(suffix)
             if stripped != norm_lower and stripped:
-                candidates.append((normalize(stripped), 0.48))  # Slight penalty for synonym
+                candidates.append((normalize(stripped), 0.48, "field"))
 
     # --- RestTestGen name qualification ---
     # If the field name is a bare qualifiable token (id, name, key, etc.),
     # prepend the container to form a qualified candidate.
     # E.g., container="subnet", field="id" → candidate "subnet__id" → "subnet"
+    # Origin is 'field' because this qualifies the field by its context,
+    # rather than generating a container-derived candidate.
     if container and full_normalized in _QUALIFIABLE_TOKENS:
         qualified = normalize(container) + "__" + full_normalized
-        candidates.append((qualified, 0.5))
+        candidates.append((qualified, 0.5, "field"))
         # Also add just the container name (since "subnet.id" means the
         # FK points to "subnets").
-        candidates.append((normalize(container), 0.6))
+        candidates.append((normalize(container), 0.6, "field"))
 
     # --- Container-based candidate type names (for nested fields) ---
     if container:
@@ -265,11 +321,11 @@ def _build_candidates(
         # All suffix subsequences (RESTler getCandidateTypeNames).
         for i in range(len(container_words)):
             type_name = "__".join(w.lower() for w in container_words[i:])
-            candidates.append((type_name, max(0.3, 0.6 - i * 0.1)))
+            candidates.append((type_name, max(0.3, 0.6 - i * 0.1), "container"))
         # Remove-last + singularize variant (for 3+ word containers).
         if len(container_words) > 2:
             remove_suffix = "__".join(w.lower() for w in container_words[:-1])
-            candidates.append((singularize(remove_suffix), 0.4))
+            candidates.append((singularize(remove_suffix), 0.4, "container"))
 
     return candidates
 

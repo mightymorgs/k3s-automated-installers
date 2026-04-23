@@ -80,6 +80,10 @@ class DepAdapterRegistry:
 
     def detect(
         self, operation: OperationInfo, spec: dict, known_resources: set[str],
+        skill_paths: dict[str, dict] | None = None,
+        identifier_index: dict[str, set[str]] | None = None,
+        canonical_map: object | None = None,
+        fk_suffixes: tuple[str, ...] | None = None,
     ) -> tuple[list[Dependency], list[Output]]:
         adapters = self.get_adapters_for(spec, operation.service)
         all_deps: list[Dependency] = []
@@ -95,6 +99,13 @@ class DepAdapterRegistry:
                 logger.warning("Adapter %s raised in detect_outputs", adapter.name)
         deps = merge_deps(all_deps)
         deps = filter_self_refs(deps, operation.resource, operation.method)
+        deps = filter_by_confidence(deps)
+        # Apply programmatic gates (spec-derived FP filters).
+        from idi.generation.dep_adapters.verify import apply_gates
+        deps = apply_gates(deps, operation, spec, skill_paths, identifier_index, canonical_map, fk_suffixes)
+        # Re-apply confidence threshold after gates — gates that downweight
+        # confidence (identifier validation, fan-out, self-ref, type compat)
+        # can push edges below threshold.
         deps = filter_by_confidence(deps)
         # Suppress body/operationid deps whose target is already covered by a
         # path dep. Path skeleton is authoritative; weaker sources are fenced.

@@ -180,10 +180,8 @@
 
     - name: Render cloudflared deployment template
       ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../../../../../apps/cloudflare/templates/cloudflared-deployment.yaml.j2"
+        src: "{{ playbook_dir }}/../templates/cloudflared-deployment.yaml.j2"
         dest: "/tmp/cloudflared-deployment.yaml"
-      vars:
-        app_namespace: "{{ app_namespace }}"
 
     - name: Apply cloudflared deployment
       ansible.builtin.shell: |

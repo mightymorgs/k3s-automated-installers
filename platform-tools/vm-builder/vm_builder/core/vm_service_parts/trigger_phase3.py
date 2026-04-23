@@ -10,11 +10,18 @@ from vm_builder.core.models import PhaseRunResult
 from vm_builder.core.workflow_names import WorkflowNames
 
 
-def trigger_phase3(self, vm_name: str) -> PhaseRunResult:
+def trigger_phase3(
+    self, vm_name: str, mode: str = "rebuild"
+) -> PhaseRunResult:
     """Trigger the Phase 3 dynamic app-install workflow via gh CLI.
 
     Reads selected_apps from the VM's BWS inventory and passes them
     to the phase3-dynamic.yml workflow.
+
+    ``mode='rebuild'`` (default) skips apps already marked ``installed``
+    in BWS ``_state``. ``mode='full'`` forces re-install of every app —
+    needed when inventory changed (e.g. new storage mount was added) so
+    per-app playbooks re-read the refreshed config.
     """
     inventory_key = f"inventory/{vm_name}"
     inventory = self.get_vm(vm_name)
@@ -38,6 +45,8 @@ def trigger_phase3(self, vm_name: str) -> PhaseRunResult:
             f"inventory_key={inventory_key}",
             "-f",
             f"selected_apps={json.dumps(selected_apps)}",
+            "-f",
+            f"mode={mode}",
         ],
         check=True,
         capture_output=True,
@@ -52,6 +61,7 @@ def trigger_phase3(self, vm_name: str) -> PhaseRunResult:
                 "vm_hostname": hostname,
                 "inventory_key": inventory_key,
                 "selected_apps": selected_apps,
+                "mode": mode,
             },
             duration_ms=duration_ms,
         )

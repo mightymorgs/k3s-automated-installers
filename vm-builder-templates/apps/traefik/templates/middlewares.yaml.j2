@@ -67,3 +67,21 @@ spec:
     middlewares:
       - name: security-headers
       - name: rate-limit
+
+---
+# Force X-Forwarded-Proto=https Middleware.
+# Required for apps behind Cloudflare Tunnel → traefik (plain HTTP internally).
+# Without this, backend apps (authentik, etc.) see scheme=http and generate
+# absolute URLs with http://, breaking mixed-content checks in the browser.
+# Reference this middleware on IngressRoutes for apps that emit absolute URLs
+# (e.g. authentik — apiBase comes back as https:// only when this is set).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: force-https-proto
+  namespace: {{ app_namespace }}
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: "https"
+      X-Forwarded-Ssl: "on"

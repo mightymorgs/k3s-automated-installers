@@ -73,9 +73,11 @@ class TestTypeFactorSchemaGates:
         info = {"type": "string"}
         assert _type_factor("project", info) == 0.5
 
-    def test_never_fk_field_still_returns_zero(self):
+    def test_description_returns_plain_string_factor(self):
+        """With _NEVER_FK_FIELDS removed, plain strings get 0.5 soft gate.
+        Downstream gates (identifier validation, etc.) handle FP suppression."""
         info = {"type": "string"}
-        assert _type_factor("description", info) == 0.0
+        assert _type_factor("description", info) == 0.5
 
 
 class TestSuffixContainmentHardening:

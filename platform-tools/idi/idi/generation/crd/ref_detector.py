@@ -932,6 +932,275 @@ def _parse_api_version(value: str) -> tuple[str, str] | None:
     return None
 
 
+def _augment_polymorphic_refs(
+    results: list[ClassifiedField],
+    field: WalkedField,
+    registry: KindRegistry,
+    source_service: str,
+    source_kind: str,
+) -> list[ClassifiedField]:
+    """Add polymorphic alternatives for ref_tuple/kind_registry results with unconstrained kind fields.
+
+    For each result from ref_tuple or kind_registry detection sources:
+    1. Check if the field schema has a 'kind' property without enum constraint
+    2. Find same-group siblings in KindRegistry
+    3. Apply substring name affinity filter
+    4. Emit additional ClassifiedField entries for matching siblings
+    """
+    schema = field.schema
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return results
+
+    kind_prop = properties.get("kind")
+    if kind_prop is None:
+        return results
+
+    # If kind has enum constraint, it's already handled by ref_tuple.
+    if isinstance(kind_prop.get("enum"), list):
+        return results
+
+    augmented: list[ClassifiedField] = []
+    for result in results:
+        # Only augment ref_tuple or kind_registry detection sources.
+        src = result.detection_source
+        if "ref_tuple" not in src and "kind_registry" not in src:
+            continue
+
+        # Find same-group siblings.
+        api_group = registry.group_for_kind(result.target_kind)
+        if api_group is None:
+            continue
+        siblings = registry.kinds_for_group(api_group)
+
+        # Remove primary target and source Kind.
+        siblings = siblings - {result.target_kind, source_kind}
+
+        # Substring name affinity filter.
+        target_lower = result.target_kind.lower()
+        affine = []
+        for sib in siblings:
+            sib_lower = sib.lower()
+            if target_lower in sib_lower or sib_lower in target_lower:
+                affine.append(sib)
+
+        # Filter to same service.
+        same_service = []
+        for sib in affine:
+            entries = registry._kind_to_entries.get(sib, [])
+            for entry in entries:
+                if entry.service == source_service:
+                    same_service.append(entry)
+                    break
+
+        # Safety valve: too many siblings = ambiguous.
+        if len(same_service) > 5:
+            continue
+
+        for entry in same_service:
+            augmented.append(ClassifiedField(
+                field=result.field,
+                role="input_ref",
+                confidence=result.confidence,
+                field_type=result.field_type,
+                target_kind=entry.kind,
+                target_group=entry.group,
+                required=result.required,
+                cross_namespace=result.cross_namespace,
+                description=result.description,
+                detection_source="ref_detector:polymorphic_ref",
+                fact_shape="identity",
+                target_field=result.target_field,
+                blocks_descendants=result.blocks_descendants,
+            ))
+
+    return results + augmented
+
+
+def _singularize(word: str) -> str:
+    """Simple English singularization for K8s property names.
+
+    Handles: options->option, stores->store, policies->policy,
+    addresses->address, classes->class.
+    Preserves words that don't end in standard plural suffixes.
+    """
+    # ies -> y  (policies -> policy)
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    # ses, xes, zes, shes, ches -> strip es
+    if word.endswith(("ses", "xes", "zes")):
+        return word[:-2]
+    if word.endswith(("shes", "ches")):
+        return word[:-2]
+    # s but not ss, not us, and word long enough
+    if word.endswith("s") and not word.endswith("ss") and not word.endswith("us") and len(word) > 3:
+        return word[:-1]
+    return word
+
+
+def detect_suffix_ref_tuple(
+    field: WalkedField,
+    registry: KindRegistry,
+    source_service: str,
+) -> list[ClassifiedField]:
+    """Detect {name, namespace} reference objects via property name suffix matching.
+
+    Identifies object fields with required 'name' and optional 'namespace'
+    but NO kind/apiGroup/apiVersion. Resolves target Kind by matching the
+    field name (singularized) as a suffix of registered Kind names.
+    """
+    schema = field.schema
+    if schema.get("type") != "object":
+        return []
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return []
+
+    # Must have 'name' as a required string property.
+    if "name" not in properties:
+        return []
+    required = schema.get("required", [])
+    if "name" not in required:
+        return []
+
+    # Must NOT have kind/apiGroup/apiVersion (defer to detect_ref_tuple).
+    if "kind" in properties or "apiGroup" in properties or "apiVersion" in properties:
+        return []
+
+    # Generate suffix candidates.
+    raw_name = field.name
+    singular = _singularize(raw_name)
+    candidates = [raw_name]
+    if singular != raw_name:
+        candidates.append(singular)
+
+    # Collect unique Kind matches across all candidates.
+    seen_kinds: dict[str, KindEntry] = {}
+    for candidate in candidates:
+        if len(candidate) < 4:
+            continue
+        # Title-case for suffix_match.
+        titled = candidate[0].upper() + candidate[1:]
+        matches = registry.suffix_match(titled, scope_service=source_service)
+        for entry in matches:
+            if entry.is_core:
+                continue
+            if entry.kind not in seen_kinds:
+                seen_kinds[entry.kind] = entry
+
+    if not seen_kinds:
+        return []
+
+    cross_namespace = "namespace" in properties
+    confidence = 0.80 if len(seen_kinds) == 1 else 0.65
+
+    results = []
+    for entry in seen_kinds.values():
+        results.append(ClassifiedField(
+            field=field.path,
+            role="input_ref",
+            confidence=confidence,
+            field_type="object",
+            target_kind=entry.kind,
+            target_group=entry.group,
+            required=field.required,
+            cross_namespace=cross_namespace,
+            description=schema.get("description", ""),
+            detection_source="ref_detector:suffix_ref_tuple",
+            fact_shape="identity",
+            target_field="name",
+            blocks_descendants=True,
+        ))
+
+    return results
+
+
+def detect_label_selector_ref(
+    field: WalkedField,
+    registry: KindRegistry,
+    source_service: str,
+) -> ClassifiedField | None:
+    """Detect label selector fields that reference a target Kind.
+
+    Pattern: field name ends in 'Selector', schema is LabelSelector shape
+    (matchLabels/matchExpressions), stripped suffix resolves to a registered
+    Kind in the same service.
+
+    Example: podMonitorSelector -> PodMonitor (kube-prometheus).
+    """
+    name = field.name
+
+    # Guard: bare "selector" / "Selector" -> empty base.
+    if name.lower() == "selector":
+        return None
+
+    # Strip Selector/Selectors suffix.
+    if name.endswith("Selectors"):
+        base = name[: -len("Selectors")]
+    elif name.endswith("Selector"):
+        base = name[: -len("Selector")]
+    else:
+        return None
+
+    if not base:
+        return None
+
+    # Validate LabelSelector schema shape.
+    schema = field.schema
+    if schema.get("type") != "object":
+        return None
+    properties = schema.get("properties")
+    if not properties or not isinstance(properties, dict):
+        return None
+    if "matchLabels" not in properties and "matchExpressions" not in properties:
+        return None
+
+    # Convert camelCase base to PascalCase.
+    pascal_base = base[0].upper() + base[1:]
+
+    # Case-insensitive exact match in KindRegistry (try first).
+    pascal_lower = pascal_base.lower()
+    matched_entry = None
+    for kind_name, entries in registry._kind_to_entries.items():
+        if kind_name.lower() != pascal_lower:
+            continue
+        for entry in entries:
+            if entry.is_core:
+                continue  # Skip core K8s types (e.g., Node)
+            if entry.service == source_service:
+                matched_entry = entry
+                break
+        if matched_entry:
+            break
+
+    # Fallback: suffix match (e.g., "rule" -> "PrometheusRule").
+    # Only if exact match failed and base is >= 4 chars (avoid short matches).
+    if matched_entry is None and len(pascal_base) >= 4:
+        candidates = registry.suffix_match(pascal_base, scope_service=source_service)
+        non_core = [e for e in candidates if not e.is_core]
+        if len(non_core) == 1:
+            matched_entry = non_core[0]
+        # Multiple matches = ambiguous, skip (precision > recall).
+
+    if matched_entry is None:
+        return None
+
+    return ClassifiedField(
+        field=field.path,
+        role="input_ref",
+        confidence=0.85,
+        field_type="object",
+        target_kind=matched_entry.kind,
+        target_group=matched_entry.group,
+        required=field.required,
+        cross_namespace=False,
+        description=schema.get("description", ""),
+        detection_source="ref_detector:label_selector_ref",
+        fact_shape="identity",
+        blocks_descendants=False,
+    )
+
+
 def detect_ref_tuple(
     field: WalkedField,
     registry: KindRegistry,
@@ -1841,6 +2110,10 @@ def classify_walked_field(
         for classified in results:
             classified.confidence *= field.depth_confidence
 
+    # Polymorphic augmentation: add same-group siblings for unconstrained kind fields.
+    if results:
+        results = _augment_polymorphic_refs(results, field, registry, current_service, kind)
+
     return results
 
 
@@ -1939,6 +2212,16 @@ def _classify_walked_field_inner(
     tuple_results = detect_ref_tuple(field, registry)
     if tuple_results:
         return tuple_results
+
+    # Step 4.1: Label selector ref detection (exclusive).
+    label_sel_result = detect_label_selector_ref(field, registry, current_service)
+    if label_sel_result is not None:
+        return [label_sel_result]
+
+    # Step 4.2: Suffix ref tuple detection (exclusive).
+    suffix_results = detect_suffix_ref_tuple(field, registry, current_service)
+    if suffix_results:
+        return suffix_results
 
     # --- Additive detectors (steps 5-12): results accumulate ---
     additive_results: list[ClassifiedField] = []

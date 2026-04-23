@@ -90,6 +90,13 @@ spec:
               value: "{{ error_reporting_enabled | default('false') }}"
             - name: AUTHENTIK_LOG_LEVEL
               value: "{{ log_level | default('info') }}"
+            # Trust X-Forwarded-* headers from any source inside the cluster.
+            # Without this, authentik sees all traffic as scheme=http (because
+            # traefik→authentik is plain HTTP), generates apiBase as http://,
+            # and the browser blocks mixed-content fetches from the https page
+            # → user sees "Request failed. Please try again later." on login.
+            - name: AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS
+              value: "{{ trusted_proxy_cidrs | default('0.0.0.0/0,::/0') }}"
             - name: DOMAIN
               value: "{{ domain }}"
           ports:

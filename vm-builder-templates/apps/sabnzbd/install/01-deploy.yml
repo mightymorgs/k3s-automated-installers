@@ -359,6 +359,24 @@
       no_log: true
       when: config_check.rc == 0
 
+    # Whitelist the public hostname via sabnzbd's API so requests coming
+    # through Cloudflare/Traefik with Host: sabnzbd.<domain> aren't
+    # rejected by sabnzbd's hostname verification. Editing sabnzbd.ini
+    # directly doesn't work because sabnzbd rewrites the file on startup.
+    - name: Whitelist public hostname in sabnzbd
+      ansible.builtin.shell: >-
+        kubectl -n {{ app_namespace }} exec {{ app_pod.stdout }} --
+        wget -qO- --post-data="mode=set_config&section=misc&keyword=host_whitelist&value={{ app_name }}-0,{{ app_name }}.{{ ingress_domain | default('') }},localhost,127.0.0.1&apikey={{ api_key_raw.stdout }}"
+        http://127.0.0.1:{{ service_port | default(8080) }}/api
+      register: sab_whitelist
+      changed_when: "'host_whitelist' in sab_whitelist.stdout"
+      failed_when: false
+      no_log: true
+      when:
+        - config_check.rc == 0
+        - api_key_raw.stdout | default('') | length > 0
+        - ingress_domain | default('') | length > 0
+
     - name: Create sabnzbd-credentials K8s Secret
       ansible.builtin.shell: >-
         kubectl create secret generic sabnzbd-credentials

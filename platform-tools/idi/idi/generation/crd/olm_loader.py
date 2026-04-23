@@ -162,3 +162,41 @@ def extract_gvk_dependencies(csv: dict) -> tuple[list[GVKRef], list[GVKRef]]:
         return result
 
     return _parse_entries(owned_raw), _parse_entries(required_raw)
+
+
+def extract_alm_examples(csv: dict) -> list[dict]:
+    """Parse alm-examples annotation from an OLM CSV.
+
+    Returns a list of K8s manifest dicts, each with at minimum:
+    apiVersion, kind, metadata (with name and optional labels).
+    Returns empty list if annotation is missing, malformed, or not JSON.
+    """
+    raw = csv.get("metadata", {}).get("annotations", {}).get("alm-examples")
+    if raw is None:
+        return []
+
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Malformed alm-examples JSON in OLM CSV")
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    result: list[dict] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        if not isinstance(kind, str):
+            continue
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        name = metadata.get("name")
+        if not isinstance(name, str):
+            continue
+        result.append(entry)
+
+    return result

@@ -122,17 +122,19 @@ jobs:
           INSTALLED=$(echo "$INVENTORY" | jq -c '._state.apps.installed // []')
           echo "Installed apps: $INSTALLED"
 
-          # Load registry to filter apps with ingress/sso
-          REGISTRY=$(cat vm-builder/vm-builder-templates/registry.json)
+          # Load registry to filter apps with ingress/sso.
+          # Use --slurpfile to pass the full registry without overflowing ARG_MAX
+          # (registry.json is ~200KB for 32 apps, which exceeds kernel argv limits).
+          REGISTRY_PATH=vm-builder/vm-builder-templates/registry.json
 
           # Filter apps with ingress enabled
-          APPS_WITH_INGRESS=$(echo "$INSTALLED" | jq -c --argjson reg "$REGISTRY" '
-            [.[] | select(. as $app | $reg.apps[$app].ingress.enabled == true)]
+          APPS_WITH_INGRESS=$(echo "$INSTALLED" | jq -c --slurpfile reg "$REGISTRY_PATH" '
+            [.[] | select(. as $app | $reg[0].apps[$app].ingress.enabled == true)]
           ')
 
           # Filter apps with SSO enabled
-          APPS_WITH_SSO=$(echo "$INSTALLED" | jq -c --argjson reg "$REGISTRY" '
-            [.[] | select(. as $app | $reg.apps[$app].sso.enabled == true)]
+          APPS_WITH_SSO=$(echo "$INSTALLED" | jq -c --slurpfile reg "$REGISTRY_PATH" '
+            [.[] | select(. as $app | $reg[0].apps[$app].sso.enabled == true)]
           ')
 
           echo "Apps with ingress: $APPS_WITH_INGRESS"

@@ -145,6 +145,7 @@ _HARD_EDGE_SOURCES: frozenset[str] = frozenset({
     "cataloged_shape",
     "constraint_fk",
     "embedded_workload",
+    "alm_label",
 })
 
 
@@ -210,6 +211,71 @@ def _filter_cross_ecosystem_edges(
             result.append(e)
     return result
 
+
+_CROSS_SERVICE_DEMOTABLE_SOURCES = frozenset({
+    "ref_detector:suffix_ref_tuple",
+    "ref_detector:label_selector_ref",
+    "ref_detector:polymorphic_ref",
+})
+
+
+def _filter_cross_service_cross_group_edges(
+    edges: list[DependencyEdge],
+    nodes: dict[str, KindNode],
+) -> list[DependencyEdge]:
+    """Demote weak/heuristic edges that cross both API group and service boundaries.
+
+    Only demotes edges from heuristic detection sources (suffix_ref_tuple,
+    label_selector_ref, polymorphic_ref, parent_kind_name, fuzzy_kind_name,
+    enum_kind). Strong structural detectors (ref_tuple, ref, structural_ref)
+    are left unchanged.
+
+    Allows same-service cross-group edges (e.g., Flux's multiple API groups).
+    Skips external nodes (core K8s resources).
+    """
+    result: list[DependencyEdge] = []
+    for e in edges:
+        src_group = e.source_gk.split("/")[0]
+        tgt_group = e.target_gk.split("/")[0]
+
+        if src_group == tgt_group:
+            result.append(e)
+            continue
+
+        src_node = nodes.get(e.source_gk)
+        tgt_node = nodes.get(e.target_gk)
+
+        if src_node is None or tgt_node is None:
+            result.append(e)
+            continue
+
+        # Don't demote edges involving external nodes (core K8s types).
+        if src_node.is_external or tgt_node.is_external:
+            result.append(e)
+            continue
+
+        if src_node.service == tgt_node.service:
+            result.append(e)
+            continue
+
+        # Only demote heuristic detection sources.
+        if e.detection_source not in _CROSS_SERVICE_DEMOTABLE_SOURCES:
+            result.append(e)
+            continue
+
+        # Different group AND different service AND heuristic source -> demote.
+        if e.edge_type == "optional":
+            result.append(e)
+        else:
+            result.append(DependencyEdge(
+                source_gk=e.source_gk, target_gk=e.target_gk,
+                edge_type="optional", source_field=e.source_field,
+                detection_source=e.detection_source, confidence=e.confidence,
+            ))
+
+    return result
+
+
 # Regex to strip TLD from API group for service derivation.
 _TLD_RE = re.compile(r"\.(io|dev|com|org|net|k8s\.io)$")
 
@@ -250,6 +316,7 @@ def build_dependency_graph(
     olm_owned: dict[str, list[GVKRef]],
     side_effect_dict: dict[tuple[str, str], list[dict]],
     registry: KindRegistry,
+    alm_edges: list[DependencyEdge] | None = None,
 ) -> DependencyGraph:
     """Build a Kind-level dependency graph from detection pipeline output.
 
@@ -336,6 +403,28 @@ def build_dependency_graph(
                 detection_source=cf.detection_source, confidence=cf.confidence,
             ))
 
+    # Step 4b: Promotion gate pass — promote qualified soft edges to hard.
+    # Lazy import to avoid circular dependency (edge_promotion imports topo_sort types).
+    from idi.generation.crd.edge_promotion import promote_soft_edges as _promote
+
+    cf_index: dict[tuple[str, str, str], ClassifiedField] = {}
+    for (group, kind), fields in classified_fields.items():
+        source_gk = f"{group}/{kind}"
+        for cf in fields:
+            if cf.role == "input_ref" and cf.target_kind is not None:
+                target_gk = f"{cf.target_group or ''}/{cf.target_kind}"
+                cf_index[(source_gk, cf.field, target_gk)] = cf
+    graph_stub = DependencyGraph(
+        nodes=nodes,
+        dependency_edges=[],
+        production_edges=[],
+        external_kinds=external_kinds,
+    )
+    raw_dep_edges = _promote(raw_dep_edges, cf_index, graph_stub)
+
+    # Step 4c: Cross-service cross-group filter (runs AFTER promotion).
+    raw_dep_edges = _filter_cross_service_cross_group_edges(raw_dep_edges, nodes)
+
     # Step 5: RBAC production edges.
     for service, outputs in rbac_outputs.items():
         service_nodes = [n for n in nodes.values() if n.service == service and not n.is_external]
@@ -377,6 +466,10 @@ def build_dependency_graph(
                 production_type="side_effect", confidence=0.95,
                 detection_source=f"side_effect_dict:{effect['field']}",
             ))
+
+    # Step 7.5: ALM label edges (pre-classified as hard).
+    if alm_edges:
+        raw_dep_edges.extend(alm_edges)
 
     # Step 8: Deduplicate dependency edges.
     edge_groups: dict[tuple[str, str], list[DependencyEdge]] = {}
@@ -532,11 +625,59 @@ def topological_sort(graph: DependencyGraph, *, _depth: int = 0) -> list[SortTie
         else:
             nontrivial_sccs.append(scc)
 
+    # SCC preferential ALM edge removal: remove exclusively-ALM edges
+    # within non-trivial SCCs before condensation. ALM edges are more
+    # likely to be false positives in cycles than structural edges.
+    alm_removed = False
+    for scc in nontrivial_sccs:
+        scc_nodes = set(scc)
+        to_remove: list[DependencyEdge] = []
+        for e in subgraph.dependency_edges:
+            if (
+                e.source_gk in scc_nodes
+                and e.target_gk in scc_nodes
+                and e.detection_source == "olm_deps:alm_label"
+            ):
+                to_remove.append(e)
+        if to_remove:
+            remove_set = set(id(e) for e in to_remove)
+            subgraph = DependencyGraph(
+                nodes=subgraph.nodes,
+                dependency_edges=[
+                    e for e in subgraph.dependency_edges
+                    if id(e) not in remove_set
+                ],
+                production_edges=subgraph.production_edges,
+                external_kinds=subgraph.external_kinds,
+            )
+            alm_removed = True
+            for e in to_remove:
+                logger.info(
+                    "Removed ALM edge from SCC: %s -> %s (%s)",
+                    e.source_gk, e.target_gk, e.source_field,
+                )
+
+    if alm_removed:
+        sccs = detect_cycles(subgraph)
+        nontrivial_sccs = []
+        for scc in sccs:
+            if len(scc) == 1 and (scc[0], scc[0]) in self_loop_pairs:
+                trivial_gks.add(scc[0])
+            else:
+                nontrivial_sccs.append(scc)
+        if not nontrivial_sccs:
+            # ALM removal resolved all cycles — re-sort the modified subgraph.
+            sub_tiers = topological_sort(subgraph, _depth=_depth + 1)
+            for st in sub_tiers:
+                st.tier += tier_num
+            tiers.extend(sub_tiers)
+            return tiers
+
     # Log warnings for non-trivial SCCs.
     for scc in nontrivial_sccs:
         scc_set = set(scc)
         cycle_edges = [
-            e for e in graph.dependency_edges
+            e for e in subgraph.dependency_edges
             if e.edge_type == "hard" and e.source_gk in scc_set and e.target_gk in scc_set
         ]
         edge_strs = [f"{e.source_gk} -> {e.target_gk} ({e.source_field})" for e in cycle_edges]
@@ -1249,12 +1390,30 @@ def _cli_main(
 
     # Build graph and sort.
     registry = KindRegistry()
+
+    # Pre-register OLM owned GVKs so Gate 5 (kind_to_plural) works.
+    for service, owned_gvks in catalog_data["olm_owned"].items():
+        for gvk in owned_gvks:
+            registry.register(gvk.kind, gvk.plural, group=gvk.group, service=service)
+
+    # Collect ALM label edges from OLM CSV data.
+    from idi.generation.dep_adapters.olm_deps import OlmDepAdapter
+
+    olm_adapter = OlmDepAdapter(registry=registry)
+    alm_edges: list[DependencyEdge] = []
+    olm_dir = str(olm_cache_dir) if olm_cache_dir else "catalog/specs/olm/"
+    for service, owned_gvks in catalog_data["olm_owned"].items():
+        alm_edges.extend(olm_adapter.detect_alm_label_edges(
+            service, registry, cache_dir=olm_dir, owned_gvks=owned_gvks,
+        ))
+
     graph = build_dependency_graph(
         classified_fields=catalog_data["classified_fields"],
         rbac_outputs=catalog_data["rbac_outputs"],
         olm_owned=catalog_data["olm_owned"],
         side_effect_dict=catalog_data["side_effect_dict"],
         registry=registry,
+        alm_edges=alm_edges,
     )
     tiers = topological_sort(graph)
 
