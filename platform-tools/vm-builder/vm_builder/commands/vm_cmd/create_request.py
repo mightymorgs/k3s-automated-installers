@@ -42,6 +42,7 @@ def build_request(config: dict[str, Any]) -> VmCreateRequest:
         vm_name=config["vm_name"],
         size=config["size"],
         platform=config["platform"],
+        hypervisor=config.get("hypervisor"),
         vcpu=config.get("vcpu"),
         memory_mb=config.get("memory_mb"),
         disk_size_gb=config.get("disk_size_gb"),
@@ -58,6 +59,14 @@ def build_request(config: dict[str, Any]) -> VmCreateRequest:
         ssh_authorized_keys=config.get("ssh_authorized_keys"),
         iac_version=config.get("iac_version"),
         apps=apps,
+        app_configs=config.get("app_configs"),
+        ingress_mode=config.get("ingress_mode"),
+        ingress_domain=config.get("ingress_domain"),
+        sso_overrides=config.get("sso_overrides"),
+        ingress_app_overrides=config.get("ingress_app_overrides"),
+        storage_location=config.get("storage_location"),
+        storage_mounts=config.get("storage_mounts"),
+        storage_app_paths=config.get("storage_app_paths"),
         gcp=config.get("gcp"),
     )
 

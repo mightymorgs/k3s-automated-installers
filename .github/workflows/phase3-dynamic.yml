@@ -535,6 +535,16 @@ jobs:
           echo "Location: $LOCATION"
           echo "=========================================="
 
+          # Fail loudly when shared storage is needed but no mounts are configured.
+          # Otherwise media apps reference media-shared-pvc which is never created
+          # and their pods stay Pending indefinitely.
+          if [ "$MOUNT_COUNT" -eq 0 ]; then
+            echo "::error::needs_shared_storage=true but storage.mounts is empty in BWS inventory."
+            echo "Fix: populate storage.location and storage.mounts[] in inventory with the"
+            echo "target network share (SMB/NFS), or remove shared-storage apps from selected_apps."
+            exit 1
+          fi
+
           # Read network-shares secret for credential resolution
           source "$GITHUB_WORKSPACE/.github/scripts/bws-helpers.sh"
           SHARES_DATA=""

@@ -36,13 +36,32 @@ spec:
   entryPoints:
     - websecure
   routes:
+{% if forwardauth_enabled %}
+    # Higher-priority bypass for OAuth callback path — reaches authentik
+    # directly, skipping the ForwardAuth middleware (chicken-and-egg).
+    - match: Host(`{{ domain }}`) && PathPrefix(`/outpost.goauthentik.io/`)
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: force-https-proto
+          namespace: traefik
+      services:
+        - name: authentik
+          namespace: authentik
+          port: 9000
+{% endif %}
     - match: Host(`{{ domain }}`)
       kind: Rule
       services:
         - name: {{ service_name }}
           port: {{ service_port }}
-{% if forwardauth_enabled %}
+      # Middleware chain: always inject X-Forwarded-Proto=https so backend
+      # apps generating absolute URLs (authentik, etc.) use https scheme.
+      # ForwardAuth added when SSO is enabled for this app.
       middlewares:
+        - name: force-https-proto
+          namespace: traefik
+{% if forwardauth_enabled %}
         - name: authentik-forwardauth
           namespace: authentik
 {% endif %}

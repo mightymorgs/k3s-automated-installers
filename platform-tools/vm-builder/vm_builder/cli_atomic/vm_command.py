@@ -118,9 +118,16 @@ def register_vm_group(root: click.Group) -> None:
 
     @phase.command("install-apps")
     @click.argument("vm_name")
-    def phase_install(vm_name: str) -> None:
+    @click.option(
+        "--mode",
+        type=click.Choice(["rebuild", "full"]),
+        default="rebuild",
+        help="'rebuild' skips already-installed apps (default); "
+        "'full' forces re-install of every selected app.",
+    )
+    def phase_install(vm_name: str, mode: str) -> None:
         """Trigger Phase 3: install selected apps."""
-        trigger_phase(vm_name, "install-apps")
+        trigger_phase(vm_name, "install-apps", mode=mode)
 
     @phase.command("configure-apps")
     @click.argument("vm_name")

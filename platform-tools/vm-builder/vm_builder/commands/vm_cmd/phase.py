@@ -14,8 +14,12 @@ _PHASE_MAP = {
 }
 
 
-def trigger_phase(vm_name: str, phase_name: str) -> None:
-    """Trigger a deployment phase workflow for a VM."""
+def trigger_phase(vm_name: str, phase_name: str, **kwargs: object) -> None:
+    """Trigger a deployment phase workflow for a VM.
+
+    Extra kwargs are forwarded to the service method (e.g. ``mode`` for
+    Phase 3 install-apps).
+    """
     phase_num, method_name = _PHASE_MAP[phase_name]
     print_banner(f"Trigger Phase {phase_num}: {phase_name} ({vm_name})")
     service = VmService()
@@ -24,7 +28,7 @@ def trigger_phase(vm_name: str, phase_name: str) -> None:
     method = getattr(service, method_name)
 
     try:
-        result = method(vm_name)
+        result = method(vm_name, **kwargs)
     except Exception as exc:  # noqa: BLE001
         click.echo(f"ERROR: Failed to trigger phase {phase_num}: {exc}", err=True)
         raise click.Abort() from exc

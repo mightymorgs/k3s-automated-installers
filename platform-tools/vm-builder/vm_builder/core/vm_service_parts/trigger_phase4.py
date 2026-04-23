@@ -9,7 +9,7 @@ from vm_builder.core.models import PhaseRunResult
 from vm_builder.core.workflow_names import WorkflowNames
 
 
-def trigger_phase4(self, vm_name: str) -> PhaseRunResult:
+def trigger_phase4(self, vm_name: str, **_: object) -> PhaseRunResult:
     """Trigger the Phase 4 dynamic app-configuration workflow via gh CLI.
 
     Phase 4 reads installed apps from BWS inventory and runs config

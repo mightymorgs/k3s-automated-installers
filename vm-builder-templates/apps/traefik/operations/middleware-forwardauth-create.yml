@@ -85,16 +85,15 @@
   become: false
 
   vars:
-    # Authentication URL (required if not using BWS)
-    auth_url: "{{ auth_url | default(omit) }}"
-
-    # Optional parameters with defaults
-    middleware_name: "authentik-forwardauth"
-    namespace: "authentik"
-    trust_forward_header: "{{ trust_forward_header | default(true) }}"
+    # Optional parameters with defaults — use `_input` suffix to accept overrides
+    # from extra-vars without creating a self-referential recursion (a var cannot
+    # reference itself via `| default()` when `-e <same_name>` is passed).
+    middleware_name: "{{ middleware_name_input | default('authentik-forwardauth') }}"
+    namespace: "{{ middleware_namespace_input | default('authentik') }}"
+    trust_forward_header_effective: "{{ trust_forward_header_input | default(true) }}"
 
     # Authentik standard response headers
-    auth_response_headers: "{{ auth_response_headers | default([
+    auth_response_headers_effective: "{{ auth_response_headers_input | default([
       'X-authentik-username',
       'X-authentik-groups',
       'X-authentik-email',
@@ -109,7 +108,7 @@
     ]) }}"
 
     # Optional request headers to forward
-    auth_request_headers: "{{ auth_request_headers | default([]) }}"
+    auth_request_headers_effective: "{{ auth_request_headers_input | default([]) }}"
 
     # BWS integration
     bws_access_token: "{{ lookup('env', 'BWS_ACCESS_TOKEN') | default('', true) }}"
@@ -151,15 +150,16 @@
             ingress_domain: "{{ inventory.ingress.domain | default('') }}"
             tailnet: "{{ inventory._state.tailscale.tailnet | default('') }}"
 
-        - name: Construct auth URL for Cloudflare mode
-          when: ingress_mode == 'cloudflare'
+        # Use cluster-internal URL so traefik → authentik traffic stays
+        # inside the cluster. This avoids a chicken-and-egg routing issue
+        # (traefik calling itself via the public URL) and removes the need
+        # for per-app outpost-bypass IngressRoutes for the ForwardAuth
+        # verify path (the OAuth callback path still needs to be reachable
+        # externally and is handled by the per-app ingressroute template).
+        - name: Construct cluster-internal auth URL
+          when: ingress_mode in ['cloudflare', 'tailscale']
           ansible.builtin.set_fact:
-            final_auth_url: "https://{{ ingress_domain }}/outpost.goauthentik.io/auth/traefik"
-
-        - name: Construct auth URL for Tailscale mode
-          when: ingress_mode == 'tailscale'
-          ansible.builtin.set_fact:
-            final_auth_url: "https://authentik.{{ vm_hostname }}.{{ tailnet }}/outpost.goauthentik.io/auth/traefik"
+            final_auth_url: "http://authentik.authentik.svc.cluster.local:9000/outpost.goauthentik.io/auth/traefik"
 
     # ========== 2. VALIDATE AUTH URL ==========
     - name: Validate auth_url is set
@@ -177,7 +177,7 @@
           - "Middleware Name: {{ middleware_name }}"
           - "Namespace: {{ namespace }}"
           - "Auth URL: {{ final_auth_url }}"
-          - "Trust Forward Headers: {{ trust_forward_header }}"
+          - "Trust Forward Headers: {{ trust_forward_header_effective }}"
 
     # ========== 3. ENSURE NAMESPACE EXISTS ==========
     - name: Check if namespace exists
@@ -217,9 +217,9 @@
           spec:
             forwardAuth:
               address: "{{ final_auth_url }}"
-              trustForwardHeader: "{{ trust_forward_header }}"
-              authResponseHeaders: "{{ auth_response_headers }}"
-              authRequestHeaders: "{{ auth_request_headers if auth_request_headers | length > 0 else omit }}"
+              trustForwardHeader: "{{ trust_forward_header_effective }}"
+              authResponseHeaders: "{{ auth_response_headers_effective }}"
+              authRequestHeaders: "{{ auth_request_headers_effective if auth_request_headers_effective | length > 0 else omit }}"
       register: middleware_result
 
     # ========== 5. UPDATE BWS STATE (if enabled) ==========
@@ -274,10 +274,10 @@
           - "Name: {{ middleware_name }}"
           - "Namespace: {{ namespace }}"
           - "Auth URL: {{ final_auth_url }}"
-          - "Trust Forward Headers: {{ trust_forward_header }}"
+          - "Trust Forward Headers: {{ trust_forward_header_effective }}"
           - ""
           - "Response Headers Forwarded:"
-          - "{{ auth_response_headers | to_nice_yaml }}"
+          - "{{ auth_response_headers_effective | to_nice_yaml }}"
           - ""
           - "Usage in IngressRoute:"
           - "  spec:"

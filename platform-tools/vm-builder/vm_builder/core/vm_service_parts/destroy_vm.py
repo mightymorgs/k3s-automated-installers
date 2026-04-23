@@ -32,6 +32,8 @@ def destroy_vm(self, vm_name: str, hypervisor_key: Optional[str] = None) -> Phas
 
     if not hypervisor_key:
         hypervisor_key = self._auto_detect_hypervisor(platform, client)
+    elif not hypervisor_key.startswith("inventory/hypervisors/"):
+        hypervisor_key = f"inventory/hypervisors/{hypervisor_key}"
 
     workflow = WorkflowNames.DESTROY_VM
     repo_args = self._gh_repo_args()

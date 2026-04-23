@@ -34,7 +34,7 @@ def _ensure_runner_label(hostname: str, label: str) -> None:
     )
 
 
-def trigger_phase5(self, vm_name: str) -> PhaseRunResult:
+def trigger_phase5(self, vm_name: str, **_: object) -> PhaseRunResult:
     """Trigger the Phase 5 ingress and SSO deployment workflow via gh CLI.
 
     Phase 5 deploys Traefik ingress, Authentik SSO, and auto-generates

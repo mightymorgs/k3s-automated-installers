@@ -21,6 +21,10 @@ def deploy_vm(self, vm_name: str, hypervisor_key: Optional[str] = None) -> VmDep
 
     if not hypervisor_key:
         hypervisor_key = self._auto_detect_hypervisor(platform, client)
+    elif not hypervisor_key.startswith("inventory/hypervisors/"):
+        # Allow callers to pass the short hypervisor name; the workflow
+        # expects the full BWS key so prefix it.
+        hypervisor_key = f"inventory/hypervisors/{hypervisor_key}"
 
     repo_args = self._gh_repo_args()
     start = time.monotonic()
